@@ -33,10 +33,53 @@
 
 ## 已知边界（截至 A 形态完成时）
 
-- 未在真实 GPU 环境跑过（Mac 无法运行模型）——usage 计数口径（prompt_tokens 含缓存命中）、
-  `reasoning_content` 的实际呈现、切换延迟体验，均归 **llamapad M4 真机联调** 时校准
+- ~~未在真实 GPU 环境跑过~~ **已于 2026-08-25 在 GPU 服务器（RTX 3090，llamapad M4 真机联调环境）完成
+  API 层校准**，结果见下节「真机校准结果」。dsh Web UI 挂载的端到端冒烟（本手册步骤 1-6）仍待执行
 - 等待切换期间 dsh 界面无进度提示（静默）——设计决策：注入文本会污染会话历史上下文，
   依据见 [调研文档](../research/2026-08-24-dsh-plugin-research.md) §5
+
+
+## 真机校准结果（2026-08-25，llamapad v0.1.0-rc / RTX 3090 / Qwen3.6-35B-A3B）
+
+用 `lp_` token 直接打面板 API 复现插件的调用链，校准 A 形态遗留的三项：
+
+**控制面**（`PanelClient` 的 5 个方法 + 就绪探测，全部 Bearer 鉴权）：
+
+| 端点 | 结果 |
+|---|---|
+| `GET /api/v1/models` | 200，字段与 `PanelModelView` 一致（name/displayName/namespace/quant/sizeBytes/hostPort/status） |
+| `GET /api/v1/models/:name` | 200 |
+| `GET /api/v1/runtime/status` | 200，`{running:{model,displayName,hostPort}}` 与 `PanelRuntimeStatus` 一致 |
+| `POST /api/v1/models/:name/start` | 200；不存在的模型 → **404**（与 `codeFor` 的 MODEL_NOT_FOUND 映射一致） |
+| `GET /api/v1/proxy/llama/health` | 见下「就绪探测」 |
+| 无 token 访问 | **401**（与 AUTH 映射一致） |
+
+**就绪探测语义（关键，此前未验证）**：模型加载中 `/api/v1/proxy/llama/health` 返回 **503** 而非 200，
+`llamaHealth()` 的 `res.ok` 为 false → 正确继续轮询；就绪后转 200，且**此时立即发推理请求即成功**
+（不早报）。27B 冷启动实测 **t+40s** 转 200，远低于 `startTimeoutMs` 默认 300s。
+
+注意两种启动路径的耗时分布不同，插件均能正确处理：
+- **冷启动**：`startModel()` 快速返回 → health 503 → 轮询至 200（27B 实测 40s）
+- **热启动**（模型文件在 page cache）：`startModel()` 内部阻塞至就绪才返回（35B 实测约 31s）→ 返回后 health 立即 200
+
+**校准项①usage 计数**：需请求带 `stream_options.include_usage`。末帧 usage 形如
+`{"completion_tokens":1032,"prompt_tokens":21,"total_tokens":1053,"prompt_tokens_details":{"cached_tokens":0}}`
+——`prompt_tokens_details.cached_tokens` 确实存在，口径疑问可关闭。
+
+**校准项②reasoning_content**：`translate.ts` 的处理**正确无需改动**。实测一次带思考的对话：
+779 帧 `delta.reasoning_content` → 249 帧 `delta.content`，切换点清晰，插件会先开 reasoning 块再开 text 块。
+
+⚠️ 两个使用注意：
+1. **是否产生 `reasoning_content` 取决于 llamapad 侧模型配置的 `enable_thinking`**（llamapad M4 已改为经容器
+   env `LLAMA_CHAT_TEMPLATE_KWARGS` 注入，`--reasoning-format none` 被证伪不等价）。关掉思考则无 reasoning 块。
+2. **`max_tokens` 给小了会全是 reasoning 没有 content**——实测 `max_tokens:300` 时思考未结束即截断，
+   300 帧全为 reasoning_content、content 帧数为 0。dsh 侧配置 max tokens 时需给思考留出预算。
+
+**校准项③切换延迟**：见上「就绪探测」。默认 `startTimeoutMs: 300000` 对 27B/35B 级别模型有充足余量。
+
+**依赖的 llamapad 修复**：proxy 模式依赖 llamapad M4 的缺陷 #3 修复（`PANEL_LLAMA_HOST`，
+面板容器内 127.0.0.1 不通向兄弟容器发布端口）。llamapad 早于该修复的版本，容器化部署下 proxy 模式不可用。
+
 
 ## 常见故障
 

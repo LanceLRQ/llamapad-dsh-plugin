@@ -4,7 +4,7 @@
 把 [llamapad](https://github.com/LanceLRQ/llamapad) 管理的本地 llama.cpp 模型接入 dsh——在 dsh 的
 模型选择器里按名字选用，插件自动完成「停旧起新 → 等待就绪 → 转发推理流量」，llamapad 侧零改动。
 
-**状态：A 形态（LLM 适配器）已实现并通过全部测试（41 单测 + 4 假面板 E2E）。**
+**状态：A 形态（LLM 适配器）已实现并通过全部测试（41 单测 + 4 假面板 E2E），API 层已在真实 GPU 环境校准。**
 计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
 真机冒烟步骤见 [docs/manual-smoke.md](docs/manual-smoke.md)。
 
@@ -37,7 +37,7 @@
 ## 开发
 
 ```bash
-npm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:20171
+npm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://10.22.33.1:20172
 npm test              # 单元测试
 npm run test:e2e      # 假面板 E2E（无需真实 llamapad / GPU）
 npm run typecheck
