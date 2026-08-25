@@ -25,5 +25,6 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 
 ## 当前阶段
 
-A 形态（LLM 适配器）计划已定稿：`docs/plans/2026-08-24-a-form-adapter.md`，待逐任务执行。
-B 形态（管理工具插件）只有设计稿（`docs/design/`），A 落地后再细化实施。
+**A 形态（LLM 适配器）已完成**：9 任务全部落地，41 单测 + 4 假面板 E2E 全绿（实施记录与偏差见
+计划文件末尾）。待办：GitHub 建仓后推送；真机冒烟（docs/manual-smoke.md）与 usage/reasoning
+校准归 llamapad M4；B 形态（管理工具插件）按 docs/design 设计稿另行细化实施。

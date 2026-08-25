@@ -1539,3 +1539,23 @@ Expected: 全部通过。
 - B 形态工具插件（设计稿见 docs/design/b-form-tools-design.md，A 落地后再细化）
 - dsh Web UI 内嵌控制面板（分期决策见调研文档 §6）
 - 发布 npm / 打包（dev 期以 TS 源码绝对路径挂载；发布流程另立计划）
+
+---
+
+## 实施记录（2026-08-24 执行完毕）
+
+9 个任务全部完成，41 单测 + 4 E2E 全绿，typecheck 无错。与计划的偏差（均为核对真实包后修正）：
+
+1. **tool-result 块字段**（T3）：真实形状是 `{ type:'tool-result', toolCallId: CallId, content: ContentBlock[] }`
+   （计划假设 `callId` + 字符串 content）——按包修正，非文本块忽略
+2. **BlockAssembler API**（T7）：喂块是 `push(chunk)`，`blocks()`/`message()` 是方法，
+   `usage`/`finish` 是 getter 属性（计划的 `usage()` 调用写法会 TypeError）
+3. **schemastery 类型**（T6）：`Schema<Config>` 收紧了输入类型导致部分输入调用不过 typecheck，
+   改为 `Schema<Partial<Config>, Config>`（输入/输出双参数是其真实形态）；`.role('secret')` 存在
+4. **Vitest 4 无 `toSatisfy`**：全部改用 `rejects.toMatchObject({ code })`（LlmError.code 自有属性，等价）
+5. **计划测试缺陷修正**：T2 abort 用例重写（原版因合流 + 默认健康态测不到 abort）；
+   T7 合流计数 `2+1` 改为 `2`（state 跨用例累积的真实计数）
+6. **杂项**：`.mjs` 里去掉 TS 非空断言语法；新增 `test/e2e/fake-panel-server.d.mts` 类型声明
+   （allowJs 关闭时给 .mjs 提供 TS 类型）
+
+E2E 有效性做过变异验证：改坏假面板 usage 帧 → 冷启动用例即失败，恢复后通过。
