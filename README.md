@@ -4,7 +4,9 @@
 把 [llamapad](https://github.com/LanceLRQ/llamapad) 管理的本地 llama.cpp 模型接入 dsh——在 dsh 的
 模型选择器里按名字选用，插件自动完成「停旧起新 → 等待就绪 → 转发推理流量」，llamapad 侧零改动。
 
-**状态：规划完成，实施中。** 计划见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)。
+**状态：A 形态（LLM 适配器）已实现并通过全部测试（41 单测 + 4 假面板 E2E）。**
+计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
+真机冒烟步骤见 [docs/manual-smoke.md](docs/manual-smoke.md)。
 
 ## 工作方式
 
@@ -30,7 +32,7 @@
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
 
-挂载示例见 [examples/cordis.yml](examples/cordis.yml)（待 Task 6 落地）。
+挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
 ## 开发
 
@@ -43,6 +45,7 @@ npm run typecheck
 
 ## 文档索引
 
-- [A 形态实施计划](docs/plans/2026-08-24-a-form-adapter.md)
+- [A 形态实施计划](docs/plans/2026-08-24-a-form-adapter.md)（含实施记录）
+- [手工冒烟手册](docs/manual-smoke.md)
 - [dsh 插件调研归档](docs/research/2026-08-24-dsh-plugin-research.md)（契约细节 + UX 评估依据）
 - [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（暂不实现）
