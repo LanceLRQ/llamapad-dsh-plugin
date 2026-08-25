@@ -2,6 +2,7 @@
   "name": "llamapad-dsh-plugin",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "DeepSeek Harness LLM adapter plugin backed by llamapad-managed llama.cpp containers",
   "scripts": {
