@@ -54,6 +54,16 @@ commit message，如 `release: v0.1.1`）。这样每份制品都能溯源：版
 npm run pack:dsh    # 无门禁、不升版本，直接 npm pack
 ```
 
+⚠️ 实测坑：**同版本同文件名的 tgz 重新 `add` 到已装的 profile 不会刷新**——pnpm 按依赖
+spec 路径缓存，内容变了但路径没变就跳过重装。要刷新就换文件名（复制改名再 add），或改用
+本地目录方式（目录重 add 会刷新，见 README「本地调试（不发布版本）」）。
+
+## 本地调试（不发布版本）
+
+开发期预览不需要 release/pack：`--patch` 直挂源码（`examples/dev-preview.yml`，npx 安装的
+dsh CLI 也能加载 TS 源码，重启 dsh 生效），或 dev profile 装本地目录后每轮 `npm run build`
++ 重 `add`。三种方式的对比与实测结论见 README「本地调试（不发布版本）」。
+
 ## 用户侧如何更新到新版
 
 已装旧版的 profile 重新 `add` 新 tgz 即覆盖更新（已实测 0.1.0 → 0.1.1：依赖指向新制品、

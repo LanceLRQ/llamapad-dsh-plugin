@@ -14,7 +14,9 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   TDD——先写失败测试再实现
 - **打包发布**：内容变更后 `npm run release`（清洁检查→门禁→版本递增→构建→`npm pack` 出 tgz，
   流程/版本策略/用户侧更新见 `docs/packaging.md`）。产物不入库（.gitignore 忽略 `*.tgz`/`dist/`）；
-  0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `npm run pack:dsh` 同版本重打
+  0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `npm run pack:dsh` 同版本重打。
+  本地调试不发布版本：`--patch` 直挂 `src/index.ts`（`examples/dev-preview.yml`，安装版 CLI 可加载
+  TS）；profile 方式用**目录**重 add 刷新（同版本 tgz 重 add 不刷新——pnpm 按 spec 缓存，实测确认）
 
 ## 关键约束
 

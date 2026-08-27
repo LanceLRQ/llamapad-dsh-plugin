@@ -92,6 +92,32 @@ dsh web                            # 模型选择器出现面板里的模型
 注意：未配置就启动 / 启动后仍看不到模型时，先确认上面两步都做了；配置未生效最常见的原因是
 用户层的行少了 `id: llamapad` 或写到了错误的 profile 目录。
 
+## 本地调试（不发布版本）
+
+**方式一：`--patch` 直挂源码（推荐——零构建零打包，不动 profile）**
+
+```bash
+LLAMAPAD_TOKEN=lp_xxx dsh web --patch /绝对路径/llamapad-dsh-plugin/examples/dev-preview.yml
+```
+
+模板见 [examples/dev-preview.yml](examples/dev-preview.yml)：`name` 直接指向 `src/index.ts`
+（已实测 npx 安装的 dsh CLI 也能加载 TS 源码），改完代码重启 dsh 即生效。`--patch` 作为
+argv 层叠加在当前 profile 之上，验证「源码 + 显式配置」组合最顺手。
+
+**方式二：dev profile + 本地目录安装（贴近真实安装形态，发版前演练用）**
+
+```bash
+npm run build
+dsh plugin --profile dev add /绝对路径/llamapad-dsh-plugin
+# 每轮改动后：npm run build && 重新执行同一条 add（实测目录重 add 会刷新实装拷贝）
+```
+
+⚠️ 注意坑：**同版本 tgz** 重新 `add` **不会**刷新——pnpm 按依赖 spec 路径缓存，文件名不变
+就跳过重装（实测确认）。要刷新已装的 tgz，换文件名（如复制改名 `-dev1.tgz`）或改用目录方式。
+
+**方式三：测试回路**——`npm test` / `npm run test:e2e`（假面板），改适配器逻辑的主回路，
+不需要 dsh 与真实面板。
+
 ## 开发
 
 ```bash
