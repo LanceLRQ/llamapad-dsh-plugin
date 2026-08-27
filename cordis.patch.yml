@@ -1,0 +1,6 @@
+# llamapad bundle 层：向 profile 注册 llamapad provider（LLM 适配器）。
+# 本层只声明插件行、不带配置——配置请放到用户层覆盖（后写的层按 id 整行胜出），
+# 模板见 examples/profile-patch.example.yml。
+- insert:
+    - id: llamapad
+      name: llamapad-dsh-plugin

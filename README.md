@@ -34,13 +34,74 @@
 
 挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
+## 安装到 dsh
+
+本包是标准 [dsh bundle](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)
+（`package.json` 声明 `dsh.bundle.patch`，运行时产物已预构建进 `dist/`）。装好后层会自动叠加，
+无需改任何代码；唯一要做的配置是把 `panelUrl`/`token` 写进你自己的 patch 层（见下）。
+
+**方式一：tarball 安装（推荐，零构建权限）**
+
+```bash
+# 仓库根目录打包（或直接用 Release 里附带的 tgz）
+npm run release         # 门禁 + 版本递增 + 构建 → llamapad-dsh-plugin-<版本>.tgz
+# 仅改了随包文档、不升版本时：npm run pack:dsh
+
+# 装进一个 dsh profile
+dsh plugin --profile <名> add ./llamapad-dsh-plugin-<版本>.tgz
+```
+
+**方式二：GitHub / 本地目录安装**
+
+```bash
+dsh plugin --profile <名> add github:LanceLRQ/llamapad-dsh-plugin   # 或本地 checkout 路径
+```
+
+git/目录安装拿的是源码，pnpm 会跑本包的 `prepare` 脚本现场构建；pnpm ≥10 默认拒绝执行依赖的
+构建脚本，按 dsh 的提示把它打印出的包名加进 profile 的 `pnpm-workspace.yaml` 再重跑一次：
+
+```yaml
+allowBuilds:
+  llamapad-dsh-plugin: true
+```
+
+**安装后配置（两种方式都要做这一步）**
+
+bundle 层只注册插件行、不带配置。编辑 profile 目录的 `cordis.patch.yml`
+（`$DSH_HOME/profiles/<名>/cordis.patch.yml`），按 id 覆盖 llamapad 行——
+完整模板见包内 [examples/profile-patch.example.yml](examples/profile-patch.example.yml)：
+
+```yaml
+- id: llamapad
+  name: llamapad-dsh-plugin
+  config:
+    panelUrl: http://192.168.1.10:8080
+    token: !!js process.env.LLAMAPAD_TOKEN
+```
+
+要把 agent 的默认模型指向 llamapad，在同一文件里再覆盖 `agent-loop` 行（模板同上）。没配
+`panelUrl`/`token` 就启动也不会拖垮 dsh：插件打一条警告后跳过注册，补好配置重启即可。
+
+**验证**
+
+```bash
+dsh --profile <名> --dump-config   # 应看到 "# == llamapad-dsh-plugin" 层与 llamapad 行
+dsh web                            # 模型选择器出现面板里的模型
+```
+
+注意：未配置就启动 / 启动后仍看不到模型时，先确认上面两步都做了；配置未生效最常见的原因是
+用户层的行少了 `id: llamapad` 或写到了错误的 profile 目录。
+
 ## 开发
 
 ```bash
 npm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://10.22.33.1:20172
+npm run build         # esbuild 打包 src/ → dist/index.js（@deepseek-ai/* 保持 external）
 npm test              # 单元测试
 npm run test:e2e      # 假面板 E2E（无需真实 llamapad / GPU）
 npm run typecheck
+npm run release         # 重新打包：门禁 + 版本递增 + 构建 + tgz（详见 docs/packaging.md）
+npm pack              # prepare 钩子自动先 build，产出可安装 tgz
 ```
 
 ## 文档索引

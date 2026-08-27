@@ -12,6 +12,9 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   （GPU 服务器出口；旧记的 `127.0.0.1:20171` 是 Mac 开发机地址，在本机不存在）
 - **测试**：`npm test`（单测）/ `npm run test:e2e`（假面板 E2E，无需真实环境）/ `npm run typecheck`；
   TDD——先写失败测试再实现
+- **打包发布**：内容变更后 `npm run release`（清洁检查→门禁→版本递增→构建→`npm pack` 出 tgz，
+  流程/版本策略/用户侧更新见 `docs/packaging.md`）。产物不入库（.gitignore 忽略 `*.tgz`/`dist/`）；
+  0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `npm run pack:dsh` 同版本重打
 
 ## 关键约束
 
@@ -30,6 +33,8 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 **A 形态（LLM 适配器）已完成**：9 任务全部落地，41 单测 + 4 假面板 E2E 全绿（实施记录与偏差见
 计划文件末尾）。**API 层真机校准已完成**（2026-08-25，llamapad M4 环境：三项校准全部通过，
 就绪探测 503→200 语义正确且不早报，`translate.ts` 的 reasoning 处理无需改动）。
+**已 bundle 化**（2026-08-27）：`dsh.bundle.patch` + dist 预构建，支持 `dsh plugin add` tgz
+安装/升级（真实 CLI 验证过安装与覆盖更新），打包见 `docs/packaging.md`。
 
 待办：
 - dsh Web UI 挂载的端到端冒烟（`docs/manual-smoke.md` 步骤 1-6）——需在装有 dsh 的机器上执行

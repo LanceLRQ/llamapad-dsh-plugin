@@ -1,0 +1,21 @@
+# 用户层配置示例：bundle 安装后（dsh plugin --profile <名> add ...），
+# 把这里的行放进 profile 目录的 cordis.patch.yml（$DSH_HOME/profiles/<名>/cordis.patch.yml）。
+# 覆盖按 id 匹配、整行替换 config，与 bundle 层的 llamapad 行对应。
+- id: llamapad
+  name: llamapad-dsh-plugin
+  config:
+    panelUrl: http://192.168.1.10:8080
+    token: !!js process.env.LLAMAPAD_TOKEN
+    # 远程/端口不暴露时用默认 proxy 模式；同机低延迟可改 direct：
+    # mode: direct
+    # llamaBaseUrl: http://192.168.1.10:18080
+
+# 让 agent 默认使用 llamapad 模型（provider 对应上面 config.provider，
+# model 为面板里的模型配置名；不需要 agent 默认切模型时可整段删掉）：
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents:
+      - id: main
+        provider: llamapad
+        model: qwen3-8b-q4
