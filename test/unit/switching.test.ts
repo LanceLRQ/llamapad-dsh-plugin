@@ -84,6 +84,22 @@ describe("createModelGate", () => {
     await expect(gate.ensure("a")).rejects.toMatchObject({ code: "MODEL_NOT_FOUND" });
     await expect(gate.ensure("b")).resolves.toBeUndefined();
   });
+
+  it("排空参数透传：ensure 的 drain/drainTimeoutMs 原样带进 startModel", async () => {
+    const client = fakeClient();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a", { drain: true, drainTimeoutMs: 60000 });
+    expect(startModel).toHaveBeenCalledWith("a", { drain: true, drainTimeoutMs: 60000 });
+  });
+
+  it("不传排空参数时 startModel 第二个参数为 undefined（向后兼容）", async () => {
+    const client = fakeClient();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a");
+    expect(startModel).toHaveBeenCalledWith("a", undefined);
+  });
 });
 
 // 测试内小工具

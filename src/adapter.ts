@@ -1,7 +1,8 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
-import type { PanelClient } from "./panel-client";
-import type { ModelGate } from "./switching";
+import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelRuntimeStatus } from "./panel-client";
+import { EnsureError, type ModelGate } from "./switching";
+import { decideRoute, type ChatBehavior } from "./routing";
 import { buildChatBody } from "./openai-wire";
 import { translateOpenAiSse } from "./translate";
 
@@ -11,8 +12,14 @@ export interface LlamapadAdapterOptions {
   token: string;
   mode: "proxy" | "direct";
   llamaBaseUrl?: string;
+  /** 聊天路由档位，默认 strict（见 routing.ts） */
+  chatBehavior?: ChatBehavior;
   startTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** auto-switch 档触发 start 时是否让服务端排空在途推理，默认 true */
+  drainOnSwitch?: boolean;
+  /** 排空等待的最长时间（毫秒），默认 60000，仅 drainOnSwitch=true 时生效 */
+  drainTimeoutMs?: number;
   defaultContextWindow?: number;
   fetchImpl?: typeof fetch;
 }
@@ -50,25 +57,53 @@ export class LlamapadAdapter extends LlmAdapter {
     if (options.reasoningEffort !== undefined) {
       throw new LlmError("llamapad/llama.cpp 不支持 reasoning effort 控制", "UNSUPPORTED");
     }
+    const behavior = this.options.chatBehavior ?? "strict";
+    let targetModel: string;
+    // direct 模式拼 URL 要用的运行态：proceed 分支用路由判定时读到的那份即可（没发生启停，
+    // 数据不会过期）；start 分支必须在 gate.ensure() 之后重新查一次——否则切到端口不同的
+    // 模型时，这里仍是切换前的旧运行态，direct URL 会拼出已经停掉的旧端口。
+    // proxy 模式压根不看 hostPort（走面板反代），那次重查纯属白跑，故按 mode 收口。
+    let runningForUrl: PanelRuntimeStatus["running"] = null;
     try {
-      await this.options.gate.ensure(options.model, {
-        ...(options.signal ? { signal: options.signal } : {}),
-        ...(this.options.startTimeoutMs !== undefined ? { timeoutMs: this.options.startTimeoutMs } : {}),
-        ...(this.options.pollIntervalMs !== undefined ? { pollIntervalMs: this.options.pollIntervalMs } : {}),
-      });
+      // busy=1 只有 strict/passthrough 的报错文案用得上；auto-switch 不会走到报错分支，省这次查询
+      const status = await this.options.client.runtimeStatus(behavior === "auto-switch" ? undefined : { busy: true });
+      const decision = decideRoute(behavior, options.model, status);
+      if (decision.action === "error") {
+        throw new EnsureError(decision.message, decision.code);
+      }
+      if (decision.action === "start") {
+        const drainOnSwitch = this.options.drainOnSwitch ?? true;
+        await this.options.gate.ensure(decision.model, {
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(this.options.startTimeoutMs !== undefined ? { timeoutMs: this.options.startTimeoutMs } : {}),
+          ...(this.options.pollIntervalMs !== undefined ? { pollIntervalMs: this.options.pollIntervalMs } : {}),
+          ...(drainOnSwitch
+            ? { drain: true, drainTimeoutMs: this.options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS }
+            : {}),
+        });
+        targetModel = decision.model;
+        if (this.options.mode === "direct") {
+          runningForUrl = (await this.options.client.runtimeStatus()).running;
+        }
+      } else {
+        targetModel = decision.targetModel;
+        runningForUrl = status.running;
+      }
     } catch (error) {
       throw mapEnsureError(error, options.signal?.aborted === true);
     }
     const doFetch = this.options.fetchImpl ?? fetch;
     const url = this.options.mode === "direct"
-      ? `${this.options.llamaBaseUrl}/v1/chat/completions`
+      ? buildDirectUrl(this.options.llamaBaseUrl ?? "", runningForUrl, targetModel)
       : `${this.options.client.baseUrl}/api/v1/proxy/llama/v1/chat/completions`;
     const headers: Record<string, string> = { "content-type": "application/json", ...attributionHeaders() };
     if (this.options.mode === "proxy") headers.authorization = `Bearer ${this.options.token}`;
+    const body = buildChatBody(options);
+    body.model = targetModel;  // strict 保持原样；passthrough 可能已改写为运行中的模型
     const response = await doFetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(buildChatBody(options)),
+      body: JSON.stringify(body),
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok || response.body === null) {
@@ -87,10 +122,32 @@ function mapEnsureError(error: unknown, signalAborted: boolean): Error {
   if (signalAborted) return new DOMException("切换等待被取消", "AbortError");  // 运行时据此归类 aborted
   const code = (error as { code?: string }).code;
   if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
-    || code === "PANEL_UNREACHABLE" || code === "START_TIMEOUT" || code === "ABORTED") {
+    || code === "PANEL_UNREACHABLE" || code === "START_TIMEOUT" || code === "ABORTED"
+    || code === "MODEL_NOT_RUNNING") {
     return new LlmError((error as Error).message, code);
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * direct 模式的请求地址：主机名固定取 llamaBaseUrl，端口按目标模型当前的 hostPort 动态拼接。
+ * 拿不到 hostPort（未知运行态 / 运行的不是目标模型）时原样回落到静态 llamaBaseUrl——
+ * 这也是 auto-switch 切到 host_port 不同的模型时不再指向旧容器的关键：port 永远读自
+ * 「即将请求的这个模型」当前的运行态，而不是构造适配器时写死的那一个。
+ */
+function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["running"], targetModel: string): string {
+  // 面板在模型行已被删时会给 hostPort: null，用 == null 一并挡掉 null 与缺席
+  const hostPort = running?.model === targetModel ? running.hostPort : undefined;
+  if (hostPort == null) return `${llamaBaseUrl}/v1/chat/completions`;
+  try {
+    const parsed = new URL(llamaBaseUrl);
+    parsed.port = String(hostPort);
+    // 用 href 而非 origin：llamaBaseUrl 带路径前缀（反代场景）时 origin 会把它吞掉，
+    // 变成静默改写请求路径——只换端口，其余原样保留
+    return `${parsed.href.replace(/\/+$/, "")}/v1/chat/completions`;
+  } catch {
+    return `${llamaBaseUrl}/v1/chat/completions`;
+  }
 }
 
 function readCtxSize(overrides: unknown): number | undefined {

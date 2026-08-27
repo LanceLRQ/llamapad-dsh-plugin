@@ -5,7 +5,7 @@ import { createServer } from "node:http";
  * 状态机：start 置 running + readyAt；health 在 readyAt 前回 503。
  */
 export function createFakePanel({ loadMs = 100 } = {}) {
-  const state = { running: null, readyAt: 0, starts: [], chatRequests: [] };
+  const state = { running: null, readyAt: 0, starts: [], chatRequests: [], busy: null };
   const MODELS = [
     { name: "qwen-small", displayName: "Qwen 小", namespace: "main", ggufFile: "main/a.gguf", mmprojFile: null, status: "stopped", quant: "Q4_K_M", sizeBytes: 100, fileCount: 1, hostPort: 18080 },
     { name: "qwen-big", displayName: "Qwen 大", namespace: "main", ggufFile: "main/b.gguf", mmprojFile: null, status: "stopped", quant: "Q8_0", sizeBytes: 200, fileCount: 1, hostPort: 18080 },
@@ -16,16 +16,31 @@ export function createFakePanel({ loadMs = 100 } = {}) {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/api/v1/models") return json(200, { models: MODELS });
     if (req.method === "GET" && url.pathname === "/api/v1/runtime/status") {
-      return json(200, { running: state.running ? { model: state.running, hostPort: 18080 } : null });
+      const body = { running: state.running ? { model: state.running, hostPort: 18080 } : null };
+      if (url.searchParams.get("busy") === "1") body.busy = state.busy;
+      return json(200, body);
     }
     const startMatch = /^\/api\/v1\/models\/([^/]+)\/start$/.exec(url.pathname);
     if (req.method === "POST" && startMatch) {
-      const name = decodeURIComponent(startMatch[1]);
-      if (!MODELS.some((m) => m.name === name)) return json(404, { error: `模型不存在: ${name}` });
-      state.starts.push(name);
-      state.running = name;
-      state.readyAt = Date.now() + loadMs;
-      return json(200, { id: `cid-${state.starts.length}` });
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const name = decodeURIComponent(startMatch[1]);
+        if (!MODELS.some((m) => m.name === name)) return json(404, { error: `模型不存在: ${name}` });
+        let drainReq = {};
+        try { drainReq = body ? JSON.parse(body) : {}; } catch { drainReq = {}; }
+        state.starts.push(name);
+        state.running = name;
+        state.readyAt = Date.now() + loadMs;
+        const resBody = { id: `cid-${state.starts.length}` };
+        if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
+          // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
+          // 假面板没有真实在途推理，对应真机的冷启动场景 → skipped
+          resBody.drain = { drained: true, reason: "skipped" };
+        }
+        return json(200, resBody);
+      });
+      return;
     }
     if (req.method === "GET" && url.pathname === "/api/v1/proxy/llama/health") {
       return Date.now() >= state.readyAt && state.running ? json(200, { status: "ok" }) : json(503, { status: "loading" });

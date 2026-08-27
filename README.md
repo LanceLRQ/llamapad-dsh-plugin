@@ -2,11 +2,18 @@
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 LLM 适配器插件：
 把 [llamapad](https://github.com/LanceLRQ/llamapad) 管理的本地 llama.cpp 模型接入 dsh——在 dsh 的
-模型选择器里按名字选用，插件自动完成「停旧起新 → 等待就绪 → 转发推理流量」，llamapad 侧零改动。
+模型选择器里按名字选用，插件按 `chatBehavior` 档位把「选模型」与「容器启停」解耦（默认档下聊天
+路径完全不触发启停，在途输出流不会被切换打断），llamapad 侧零改动。
 
-**状态：A 形态（LLM 适配器）已实现并通过全部测试（41 单测 + 4 假面板 E2E），API 层已在真实 GPU 环境校准。**
+**状态：A 形态（LLM 适配器）+ 聊天路由与生命周期解耦（阶段一）已实现并通过全部测试
+（80 单测 + 5 假面板 E2E），API 层已在真实 GPU 环境校准。**
 计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
+聊天路由三档的设计与落地记录见
+[docs/design/chat-vs-lifecycle-decoupling.md](docs/design/chat-vs-lifecycle-decoupling.md)；
 真机冒烟步骤见 [docs/manual-smoke.md](docs/manual-smoke.md)。
+
+> ⚠️ **破坏性变化**：`chatBehavior` 默认值为 `strict`（0.x 阶段直接切换默认值，不做过渡期）。
+> 若你依赖旧版「选模型即切容器」的自动切换行为，请在配置里显式设置 `chatBehavior: auto-switch`。
 
 ## 工作方式
 
@@ -14,7 +21,14 @@
 - **数据面**（`/v1/chat/completions` SSE）双模式：
   - `proxy`（默认）：走 llamapad 面板反代——dsh 与 GPU 服务器不在同一网络时，llama.cpp 端口无需暴露
   - `direct`：同机低延迟场景直连 llama.cpp
-- 切换由 llamapad 的单模型语义承担（start 自带停旧起新）；插件内串行门 + 同目标合流避免并发抖动
+- **聊天路由 `chatBehavior` 三档**（决定「选模型」与「容器启停」的耦合程度）：
+  - `strict`（**默认**）：请求的模型与运行中的不一致，或没有模型在跑，一律报错引导去 llamapad
+    面板操作；聊天路径**完全不调 start**，在途输出流绝对安全。适合共享 GPU / 多会话场景
+  - `passthrough`：有模型在跑就发给它（名字对不上也照发，实际转发给运行中的那个模型）；没有
+    模型在跑时报错。适合「只想连上现在这个中转服务」的单人场景
+  - `auto-switch`：保留旧版「选谁起谁」行为，start 自带停旧起新（`drainOnSwitch` 默认让服务端
+    等待在途推理排空后再切）。适合独占 GPU 的单人场景
+- 插件内串行门 + 同目标合流避免并发抖动（仅 `auto-switch` 档会触发 start）
 - 切换等待期**静默**（不往对话注入提示文本——那会污染历史上下文，见
   [调研文档](docs/research/2026-08-24-dsh-plugin-research.md) §5）
 
@@ -27,8 +41,11 @@
 | `provider` | `llamapad` | provider 路由名 |
 | `mode` | `proxy` | `proxy` / `direct` |
 | `llamaBaseUrl` | — | direct 模式的 llama.cpp 基地址 |
-| `startTimeoutMs` | `300000` | 切换后等待就绪超时（大模型加载要 1-2 分钟以上） |
-| `pollIntervalMs` | `2000` | 就绪探测间隔 |
+| `chatBehavior` | `strict` | 聊天路由档位：`strict` / `passthrough` / `auto-switch`（见上「工作方式」） |
+| `startTimeoutMs` | `300000` | 切换后等待就绪超时（仅 `auto-switch` 档生效） |
+| `pollIntervalMs` | `2000` | 就绪探测间隔（仅 `auto-switch` 档生效） |
+| `drainOnSwitch` | `true` | 切换前是否让服务端排空在途推理（仅 `auto-switch` 档生效） |
+| `drainTimeoutMs` | `60000` | 排空等待的最长时间（仅 `auto-switch` 档且 `drainOnSwitch=true` 时生效） |
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
 
@@ -135,8 +152,8 @@ npm pack              # prepare 钩子自动先 build，产出可安装 tgz
 ## 文档索引
 
 - [A 形态实施计划](docs/plans/2026-08-24-a-form-adapter.md)（含实施记录）
-- [聊天路由与生命周期解耦（方向定稿，未实施）](docs/design/chat-vs-lifecycle-decoupling.md)
-  ——在途流保护 + `chatBehavior` 三档 + 显式生命周期入口的修订方案
+- [聊天路由与生命周期解耦](docs/design/chat-vs-lifecycle-decoupling.md)
+  ——阶段一（`chatBehavior` 三档 + 在途流保护）已实施；阶段二（显式生命周期入口）待排期
 - [手工冒烟手册](docs/manual-smoke.md)
 - [dsh 插件调研归档](docs/research/2026-08-24-dsh-plugin-research.md)（契约细节 + UX 评估依据）
 - [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（暂不实现）

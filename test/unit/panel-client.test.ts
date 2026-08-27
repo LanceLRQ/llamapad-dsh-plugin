@@ -65,6 +65,63 @@ describe("createPanelClient", () => {
     await expect(client.runtimeStatus()).resolves.toEqual({ running: { model: "a" } });
   });
 
+  it("runtimeStatus() 不带 busy 时不追加 query", async () => {
+    const { fn, calls } = fakeFetch([{ body: { running: null } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await client.runtimeStatus();
+    expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/status");
+  });
+
+  it("runtimeStatus({busy:true}) 追加 ?busy=1 并透传 busy 字段（null 代表不可知）", async () => {
+    const { fn, calls } = fakeFetch([{ body: { running: null, busy: { inferring: true, slotsRunning: 2 } } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    const result = await client.runtimeStatus({ busy: true });
+    expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/status?busy=1");
+    expect(result.busy).toEqual({ inferring: true, slotsRunning: 2 });
+  });
+
+  it("startModel 不带 drain 选项时不发请求体（向后兼容旧假面板）", async () => {
+    const { fn, calls } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await client.startModel("a");
+    expect(calls[0]!.init.body).toBeUndefined();
+  });
+
+  it("startModel 带 drain 选项时发 JSON 请求体", async () => {
+    const { fn, calls } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await client.startModel("a", { drain: true, drainTimeoutMs: 60000 });
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ drain: true, drainTimeoutMs: 60000 });
+    expect((calls[0]!.init.headers as any)["content-type"]).toBe("application/json");
+  });
+
+  it("startModel 不带 drainTimeoutMs 时用默认 requestTimeoutMs 做单次请求超时", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const { fn } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+    await client.startModel("a");
+    expect(spy).toHaveBeenCalledWith(5000);
+    spy.mockRestore();
+  });
+
+  it("startModel 带 drainTimeoutMs 时超时覆盖为 max(requestTimeoutMs, drainTimeoutMs+10000)（避免排空未完客户端先 abort）", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const { fn } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+    await client.startModel("a", { drain: true, drainTimeoutMs: 60000 });
+    expect(spy).toHaveBeenCalledWith(70000);
+    spy.mockRestore();
+  });
+
+  it("startModel 只传 drain 不传 drainTimeoutMs → 仍按服务端默认 60s 放宽超时（否则客户端会先 abort）", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const { fn } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+    await client.startModel("a", { drain: true });
+    expect(spy).toHaveBeenCalledWith(70000);
+    spy.mockRestore();
+  });
+
   it("getModel：404→null，200→行", async () => {
     const miss = fakeFetch([{ status: 404, body: { error: "no" } }]);
     await expect(createPanelClient({ ...base, fetch: miss.fn as any }).getModel("x")).resolves.toBeNull();

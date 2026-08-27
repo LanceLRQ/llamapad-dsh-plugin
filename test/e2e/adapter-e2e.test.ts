@@ -17,9 +17,14 @@ beforeAll(async () => {
 });
 afterAll(() => server.close());
 
+// 假面板的既有 4 条基线用例沿用旧版「选谁起谁」语义，显式钉住 auto-switch 档；
+// chatBehavior 新默认值 strict 的行为由下面新增的用例单独覆盖。
 function makeAdapter() {
   const client = createPanelClient({ baseUrl, token: "lp_e2e", requestTimeoutMs: 2_000 });
-  return new LlamapadAdapter({ client, gate: createModelGate(client), token: "lp_e2e", mode: "proxy", pollIntervalMs: 20 });
+  return new LlamapadAdapter({
+    client, gate: createModelGate(client), token: "lp_e2e", mode: "proxy",
+    chatBehavior: "auto-switch", pollIntervalMs: 20,
+  });
 }
 
 async function drain(adapter: LlamapadAdapter, model: string) {
@@ -63,5 +68,18 @@ describe("LlamapadAdapter E2E（假面板）", () => {
 
   it("模型不存在 → LlmError MODEL_NOT_FOUND", async () => {
     await expect(drain(makeAdapter(), "nope")).rejects.toMatchObject({ code: "MODEL_NOT_FOUND" });
+  });
+
+  it("strict 档：请求非运行中模型 → MODEL_NOT_RUNNING，且假面板没有收到任何新的 start 请求", async () => {
+    // 先用 auto-switch 把 qwen-small 稳定跑起来，确定下面 strict 场景的前置条件
+    await drain(makeAdapter(), "qwen-small");
+    const startsBefore = state.starts.length;
+    const client = createPanelClient({ baseUrl, token: "lp_e2e", requestTimeoutMs: 2_000 });
+    const strictAdapter = new LlamapadAdapter({
+      client, gate: createModelGate(client), token: "lp_e2e", mode: "proxy", chatBehavior: "strict",
+    });
+    await expect(drain(strictAdapter, "qwen-big")).rejects.toMatchObject({ code: "MODEL_NOT_RUNNING" });
+    // 本次改造的核心保证：strict 档聊天路径完全不触发 start，在途流不会被杀
+    expect(state.starts).toHaveLength(startsBefore);
   });
 });

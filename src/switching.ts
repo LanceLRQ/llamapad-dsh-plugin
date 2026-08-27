@@ -9,7 +9,9 @@ import type { PanelClient } from "./panel-client";
  */
 
 export type EnsureErrorCode =
-  | "MODEL_NOT_FOUND" | "MODEL_FILES_MISSING" | "AUTH" | "PANEL_UNREACHABLE" | "START_TIMEOUT" | "ABORTED";
+  | "MODEL_NOT_FOUND" | "MODEL_FILES_MISSING" | "AUTH" | "PANEL_UNREACHABLE" | "START_TIMEOUT" | "ABORTED"
+  // 聊天路由（routing.ts）判定为"无可用运行中模型"时抛出，走本文件既有的 EnsureError → LlmError 映射链
+  | "MODEL_NOT_RUNNING";
 
 export class EnsureError extends Error {
   constructor(message: string, readonly code: EnsureErrorCode) { super(message); this.name = "EnsureError"; }
@@ -19,6 +21,9 @@ export interface EnsureOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   pollIntervalMs?: number;
+  /** auto-switch 档切换时可选：让服务端等待在途推理排空后再停旧起新 */
+  drain?: boolean;
+  drainTimeoutMs?: number;
 }
 
 export interface ModelGate {
@@ -34,8 +39,14 @@ export function createModelGate(client: PanelClient): ModelGate {
   async function ensureOnce(model: string, options: EnsureOptions): Promise<void> {
     const status = await client.runtimeStatus();
     if (status.running?.model === model) return;
+    const drainOptions = options.drain !== undefined || options.drainTimeoutMs !== undefined
+      ? {
+          ...(options.drain !== undefined ? { drain: options.drain } : {}),
+          ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+        }
+      : undefined;
     try {
-      await client.startModel(model);
+      await client.startModel(model, drainOptions);
     } catch (error) {
       const code = (error as { code?: string }).code;
       if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH") {

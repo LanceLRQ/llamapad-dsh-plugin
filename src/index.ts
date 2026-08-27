@@ -1,7 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { LlamapadAdapter } from "./adapter";
-import { createPanelClient } from "./panel-client";
+import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
 import { createModelGate } from "./switching";
 
 export interface Config {
@@ -10,8 +10,11 @@ export interface Config {
   provider: string;
   mode: string;
   llamaBaseUrl?: string;
+  chatBehavior: string;
   startTimeoutMs: number;
   pollIntervalMs: number;
+  drainOnSwitch: boolean;
+  drainTimeoutMs: number;
   requestTimeoutMs: number;
   defaultContextWindow?: number;
 }
@@ -23,8 +26,15 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   provider: Schema.string().default("llamapad").description("provider 路由名（agent 配置的 provider 字段）"),
   mode: Schema.string().default("proxy").description("推理通道：proxy=走面板反代（默认，llama.cpp 端口无需暴露）；direct=直连 llama.cpp（需 llamaBaseUrl）"),
   llamaBaseUrl: Schema.string().description("direct 模式下 llama.cpp 基地址，如 http://192.168.1.10:18080"),
-  startTimeoutMs: Schema.number().default(300000).description("切换后等待模型就绪的超时（毫秒）"),
-  pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒）"),
+  chatBehavior: Schema.string().default("strict").description(
+    "聊天路由档位：strict（默认）=请求模型与运行中模型不一致或无模型在跑时报错，聊天路径完全不触发启停，"
+    + "在途流绝对安全；passthrough=有模型在跑就发给它（名字对不上也照发），没跑时同样报错；"
+    + "auto-switch=保留旧版「选谁起谁」行为，start 自带停旧起新",
+  ),
+  startTimeoutMs: Schema.number().default(300000).description("切换后等待模型就绪的超时（毫秒，仅 auto-switch 档生效）"),
+  pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒，仅 auto-switch 档生效）"),
+  drainOnSwitch: Schema.boolean().default(true).description("auto-switch 档切换前是否让服务端排空在途推理（仅 auto-switch 档生效）"),
+  drainTimeoutMs: Schema.number().default(DEFAULT_DRAIN_TIMEOUT_MS).description("排空等待的最长时间（毫秒，仅 auto-switch 档且 drainOnSwitch=true 时生效）"),
   requestTimeoutMs: Schema.number().default(30000).description("面板控制面单请求超时（毫秒）"),
   defaultContextWindow: Schema.number().description("模型未配置 ctx_size 时 resolveModel 的兜底上下文窗口"),
 });
@@ -46,6 +56,9 @@ export function apply(ctx: Context, config: Config) {
   if (config.mode === "direct" && !config.llamaBaseUrl) {
     throw new Error("direct 模式需要配置 llamaBaseUrl");
   }
+  if (config.chatBehavior !== "strict" && config.chatBehavior !== "passthrough" && config.chatBehavior !== "auto-switch") {
+    throw new Error(`chatBehavior 必须是 strict / passthrough / auto-switch 之一，当前: ${config.chatBehavior}`);
+  }
   const client = createPanelClient({
     baseUrl: config.panelUrl,
     token: config.token,
@@ -57,9 +70,12 @@ export function apply(ctx: Context, config: Config) {
     gate,
     token: config.token,
     mode: config.mode,
+    chatBehavior: config.chatBehavior,
     ...(config.llamaBaseUrl ? { llamaBaseUrl: config.llamaBaseUrl } : {}),
     ...(config.startTimeoutMs ? { startTimeoutMs: config.startTimeoutMs } : {}),
     ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
+    drainOnSwitch: config.drainOnSwitch,
+    ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
     ...(config.defaultContextWindow ? { defaultContextWindow: config.defaultContextWindow } : {}),
   }));
 }

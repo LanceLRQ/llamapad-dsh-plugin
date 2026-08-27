@@ -1,6 +1,7 @@
 # 聊天路由与容器生命周期解耦（A 形态修订）
 
-> 状态：**方向已定稿，未实施**。实施排期待定（用户将与服务端侧调整一并启动）。
+> 状态：**阶段一（第 2 节）已实施**（2026-08-27，`chatBehavior` 三档 + 排空参数 + 动态端口拼接，
+> 80 单测 + 5 假面板 E2E 全绿）。**阶段二（第 3 节）未启动**，按成本阶梯待排期。
 > 背景：2026-08-27 实测预览后发现 A 形态「选模型即切容器」的隐含语义与产品设想相悖，本文记录差异、目标行为与分阶段修改方案。
 
 ## 1. 问题：在途对话会被切换杀死
@@ -31,18 +32,23 @@
 
 配套改动：
 
-- 错误码新增 `MODEL_NOT_RUNNING`（沿用 `EnsureError → LlmError` 映射链）
-- `startTimeoutMs` / `pollIntervalMs` 仅在 `auto-switch` 档生效（schema 描述同步）
-- 测试：routing 判定矩阵全覆盖；门逻辑复用现有单测基础
-- **实施时**同步修订 README 定位语（现为"自动完成停旧起新"，须改述并标注三档）
+- 错误码新增 `MODEL_NOT_RUNNING`（沿用 `EnsureError → LlmError` 映射链：`switching.ts` 的
+  `EnsureErrorCode` 与 `adapter.ts` 的 `mapEnsureError` 白名单都已加）
+- `startTimeoutMs` / `pollIntervalMs` 仅在 `auto-switch` 档生效（schema 描述已同步）
+- 测试：`src/routing.ts` 的 `decideRoute()` 纯函数、判定矩阵全覆盖（`test/unit/routing.test.ts`）；
+  门逻辑复用现有单测基础
+- README 定位语已改述为三档说明，并标注默认档变更为破坏性变化
 
-### 实施时的两个确认项（开放问题）
+### 两个开放问题的定案（实施时落地）
 
-1. `passthrough` × `direct` 模式的组合：direct 用静态 `llamaBaseUrl`，而不同模型的
-   `hostPort` 可能不同——直连透传要么假设固定端口，要么改为按 `runtimeStatus().running.hostPort`
-   动态拼接。实施时选定并写死测试。
-2. dsh 模型选择器的标签语义：strict 档下选中项 ≠ 运行中项属于常态，确认 UI 是否有歧义提示需求
-   （大概率无需，错误消息足够）。
+1. **`passthrough` × `direct` 组合**：采用动态拼接——主机名取自 `llamaBaseUrl`，端口取
+   `runtimeStatus().running.hostPort`；拿不到 hostPort 时原样回落到 `llamaBaseUrl`（`adapter.ts`
+   的 `buildDirectUrl()`）。这同时修掉了一个既有隐患：`auto-switch` 档切到 host_port 不同的
+   模型时，静态 `llamaBaseUrl` 会指向已经停掉的旧端口——现在 `direct` 模式的 `start` 分支会在
+   `gate.ensure()` 之后重新查一次 `runtimeStatus()` 取最新端口（`proxy` 模式走面板反代、不看
+   hostPort，不做这次多余往返）。
+2. **dsh 模型选择器的标签语义**：不做任何 UI 提示，错误消息已经说清「运行中是谁、请求的是谁、
+   下一步怎么做」，足够消除歧义。
 
 ## 3. 阶段二：生命周期控制的显式入口（按成本三级阶梯）
 
@@ -58,15 +64,25 @@ UI 操作」提前部分兑现；B 形态其余管理功能（文件/下载等�
 
 ## 4. 服务端侧关联事项（llamapad，供一并调整时参考）
 
-均为可选增强，不影响插件侧阶段一落地：
+**均已落地**（llamapad 侧与插件侧阶段一同批实现），插件侧按下述冻结契约调用：
 
-1. **优雅切换/排空**：start 接口可选支持「等待在途推理结束后再停旧」（drain 或 timeout 参数）
-   ——落地后 `auto-switch` 档也能做到切换不断流，三档语义更完整
-2. **忙碌状态查询**：暴露"当前是否有推理进行中"的查询（或并入 runtime/status），供 strict/
-   passthrough 档给出更友好的提示，以及切换前检查
-3. **CORS**：若走阶段二第 2/3 步让浏览器直连面板 API，需要面板放行来源；host RPC 方案则不需要
+1. **优雅切换/排空**：`POST /api/v1/models/:name/start` 接受可选体
+   `{ drain?: boolean, drainTimeoutMs?: number }`，响应追加 `drain: { drained, reason }`。
+   `auto-switch` 档调用时默认带上（`drainOnSwitch` 配置默认 `true`，`drainTimeoutMs` 默认
+   `60000`）。`reason` 取值固定为 `idle` / `timeout` / `unavailable` / `skipped`；**只要请求
+   里传了 `drain`，响应就一定带 `drain` 字段**（冷启动无旧容器可停时为 `skipped`），调用方
+   不必区分"字段缺席"与"没排空"。`panel-client.ts` 的 `startModel()` 单次调用超时相应覆盖为
+   `max(requestTimeoutMs, drainTimeoutMs + 10_000)`（只传 `drain` 不传超时时按服务端默认
+   60s 计算），避免排空未完客户端先 abort。
+2. **忙碌状态查询**：`GET /api/v1/runtime/status?busy=1` 响应追加
+   `busy: { inferring: boolean, slotsRunning: number } | null`（`null` = 不可知，不是"不忙"）。
+   `strict`/`passthrough` 档的报错文案在 `inferring === true` 时补一句"目标机器正在推理中"；
+   `auto-switch` 档不查询（不会走到报错分支，省一次开销）。
+3. **CORS**：阶段二第 2/3 步涉及时再评估，阶段一未使用浏览器直连面板 API。
 
 ## 5. 决策记录
 
 - 2026-08-27：方向定稿——阶段一以 `chatBehavior` 三档解耦（默认 strict），阶段二沿三级阶梯推进；
   默认档变更属破坏性变化，0.x 阶段直接切换默认值并在 changelog 标注。
+- 2026-08-27：阶段一实施完成——两个开放问题定案见第 2 节；服务端排空/忙碌查询契约冻结见第 4 节；
+  80 单测 + 5 假面板 E2E 全绿，README/CLAUDE.md 同步。

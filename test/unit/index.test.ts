@@ -36,11 +36,18 @@ describe("插件入口", () => {
     expect(() => apply(fakeCtx(), Config({ ...valid, mode: "direct" }) as any)).toThrow(/llamaBaseUrl/);
   });
 
+  it("非法 chatBehavior → 抛错", () => {
+    expect(() => apply(fakeCtx(), Config({ ...valid, chatBehavior: "bogus" }) as any)).toThrow(/chatBehavior/);
+  });
+
   it("Config 默认值", () => {
     const parsed = Config(valid) as any;
     expect(parsed.mode).toBe("proxy");
+    expect(parsed.chatBehavior).toBe("strict");
     expect(parsed.startTimeoutMs).toBe(300000);
     expect(parsed.pollIntervalMs).toBe(2000);
+    expect(parsed.drainOnSwitch).toBe(true);
+    expect(parsed.drainTimeoutMs).toBe(60000);
     expect(parsed.requestTimeoutMs).toBe(30000);
   });
 });

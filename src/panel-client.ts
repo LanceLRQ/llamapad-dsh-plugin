@@ -30,15 +30,28 @@ export interface PanelModelDetail {
 }
 
 export interface PanelRuntimeStatus {
-  running: { model: string; displayName?: string; hostPort?: number } | null;
+  running: { model: string; displayName?: string; hostPort?: number | null } | null;
+  /** 仅 runtimeStatus({ busy: true }) 时返回；null 代表"不可知"，不代表"不忙" */
+  busy?: { inferring: boolean; slotsRunning: number } | null;
+}
+
+/** 排空等待的默认上限（毫秒），与服务端 runtime.ts 的 DEFAULT_DRAIN_TIMEOUT_MS 对齐。
+ *  放在本文件（最底层、无同级依赖）供 adapter 与 index 的 schema 默认值共用，
+ *  不让同一个数字散落三处各写一遍。 */
+export const DEFAULT_DRAIN_TIMEOUT_MS = 60_000;
+
+/** POST .../start 的可选排空参数（服务端支持时才真正生效） */
+export interface StartModelOptions {
+  drain?: boolean;
+  drainTimeoutMs?: number;
 }
 
 export interface PanelClient {
   readonly baseUrl: string;
   listModels(): Promise<PanelModelView[]>;
   getModel(name: string): Promise<PanelModelDetail | null>;
-  runtimeStatus(): Promise<PanelRuntimeStatus>;
-  startModel(name: string): Promise<void>;
+  runtimeStatus(options?: { busy?: boolean }): Promise<PanelRuntimeStatus>;
+  startModel(name: string, options?: StartModelOptions): Promise<void>;
   llamaHealth(): Promise<boolean>;
 }
 
@@ -47,7 +60,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
   const base = options.baseUrl.replace(/\/+$/, "");
   const timeoutMs = options.requestTimeoutMs ?? 30_000;
 
-  async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  async function request(path: string, init: RequestInit = {}, timeoutOverrideMs?: number): Promise<Response> {
     try {
       return await doFetch(`${base}${path}`, {
         ...init,
@@ -56,7 +69,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
           ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
           ...(init.headers as Record<string, string> | undefined),
         },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(timeoutOverrideMs ?? timeoutMs),
       });
     } catch {
       throw new PanelError(`llamapad 面板不可达: ${base}`, "PANEL_UNREACHABLE");
@@ -90,13 +103,36 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
       return (await res.json()) as PanelModelDetail;
     },
-    async runtimeStatus() {
-      const res = await request("/api/v1/runtime/status");
+    async runtimeStatus(options) {
+      const res = await request(`/api/v1/runtime/status${options?.busy ? "?busy=1" : ""}`);
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
       return (await res.json()) as PanelRuntimeStatus;
     },
-    async startModel(name) {
-      const res = await request(`/api/v1/models/${encodeURIComponent(name)}/start`, { method: "POST" });
+    async startModel(name, startOptions) {
+      const hasDrainFields = startOptions?.drain !== undefined || startOptions?.drainTimeoutMs !== undefined;
+      const body = hasDrainFields
+        ? JSON.stringify({
+            ...(startOptions?.drain !== undefined ? { drain: startOptions.drain } : {}),
+            ...(startOptions?.drainTimeoutMs !== undefined ? { drainTimeoutMs: startOptions.drainTimeoutMs } : {}),
+          })
+        : undefined;
+      // 排空最长可能要等 drainTimeoutMs（默认 60s）才返回，而单请求默认超时只有 30s
+      // （requestTimeoutMs）——不覆盖的话客户端会在服务端排空完成前自己先 abort 掉这次
+      // start 调用。取 max(默认超时, drainTimeoutMs + 10s) 作为这次调用的超时：
+      // +10s 是留给网络往返与服务端收尾的缓冲，避免排空刚好卡线时客户端抢先掐断。
+      // 只传 drain 不传 drainTimeoutMs 时服务端会用它自己的 60s 默认值，客户端
+      // 必须按同一个数字放宽，否则照样在服务端排空完成前先 abort（正是本注释上面
+      // 说的那个坑）——所以这里对齐 DEFAULT_DRAIN_TIMEOUT_MS 而不是留空。
+      const effectiveDrainMs = startOptions?.drainTimeoutMs
+        ?? (startOptions?.drain === true ? DEFAULT_DRAIN_TIMEOUT_MS : undefined);
+      const timeoutOverride = effectiveDrainMs !== undefined
+        ? Math.max(timeoutMs, effectiveDrainMs + 10_000)
+        : undefined;
+      const res = await request(
+        `/api/v1/models/${encodeURIComponent(name)}/start`,
+        { method: "POST", ...(body !== undefined ? { body } : {}) },
+        timeoutOverride,
+      );
       if (res.ok) return;
       if (res.status === 404) throw new PanelError(`模型不存在: ${name}`, "MODEL_NOT_FOUND", 404);
       if (res.status === 422) throw new PanelError(await readError(res), "MODEL_FILES_MISSING", 422);

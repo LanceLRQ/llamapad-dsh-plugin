@@ -6,6 +6,7 @@ export interface FakePanelState {
   readyAt: number;
   starts: string[];
   chatRequests: Array<Record<string, unknown>>;
+  busy: { inferring: boolean; slotsRunning: number } | null;
 }
 
 export interface FakePanel {
