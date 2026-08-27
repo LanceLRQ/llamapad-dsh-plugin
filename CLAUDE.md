@@ -41,7 +41,12 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 安装/升级（真实 CLI 验证过安装与覆盖更新），打包见 `docs/packaging.md`。
 
 待办：
-- dsh Web UI 挂载的端到端冒烟（`docs/manual-smoke.md` 步骤 1-6）——需在装有 dsh 的机器上执行
+- **设计修订（方向已定稿，未实施）**：`docs/design/chat-vs-lifecycle-decoupling.md`——现行
+  「选模型即切容器」会杀死在途输出流，与用户设想相悖。阶段一 `chatBehavior` 三档解耦
+  （strict 新默认 / passthrough / auto-switch）；阶段二显式生命周期入口三级阶梯。等用户与
+  服务端侧调整一并启动；实施时须同步改 README 定位语与测试
+- dsh Web UI 挂载的端到端冒烟（`docs/manual-smoke.md` 步骤 1-6）——web profile 软链挂载链路
+  已于 2026-08-27 真机验证（bundle 层+用户层配置生效），完整对话冒烟待面板可用后执行
 - **关注 llamapad M5**：其挂账②计划改造 llama webui 反代，而本插件依赖同一路由的 API 路径
   （`/api/v1/proxy/llama/v1/chat/completions` 与 `/health`），改造时须确认未打断
 - B 形态（管理工具插件）按 docs/design 设计稿另行细化实施

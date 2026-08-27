@@ -135,6 +135,8 @@ npm pack              # prepare 钩子自动先 build，产出可安装 tgz
 ## 文档索引
 
 - [A 形态实施计划](docs/plans/2026-08-24-a-form-adapter.md)（含实施记录）
+- [聊天路由与生命周期解耦（方向定稿，未实施）](docs/design/chat-vs-lifecycle-decoupling.md)
+  ——在途流保护 + `chatBehavior` 三档 + 显式生命周期入口的修订方案
 - [手工冒烟手册](docs/manual-smoke.md)
 - [dsh 插件调研归档](docs/research/2026-08-24-dsh-plugin-research.md)（契约细节 + UX 评估依据）
 - [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（暂不实现）
