@@ -3,6 +3,24 @@
 > 面向维护者：插件内容变化后如何产出新版可安装制品，以及用户侧如何更新。
 > 安装侧的用户文档见 README「安装到 dsh」。
 
+## 两个入口
+
+本包导出两个独立的 dsh 插件入口，构建与挂载方式各不相同：
+
+| 入口 | 产物 | Config / inject | 挂载方式 |
+|---|---|---|---|
+| `.`（A 形态，LLM 适配器） | `dist/index.js` | `src/index.ts` 的 `Config`，`inject:['llm']` | bundle 层 `cordis.patch.yml` 已默认声明（`name: llamapad-dsh-plugin`），随 `dsh plugin add` 自动挂载 |
+| `./tools`（B 形态，管理工具） | `dist/tools.js` | `src/tools.ts` 的 `Config`，`inject:['tools']` | **不随 bundle 默认挂载**，需要时在 profile 自己的 `cordis.patch.yml` 里用 `insert:` 追加一条 `name: llamapad-dsh-plugin/tools`（模板见 `examples/profile-patch.example.yml` 注释段），改完重启 dsh |
+
+B 入口必须用 `insert:` 形式追加，不能照抄 A 形态那种「按 id 覆盖」的写法——用户层的覆盖只作用于
+**已存在于组合树里**的条目，而 B 入口没被任何 bundle 层声明过，写成覆盖会得到
+`patch: entry "llamapad-tools" not found` 并**静默不注册**（dsh 0.1.1-rc.2 实测）。
+
+两者可以同时挂载，也可以只挂其中一个；各自的 Config 相互独立（各填一份 `panelUrl`/`token`，
+互不读取对方），但共享同一份 `panel-client.ts`/`switching.ts`，同一 `panelUrl` 下的启停会经
+同一把共享门（`sharedModelGate`），不会出现两个入口互相插队"一边起一边停"。B 入口不默认挂载，
+是为了不改变既有用户（只用 A 形态）的行为。
+
 ## 何时需要重新打包
 
 任何会进入制品的内容变更：

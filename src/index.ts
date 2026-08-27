@@ -2,7 +2,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { LlamapadAdapter } from "./adapter";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
-import { createModelGate } from "./switching";
+import { createModelGate, sharedModelGate } from "./switching";
 
 export interface Config {
   panelUrl: string;
@@ -64,7 +64,9 @@ export function apply(ctx: Context, config: Config) {
     token: config.token,
     ...(config.requestTimeoutMs ? { requestTimeoutMs: config.requestTimeoutMs } : {}),
   });
-  const gate = createModelGate(client);
+  // 共享门：与 B 形态（tools.ts）的 start 工具共用同一把锁，避免同一面板出现两把锁
+  // 各自判断"要不要起/停"而互相插队（见 switching.ts 的 sharedModelGate 注释）
+  const gate = sharedModelGate(client);
   ctx.llm.registerAdapter([config.provider], new LlamapadAdapter({
     client,
     gate,

@@ -19,3 +19,18 @@
       - id: main
         provider: llamapad
         model: qwen3-8b-q4
+
+# ---- B 形态（管理工具插件）：任意模型驱动的 Agent 可调用工具查询/启停本地模型 ----
+# 不随 bundle 默认挂载（包内 cordis.patch.yml 只 insert 了上面 A 形态那一行），需要时
+# 把下面取消注释放进 profile 的 cordis.patch.yml。可以只挂 B、只挂 A，或两个同时挂——
+# 两个入口的 Config 相互独立，各自填一份 panelUrl/token 即可。
+#
+# 注意这里必须用 `insert:` 而不是上面 A 形态那种「按 id 覆盖」的写法：覆盖只能改动
+# 已存在于组合树里的条目，B 入口没被任何 bundle 层声明过，写成覆盖形式会得到
+# `patch: entry "llamapad-tools" not found` 并**静默不注册**（实测 dsh 0.1.1-rc.2）。
+# - insert:
+#     - id: llamapad-tools
+#       name: llamapad-dsh-plugin/tools
+#       config:
+#         panelUrl: http://192.168.1.10:8080
+#         token: !!js process.env.LLAMAPAD_TOKEN

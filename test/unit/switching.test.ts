@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createModelGate, EnsureError } from "../../src/switching";
+import { createModelGate, EnsureError, sharedModelGate } from "../../src/switching";
 import type { PanelClient } from "../../src/panel-client";
 
 function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient & {
@@ -99,6 +99,28 @@ describe("createModelGate", () => {
     (client as any).startModel = startModel;
     await createModelGate(client).ensure("a");
     expect(startModel).toHaveBeenCalledWith("a", undefined);
+  });
+
+  it("waitReady:false：start 发出即返回，不做就绪轮询", async () => {
+    const client = fakeClient(); client.setHealthy(false);
+    const health = vi.spyOn(client, "llamaHealth");
+    await createModelGate(client).ensure("a", { waitReady: false });
+    expect(client.starts).toEqual(["a"]);
+    expect(health).not.toHaveBeenCalled();
+  });
+});
+
+describe("sharedModelGate", () => {
+  it("同一 baseUrl → 返回同一个 Gate 实例", () => {
+    const gateA = sharedModelGate(fakeClient({ baseUrl: "http://shared-a" }));
+    const gateB = sharedModelGate(fakeClient({ baseUrl: "http://shared-a" }));
+    expect(gateA).toBe(gateB);
+  });
+
+  it("不同 baseUrl → 返回不同 Gate 实例", () => {
+    const gateA = sharedModelGate(fakeClient({ baseUrl: "http://shared-b1" }));
+    const gateB = sharedModelGate(fakeClient({ baseUrl: "http://shared-b2" }));
+    expect(gateA).not.toBe(gateB);
   });
 });
 

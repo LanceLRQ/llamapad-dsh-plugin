@@ -5,7 +5,7 @@ import { createServer } from "node:http";
  * 状态机：start 置 running + readyAt；health 在 readyAt 前回 503。
  */
 export function createFakePanel({ loadMs = 100 } = {}) {
-  const state = { running: null, readyAt: 0, starts: [], chatRequests: [], busy: null };
+  const state = { running: null, readyAt: 0, starts: [], stops: [], chatRequests: [], busy: null };
   const MODELS = [
     { name: "qwen-small", displayName: "Qwen 小", namespace: "main", ggufFile: "main/a.gguf", mmprojFile: null, status: "stopped", quant: "Q4_K_M", sizeBytes: 100, fileCount: 1, hostPort: 18080 },
     { name: "qwen-big", displayName: "Qwen 大", namespace: "main", ggufFile: "main/b.gguf", mmprojFile: null, status: "stopped", quant: "Q8_0", sizeBytes: 200, fileCount: 1, hostPort: 18080 },
@@ -37,6 +37,29 @@ export function createFakePanel({ loadMs = 100 } = {}) {
           // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
           // 假面板没有真实在途推理，对应真机的冷启动场景 → skipped
           resBody.drain = { drained: true, reason: "skipped" };
+        }
+        return json(200, resBody);
+      });
+      return;
+    }
+    const stopMatch = /^\/api\/v1\/models\/([^/]+)\/stop$/.exec(url.pathname);
+    if (req.method === "POST" && stopMatch) {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const name = decodeURIComponent(stopMatch[1]);
+        if (!MODELS.some((m) => m.name === name)) return json(404, { error: `模型不存在: ${name}` });
+        let drainReq = {};
+        try { drainReq = body ? JSON.parse(body) : {}; } catch { drainReq = {}; }
+        state.stops.push(name);
+        // stopModel 对无容器幂等成功（服务端语义），假面板同样不校验"是不是当前运行的那个"
+        state.running = null;
+        state.readyAt = 0;
+        const resBody = { ok: true };
+        if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
+          // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
+          // 假面板没有真实在途推理，对应真机的冷启动/已空闲场景 → idle
+          resBody.drain = { drained: true, reason: "idle" };
         }
         return json(200, resBody);
       });

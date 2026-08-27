@@ -46,13 +46,56 @@ export interface StartModelOptions {
   drainTimeoutMs?: number;
 }
 
+/** POST .../stop 的可选排空参数，形状与 StartModelOptions 一致（服务端契约同构） */
+export interface StopModelOptions {
+  drain?: boolean;
+  drainTimeoutMs?: number;
+}
+
+export interface StopModelResult {
+  ok: true;
+  /** 仅传了 drain/drainTimeoutMs 时服务端才会返回 */
+  drain?: { drained: boolean; reason: "idle" | "timeout" | "unavailable" | "skipped" };
+}
+
 export interface PanelClient {
   readonly baseUrl: string;
   listModels(): Promise<PanelModelView[]>;
   getModel(name: string): Promise<PanelModelDetail | null>;
   runtimeStatus(options?: { busy?: boolean }): Promise<PanelRuntimeStatus>;
   startModel(name: string, options?: StartModelOptions): Promise<void>;
+  stopModel(name: string, options?: StopModelOptions): Promise<StopModelResult>;
   llamaHealth(): Promise<boolean>;
+}
+
+/**
+ * start/stop 共用的排空请求组装：请求体与超时覆盖的换算逻辑完全一致，只写一份。
+ *
+ * 排空最长可能要等 drainTimeoutMs（默认 60s）才返回，而单请求默认超时只有 30s
+ * （requestTimeoutMs）——不覆盖的话客户端会在服务端排空完成前自己先 abort 掉这次
+ * 调用。取 max(默认超时, drainTimeoutMs + 10s) 作为这次调用的超时：+10s 是留给
+ * 网络往返与服务端收尾的缓冲，避免排空刚好卡线时客户端抢先掐断。只传 drain 不传
+ * drainTimeoutMs 时服务端会用它自己的 60s 默认值，客户端必须按同一个数字放宽，
+ * 否则照样在服务端排空完成前先 abort——所以这里对齐 DEFAULT_DRAIN_TIMEOUT_MS
+ * 而不是留空。
+ */
+function buildDrainRequest(
+  options: { drain?: boolean; drainTimeoutMs?: number } | undefined,
+  defaultTimeoutMs: number,
+): { body?: string; timeoutOverride?: number } {
+  const hasDrainFields = options?.drain !== undefined || options?.drainTimeoutMs !== undefined;
+  const body = hasDrainFields
+    ? JSON.stringify({
+        ...(options?.drain !== undefined ? { drain: options.drain } : {}),
+        ...(options?.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+      })
+    : undefined;
+  const effectiveDrainMs = options?.drainTimeoutMs
+    ?? (options?.drain === true ? DEFAULT_DRAIN_TIMEOUT_MS : undefined);
+  const timeoutOverride = effectiveDrainMs !== undefined
+    ? Math.max(defaultTimeoutMs, effectiveDrainMs + 10_000)
+    : undefined;
+  return { body, timeoutOverride };
 }
 
 export function createPanelClient(options: PanelClientOptions): PanelClient {
@@ -109,25 +152,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       return (await res.json()) as PanelRuntimeStatus;
     },
     async startModel(name, startOptions) {
-      const hasDrainFields = startOptions?.drain !== undefined || startOptions?.drainTimeoutMs !== undefined;
-      const body = hasDrainFields
-        ? JSON.stringify({
-            ...(startOptions?.drain !== undefined ? { drain: startOptions.drain } : {}),
-            ...(startOptions?.drainTimeoutMs !== undefined ? { drainTimeoutMs: startOptions.drainTimeoutMs } : {}),
-          })
-        : undefined;
-      // 排空最长可能要等 drainTimeoutMs（默认 60s）才返回，而单请求默认超时只有 30s
-      // （requestTimeoutMs）——不覆盖的话客户端会在服务端排空完成前自己先 abort 掉这次
-      // start 调用。取 max(默认超时, drainTimeoutMs + 10s) 作为这次调用的超时：
-      // +10s 是留给网络往返与服务端收尾的缓冲，避免排空刚好卡线时客户端抢先掐断。
-      // 只传 drain 不传 drainTimeoutMs 时服务端会用它自己的 60s 默认值，客户端
-      // 必须按同一个数字放宽，否则照样在服务端排空完成前先 abort（正是本注释上面
-      // 说的那个坑）——所以这里对齐 DEFAULT_DRAIN_TIMEOUT_MS 而不是留空。
-      const effectiveDrainMs = startOptions?.drainTimeoutMs
-        ?? (startOptions?.drain === true ? DEFAULT_DRAIN_TIMEOUT_MS : undefined);
-      const timeoutOverride = effectiveDrainMs !== undefined
-        ? Math.max(timeoutMs, effectiveDrainMs + 10_000)
-        : undefined;
+      const { body, timeoutOverride } = buildDrainRequest(startOptions, timeoutMs);
       const res = await request(
         `/api/v1/models/${encodeURIComponent(name)}/start`,
         { method: "POST", ...(body !== undefined ? { body } : {}) },
@@ -138,6 +163,18 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       if (res.status === 422) throw new PanelError(await readError(res), "MODEL_FILES_MISSING", 422);
       if (res.status === 401) throw new PanelError("llamapad token 无效或未授权", "AUTH", 401);
       throw new PanelError(`启动失败: ${await readError(res)}`, "PANEL_HTTP", res.status);
+    },
+    async stopModel(name, stopOptions) {
+      const { body, timeoutOverride } = buildDrainRequest(stopOptions, timeoutMs);
+      const res = await request(
+        `/api/v1/models/${encodeURIComponent(name)}/stop`,
+        { method: "POST", ...(body !== undefined ? { body } : {}) },
+        timeoutOverride,
+      );
+      if (res.ok) return (await res.json()) as StopModelResult;
+      if (res.status === 404) throw new PanelError(`模型不存在: ${name}`, "MODEL_NOT_FOUND", 404);
+      if (res.status === 401) throw new PanelError("llamapad token 无效或未授权", "AUTH", 401);
+      throw new PanelError(`停止失败: ${await readError(res)}`, "PANEL_HTTP", res.status);
     },
     async llamaHealth() {
       try {

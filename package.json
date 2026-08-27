@@ -5,6 +5,10 @@
   "type": "module",
   "description": "DeepSeek Harness LLM adapter plugin backed by llamapad-managed llama.cpp containers",
   "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tools": "./dist/tools.js"
+  },
   "files": [
     "dist",
     "cordis.patch.yml",
@@ -26,7 +30,8 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-llm": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.1"
   },
   "devDependencies": {

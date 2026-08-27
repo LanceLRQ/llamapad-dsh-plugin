@@ -128,4 +128,64 @@ describe("createPanelClient", () => {
     const hit = fakeFetch([{ body: { name: "x", displayName: "X", namespace: "main", overrides: { server: { ctx_size: 8192 } } } }]);
     await expect(createPanelClient({ ...base, fetch: hit.fn as any }).getModel("x")).resolves.toMatchObject({ name: "x" });
   });
+
+  describe("stopModel", () => {
+    it("不带 drain 选项时不发请求体，走默认 requestTimeoutMs", async () => {
+      const spy = vi.spyOn(AbortSignal, "timeout");
+      const { fn, calls } = fakeFetch([{ body: { ok: true } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+      const result = await client.stopModel("a");
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/models/a/stop");
+      expect(calls[0]!.init.method).toBe("POST");
+      expect(calls[0]!.init.body).toBeUndefined();
+      expect(result).toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(5000);
+      spy.mockRestore();
+    });
+
+    it("带 drain 选项时发 JSON 请求体，并透传响应里的 drain 字段", async () => {
+      const { fn, calls } = fakeFetch([{ body: { ok: true, drain: { drained: true, reason: "idle" } } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const result = await client.stopModel("a", { drain: true, drainTimeoutMs: 60000 });
+      expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ drain: true, drainTimeoutMs: 60000 });
+      expect((calls[0]!.init.headers as any)["content-type"]).toBe("application/json");
+      expect(result).toEqual({ ok: true, drain: { drained: true, reason: "idle" } });
+    });
+
+    it("超时覆盖计算与 startModel 一致：max(requestTimeoutMs, drainTimeoutMs+10000)", async () => {
+      const spy = vi.spyOn(AbortSignal, "timeout");
+      const { fn } = fakeFetch([{ body: { ok: true } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+      await client.stopModel("a", { drain: true, drainTimeoutMs: 60000 });
+      expect(spy).toHaveBeenCalledWith(70000);
+      spy.mockRestore();
+    });
+
+    it("只传 drain 不传 drainTimeoutMs → 仍按服务端默认 60s 放宽超时（与 startModel 同一套换算）", async () => {
+      const spy = vi.spyOn(AbortSignal, "timeout");
+      const { fn } = fakeFetch([{ body: { ok: true } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+      await client.stopModel("a", { drain: true });
+      expect(spy).toHaveBeenCalledWith(70000);
+      spy.mockRestore();
+    });
+
+    it("404 → MODEL_NOT_FOUND", async () => {
+      const { fn } = fakeFetch([{ status: 404, body: { error: "模型不存在: a" } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.stopModel("a")).rejects.toMatchObject({ code: "MODEL_NOT_FOUND" });
+    });
+
+    it("401 → AUTH", async () => {
+      const { fn } = fakeFetch([{ status: 401, body: { error: "unauthorized" } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.stopModel("a")).rejects.toMatchObject({ code: "AUTH" });
+    });
+
+    it("其余非 2xx → PANEL_HTTP", async () => {
+      const { fn } = fakeFetch([{ status: 500, body: { error: "boom" } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.stopModel("a")).rejects.toMatchObject({ code: "PANEL_HTTP" });
+    });
+  });
 });

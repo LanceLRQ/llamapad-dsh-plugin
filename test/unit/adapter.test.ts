@@ -57,6 +57,19 @@ describe("LlamapadAdapter", () => {
     await expect(adapter.resolveModel("llamapad", "b")).resolves.not.toHaveProperty("context");
   });
 
+  // 宿主 dsh-llm 0.1.x 的派发路径无条件 `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的
+  // LlmAdapter 基类没有这个方法——钉旧版时每次对话都会在进入 stream() 之前抛 TypeError。
+  // 本条守住"基类默认实现始终继承得到且能派发"，避免依赖再次落后于宿主。
+  it("prepareCall：基类默认实现可用，stream 委托回适配器", async () => {
+    const { adapter } = makeAdapter();
+    expect(typeof adapter.prepareCall).toBe("function");
+    const prepared = await adapter.prepareCall("llamapad", "a");
+    expect(prepared.model).toMatchObject({ provider: "llamapad", id: "a" });
+    const spy = vi.spyOn(adapter, "stream");
+    prepared.stream(opts()); // 生成器惰性，取迭代器不触发任何 IO
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
   it("reasoningEffort → UNSUPPORTED（先于任何 IO）", async () => {
     const { adapter, ensure, fetchImpl } = makeAdapter();
     await expect(drain(adapter.stream(opts({ reasoningEffort: "high" })))).rejects.toMatchObject({ code: "UNSUPPORTED" });
