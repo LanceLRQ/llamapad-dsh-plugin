@@ -5,15 +5,17 @@
 模型选择器里按名字选用，插件按 `chatBehavior` 档位把「选模型」与「容器启停」解耦（默认档下聊天
 路径完全不触发启停，在途输出流不会被切换打断），llamapad 侧零改动。
 
-本包导出**两个独立入口**：`llamapad-dsh-plugin`（A 形态，LLM 适配器）与
-`llamapad-dsh-plugin/tools`（B 形态，管理工具——让任意模型驱动的 Agent 查询/启停本地模型）。
-可以只挂一个，也可以两个同挂。
+本包导出**三个入口**：`llamapad-dsh-plugin`（A 形态，LLM 适配器）、
+`llamapad-dsh-plugin/tools`（B 形态，管理工具——让任意模型驱动的 Agent 查询/启停本地模型）与
+`llamapad-dsh-plugin/client`（浏览器端设置卡片，见下「设置卡片」一节）。A、B 是两个独立的 dsh
+插件行，可以只挂一个也可以两个同挂；`./client` 不是插件行，随 A 形态自动加载，无需单独配置。
 
-**状态：A 形态 + 聊天路由解耦（阶段一）+ B 形态管理工具均已实现并通过全部测试
-（111 单测 + 9 假面板 E2E），并已在真实 dsh + GPU 环境完成端到端冒烟。**
+**状态：A 形态 + 聊天路由解耦（阶段一）+ B 形态管理工具 + 设置卡片（阶段二）均已实现并通过
+全部测试（179 单测 + 12 假面板 E2E），并已在真实 dsh + GPU 环境完成端到端冒烟。**
 计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
-聊天路由三档的设计与落地记录见
-[docs/design/chat-vs-lifecycle-decoupling.md](docs/design/chat-vs-lifecycle-decoupling.md)；
+聊天路由三档与设置卡片的设计与落地记录见
+[docs/design/chat-vs-lifecycle-decoupling.md](docs/design/chat-vs-lifecycle-decoupling.md)与
+[docs/design/settings-card-design.md](docs/design/settings-card-design.md)；
 B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-design.md)；
 真机冒烟步骤与结果见 [docs/manual-smoke.md](docs/manual-smoke.md)。
 
@@ -24,6 +26,12 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 
 > ⚠️ **破坏性变化**：`chatBehavior` 默认值为 `strict`（0.x 阶段直接切换默认值，不做过渡期）。
 > 若你依赖旧版「选模型即切容器」的自动切换行为，请在配置里显式设置 `chatBehavior: auto-switch`。
+
+> ⚠️ **`dist/` 不入库，装载前必须先构建**：`package.json` 一旦声明 `dsh.client`（浏览器端设置
+> 卡片入口），宿主找不到 `dist/client.js` 就会让**整个插件加载失败**——连 A 形态 LLM 适配器
+> 一起挂掉，不是「卡片不显示」这么轻。tarball / git 安装会经 `prepare` 钩子自动构建；但用
+> `link:` 软链本地调试或直接跑源码时，**启动 dsh 前必须先手动 `pnpm run build`** 一次，之后
+> 每轮改动同理（见下「本地调试」）。
 
 ## 工作方式
 
@@ -63,20 +71,48 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 刻意**不开放**删除模型/文件、改配置、下载管理——高危操作留在 llamapad 面板的人工确认流程里。
 工具失败直接抛错，由 dsh 转成模型可读的错误文本。
 
+## 设置卡片
+
+配置好 A 形态（`panelUrl`/`token`）后，dsh 的**设置 → 插件 → 插件配置**页签里会自动出现一张
+llamapad 卡片（与官方的终端 / Agent 循环 / 网页搜索三张卡并列），内容：
+
+- 运行状态（有没有模型在跑、是否正在推理）
+- 模型列表（名称/命名空间/量化；文件缺失的模型会标出原因）
+- 每行一个启动/停止按钮（单模型语义，点启动即切换）
+- 右上角「在浏览器中打开面板」，跳转到完整的 llamapad 面板
+
+卡片不需要单独配置——复用的正是 A 形态已经填好的 `panelUrl`/`token`；A 形态未配置这两项时
+（`apply()` 提前打警告并返回）卡片也不会出现。
+
+**token 与面板连接全程留在 dsh host 进程**：卡片经 host RPC（`ctx.remote.llamapadPanel.*`）
+向宿主要数据，宿主再用已有的 `PanelClient`/`token` 去调 llamapad；浏览器全程拿不到 token、
+不直连 llamapad——因此 **llamapad 不需要加 CORS**。架构图与四条真机才踩到的硬约束见
+[设置卡片设计记录](docs/design/settings-card-design.md)。
+
+启停按钮复用 `drainOnSwitch` / `drainTimeoutMs` 两个既有配置项（不再局限于 `auto-switch`
+档）：停止一个正在推理的模型时，服务端最长会排空等待 `drainTimeoutMs`（默认 60 秒），期间
+按钮显示等待文案。
+
+> ⚠️ **跨机部署要配 `panelPublicUrl`**：`panelUrl` 是 dsh host 进程视角的地址（常见
+> `127.0.0.1`），而「在浏览器中打开面板」是在**用户浏览器**里打开的——dsh 与浏览器不在同一台
+> 机器时二者不是一回事。给 `panelPublicUrl` 填浏览器能访问到的面板地址即可；单机部署两者
+> 一致，可以不配。构建前置要求见文首「`dist/` 不入库」的提示。
+
 ## 配置
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `panelUrl` | 必填 | llamapad 面板地址，如 `http://192.168.1.10:8080` |
 | `token` | 必填 | llamapad API token（`lp_` 开头；用 `!!js process.env.LLAMAPAD_TOKEN` 注入） |
+| `panelPublicUrl` | — | 浏览器可见的面板地址，供设置卡片「在浏览器中打开面板」按钮使用；缺省回落 `panelUrl`。`panelUrl` 是 dsh host 进程视角的地址（常见 `127.0.0.1`），按钮却是在用户浏览器里打开的，跨机部署时二者不是一回事；单机部署可以不配 |
 | `provider` | `llamapad` | provider 路由名 |
 | `mode` | `proxy` | `proxy` / `direct` |
 | `llamaBaseUrl` | — | direct 模式的 llama.cpp 基地址 |
 | `chatBehavior` | `strict` | 聊天路由档位：`strict` / `passthrough` / `auto-switch`（见上「工作方式」） |
 | `startTimeoutMs` | `300000` | 切换后等待就绪超时（仅 `auto-switch` 档生效） |
 | `pollIntervalMs` | `2000` | 就绪探测间隔（仅 `auto-switch` 档生效） |
-| `drainOnSwitch` | `true` | 切换前是否让服务端排空在途推理（仅 `auto-switch` 档生效） |
-| `drainTimeoutMs` | `60000` | 排空等待的最长时间（仅 `auto-switch` 档且 `drainOnSwitch=true` 时生效） |
+| `drainOnSwitch` | `true` | 切换/停止前是否让服务端排空在途推理；`auto-switch` 档的自动切换与设置卡片的启停按钮共用这一个开关 |
+| `drainTimeoutMs` | `60000` | 排空等待的最长时间（`drainOnSwitch=true` 时生效）；`auto-switch` 档与设置卡片启停按钮共用同一个数字 |
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
 | `statusRefreshMs` | `5000` | 轮询面板运行状态并刷新模型选择器的间隔（毫秒）；`0` 关闭。仅影响选择器上的运行中标记，不影响对话 |
@@ -195,7 +231,7 @@ TS），模板见 [examples/dev.example.yml](examples/dev.example.yml)，本地�
 
 ```bash
 pnpm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://10.22.33.1:20172
-pnpm run build         # esbuild 打包 src/ → dist/index.js（@deepseek-ai/* 保持 external）
+pnpm run build         # esbuild 打包 src/ → dist/{index,tools,client}.js（Node 侧 @deepseek-ai/* 保持 external）
 pnpm test              # 单元测试
 pnpm run test:e2e      # 假面板 E2E（无需真实 llamapad / GPU）
 pnpm run typecheck
@@ -207,7 +243,8 @@ pnpm pack              # prepare 钩子自动先 build，产出可安装 tgz
 
 - [A 形态实施计划](docs/plans/2026-08-24-a-form-adapter.md)（含实施记录）
 - [聊天路由与生命周期解耦](docs/design/chat-vs-lifecycle-decoupling.md)
-  ——阶段一（`chatBehavior` 三档 + 在途流保护）已实施；阶段二（显式生命周期入口）待排期
+  ——阶段一（`chatBehavior` 三档 + 在途流保护）与阶段二（设置卡片）均已实施
+- [设置卡片设计记录](docs/design/settings-card-design.md)——架构、四条真机硬约束、已知缺口
 - [手工冒烟手册](docs/manual-smoke.md)
 - [dsh 插件调研归档](docs/research/2026-08-24-dsh-plugin-research.md)（契约细节 + UX 评估依据）
 - [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（暂不实现）

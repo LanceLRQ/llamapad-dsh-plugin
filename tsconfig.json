@@ -3,6 +3,9 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // 与 scripts/build.mjs 里浏览器产物的 esbuild 选项 jsx:'automatic' 对应，
+    // 否则 tsc 无法理解 src/client/ 下 .tsx 文件里的 JSX 语法。
+    "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": false,

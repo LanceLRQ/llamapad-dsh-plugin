@@ -1,7 +1,7 @@
 # 手工冒烟手册（dsh Web UI 挂载验证）
 
-> 目的：在真实 dsh Web UI 里验证插件加载、模型选择器出现 llamapad 模型、对话走通。
-> 自动化 E2E（假面板）已覆盖逻辑正确性；本手册验证「挂载 + 真实链路」。
+> 目的：在真实 dsh Web UI 里验证插件加载、模型选择器出现 llamapad 模型、对话走通、
+> 设置卡片正常挂载与派发。自动化 E2E（假面板）已覆盖逻辑正确性；本手册验证「挂载 + 真实链路」。
 
 ## 前置
 
@@ -80,6 +80,59 @@
 挂载写法有一处坑：B 入口没被任何 bundle 层声明过，用户层必须用 `insert:` 追加，
 照抄 A 形态的「按 id 覆盖」写法会得到 `patch: entry "llamapad-tools" not found` 并
 **静默不注册**。模板见 `examples/profile-patch.example.yml`。
+
+## 设置卡片冒烟（2026-08-27，dsh 0.1.1-rc.2）
+
+验证第三个入口（`./client`，浏览器端设置卡片）挂载与派发链路。设计与架构见
+[设置卡片设计记录](design/settings-card-design.md)。
+
+**前置**：`pnpm run build`——**必须**执行，`package.json` 一旦声明 `dsh.client`，
+宿主找不到 `dist/client.js` 会让整个插件（连 A 形态一起）加载失败（见 README 文首提示）。
+
+**启动**：
+
+```bash
+cd /root/.dsh/profiles/web
+LLAMAPAD_TOKEN=lp_xxxxxxxxx nohup dsh --profile web > /tmp/dsh-web.log 2>&1 &
+```
+
+dsh 监听 `http://127.0.0.1:3080`。
+
+**不开浏览器也能验的三条**（用 `curl --noproxy '*'`）：
+
+1. 产物被宿主路由：
+
+   ```bash
+   curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' \
+     http://127.0.0.1:3080/plugins/llamapad-dsh-plugin/client.js
+   curl -s --noproxy '*' -I http://127.0.0.1:3080/plugins/llamapad-dsh-plugin/client.js | grep -i content-type
+   ```
+
+   应 200，`content-type: text/javascript`（实测 `text/javascript; charset=utf-8`）。
+
+2. 进了 boot 图：
+
+   ```bash
+   curl -s --noproxy '*' http://127.0.0.1:3080/ | grep -o '"id":"llamapad-dsh-plugin"'
+   ```
+
+   `/` 的 HTML 里 `__DSH_BOOT__` 的 entries 应含 `"id":"llamapad-dsh-plugin"` 这一条，能匹配到即算通过。
+
+3. host RPC 通：
+
+   ```bash
+   RPCID=$(cat /proc/sys/kernel/random/uuid)
+   curl -s --noproxy '*' -X POST http://127.0.0.1:3080/api/llamapadPanel/snapshot \
+     -H 'content-type: application/json' \
+     -d "{\"type\":\"client-request\",\"rpcId\":\"$RPCID\",\"method\":\"llamapadPanel/snapshot\",\"payload\":{\"args\":{}}}"
+   ```
+
+   应返回 `{"type":"server-response","rpcId":"<同一个>","result":{"ok":true,"value":{...CardSnapshot...}}}`。
+   用无效 token 时 `panelError` 应是「llamapad token 无效或未授权，请检查插件配置里的 token」——
+   实测确认，这条同时验证了错误路径（面板不可达/鉴权失败不抛错，塞进 `panelError` 由卡片显示）。
+
+**浏览器验证**：dsh 开屏有一层「内测声明」引导弹层，遮罩会拦截点击，先点「继续」关掉；再点
+侧栏「设置」→「插件」→「插件配置」，卡片在官方三张卡（终端 / Agent 循环 / 网页搜索）下方。
 
 ## 真机校准结果（2026-08-25，llamapad v0.1.0-rc / RTX 3090 / Qwen3.6-35B-A3B）
 

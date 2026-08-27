@@ -1,13 +1,24 @@
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
+// 仅为副作用引入：dsh-typert-registry 用 declare module 给 ctx.typert 补上 register()
+// 等方法，不引入这个模块 TS 就看不到 augmentation（运行时由宿主提供，不进产物）。
+import type {} from "@deepseek-ai/dsh-typert-registry";
+import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { LlamapadAdapter } from "./adapter";
 import { startDirectoryRefresh } from "./directory-refresh";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
+import { PanelGateway } from "./panel-gateway";
+import { RPC_CONTRIBUTION, RPC_PACKAGE, SETTINGS_NAMESPACE } from "./rpc-contract";
 import { createModelGate, sharedModelGate } from "./switching";
 
 export interface Config {
   panelUrl: string;
   token: string;
+  /**
+   * 浏览器可见的面板地址，供设置卡片「用浏览器打开」按钮使用；缺省回落 panelUrl。
+   * 跨机部署时 panelUrl 是 host 进程视角的地址（可能是 127.0.0.1），浏览器打不开。
+   */
+  panelPublicUrl?: string;
   provider: string;
   mode: string;
   llamaBaseUrl?: string;
@@ -25,6 +36,10 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   // 不用 .required()：bundle 安装后用户总要先补配置再重启，缺配置不该拖垮整个 dsh 启动
   panelUrl: Schema.string().description("llamapad 面板地址，如 http://192.168.1.10:8080"),
   token: Schema.string().role("secret").description("llamapad API token（lp_ 开头；建议 cordis.yml 里用 !!js process.env.LLAMAPAD_TOKEN 注入）"),
+  panelPublicUrl: Schema.string().description(
+    "浏览器可见的面板地址，供设置卡片「用浏览器打开」按钮使用；缺省回落 panelUrl。"
+    + "跨机部署时 panelUrl 是 host 进程视角的地址（可能是 127.0.0.1），浏览器打不开",
+  ),
   provider: Schema.string().default("llamapad").description("provider 路由名（agent 配置的 provider 字段）"),
   mode: Schema.string().default("proxy").description("推理通道：proxy=走面板反代（默认，llama.cpp 端口无需暴露）；direct=直连 llama.cpp（需 llamaBaseUrl）"),
   llamaBaseUrl: Schema.string().description("direct 模式下 llama.cpp 基地址，如 http://192.168.1.10:18080"),
@@ -35,8 +50,12 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   ),
   startTimeoutMs: Schema.number().default(300000).description("切换后等待模型就绪的超时（毫秒，仅 auto-switch 档生效）"),
   pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒，仅 auto-switch 档生效）"),
-  drainOnSwitch: Schema.boolean().default(true).description("auto-switch 档切换前是否让服务端排空在途推理（仅 auto-switch 档生效）"),
-  drainTimeoutMs: Schema.number().default(DEFAULT_DRAIN_TIMEOUT_MS).description("排空等待的最长时间（毫秒，仅 auto-switch 档且 drainOnSwitch=true 时生效）"),
+  drainOnSwitch: Schema.boolean().default(true).description(
+    "切换/停止前是否让服务端排空在途推理：auto-switch 档的自动切换与设置卡片的启停按钮共用这个开关",
+  ),
+  drainTimeoutMs: Schema.number().default(DEFAULT_DRAIN_TIMEOUT_MS).description(
+    "排空等待的最长时间（毫秒，drainOnSwitch=true 时生效），同样是 auto-switch 档与设置卡片启停按钮共用的一个数字",
+  ),
   requestTimeoutMs: Schema.number().default(30000).description("面板控制面单请求超时（毫秒）"),
   defaultContextWindow: Schema.number().description("模型未配置 ctx_size 时 resolveModel 的兜底上下文窗口"),
   statusRefreshMs: Schema.number().default(5000).description(
@@ -86,6 +105,50 @@ export function apply(ctx: Context, config: Config) {
     ...(config.defaultContextWindow ? { defaultContextWindow: config.defaultContextWindow } : {}),
   }));
   startDirectoryRefresh({ ctx, client, intervalMs: config.statusRefreshMs });
+
+  // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
+  // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
+  new PanelGateway(ctx, {
+    client,
+    gate,
+    panelUrl: config.panelUrl,
+    ...(config.panelPublicUrl ? { panelPublicUrl: config.panelPublicUrl } : {}),
+    drainOnSwitch: config.drainOnSwitch,
+    ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
+  });
+
+  // settings 命名空间必须是 SETTINGS_NAMESPACE（kebab-case）而非 RPC_NAMESPACE（驼峰）——
+  // 两者是不同的东西，见 rpc-contract.ts 顶部注释。它同时是卡片在 Plugins 页签的 slot key：
+  // 该页签只渲染「host 已服务的 settings namespace ∩ 已注册到 settings.plugin.item 的卡片」
+  // 的交集，两边对不上卡片就不会出现。
+  //
+  // 本轮不做配置表单：不接受这个 namespace 的写入，真源仍只有 cordis.patch.yml。setSource /
+  // onChange 如实接住 dsh-settings 的回调即可，不读取、不据此改变上面已经用 config（entry 层）
+  // 构造完毕的 client / gate / adapter / 网关——现有配置读取路径必须与今天完全一致。
+  installSettingsSection(ctx, settingsNamespace(SETTINGS_NAMESPACE), Config, config, {
+    setSource: () => {},
+    onChange: () => {},
+  });
+
+  // 把三个方法的 strict 描述符注册进 typert 共享注册表。
+  //
+  // 这一步不是可选优化，是唯一可行的通路：网关默认的 SRC 反射（@Remote 装饰器）把标记
+  // 记在 dsh-typert-protocol 的**模块级 WeakMap** 里，而第三方插件从自己的 node_modules
+  // 解析该包、宿主从 dsh 的安装目录解析，运行时是两份模块实例、两张 WeakMap——网关那份
+  // 永远读不到我们写进去的标记，端点不被认领，请求直接 404。对齐版本号救不了这个：
+  // 只要模块实例是两份，模块级状态就必然分裂。
+  //
+  // ctx.typert 是 cordis 服务，经 DI 拿到的是宿主那一份的实例，所以走它注册的描述符
+  // 网关一定看得见。register() 内部用调用方 ctx 的 effect 持有，随本插件 fiber 一起回收。
+  ctx.inject(["typert"], (typertCtx) => {
+    typertCtx.typert.register({
+      package: RPC_PACKAGE,
+      face: "host",
+      schemas: [],
+      model: { services: [], events: [], objects: [] },
+      invocations: RPC_CONTRIBUTION.descriptors,
+    });
+  });
 }
 
 export { LlamapadAdapter, createPanelClient, createModelGate };

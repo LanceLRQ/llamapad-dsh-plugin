@@ -1,0 +1,195 @@
+# dsh 设置卡片（阶段二实施记录）
+
+> 状态：**已实施**（2026-08-27）。对应 [聊天路由与容器生命周期解耦](./chat-vs-lifecycle-decoupling.md) 第 3 节的阶段二。
+> 真机验证：无头 Chromium 打开 dsh 设置页，卡片正常渲染、页面零错误。
+
+## 1. 最终形态与它和原计划的差别
+
+原计划（解耦文档 §3 订正后）是「复刻产物格式 → 一次做到原生设置卡」，并把挂载点设想为
+`settings.section`（左侧导航多一项 + 右侧整页）。实际落地时用户定为**两处都要**，且独立页
+用 iframe 直接嵌 llamapad 面板以免维护两份 UI。核实后**独立页整个取消**，原因是 iframe 有
+两个绕不过去的坑：
+
+1. **iframe 的地址由浏览器解析，不是 host 解析**。配置里的 `panelUrl` 是 host 进程视角的
+   地址（常见是 `127.0.0.1`），用户从别的机器打开 dsh 时，iframe 里的 `127.0.0.1` 指向
+   **用户自己的机器**。
+2. **面板会话 cookie 是 `SameSite=Lax`**（llamapad `src/server/cookie.ts`）。dsh 与 llamapad
+   同主机不同端口时没问题（cookie 不区分端口，算 same-site）；**不同主机就是跨站**，浏览器
+   既不发 cookie，也会拒收 iframe 里登录时的 `Set-Cookie`——永远停在登录页。
+
+于是最终形态是：
+
+| 位置 | 内容 |
+|---|---|
+| 设置 → 插件 → 插件配置（`settings.plugin.item`） | 一张卡片：运行状态 + 模型列表 + 启停/切换按钮 + 右上角「在浏览器中打开面板」 |
+| 独立页（`settings.section`） | **不做** |
+
+坑 1 的解法仍然保留下来了：新增配置项 `panelPublicUrl`（浏览器可见地址，缺省回落
+`panelUrl`），「在浏览器中打开面板」按钮用它。单机部署无感，跨机部署时必须配。
+
+## 2. 架构：浏览器卡片 → host RPC → PanelClient
+
+```
+浏览器 (dsh web)                     dsh host 进程                  llamapad 面板
+┌────────────────────┐   HTTP POST   ┌──────────────────┐   HTTP    ┌──────────┐
+│ Card.tsx           │──/api/llamapad│ PanelGateway     │──────────>│ /api/v1  │
+│  ctx.remote        │  Panel/xxx ──>│  (TypertRemote-  │  带 token │          │
+│  .llamapadPanel.*  │<──────────────│   Service)       │<──────────│          │
+└────────────────────┘  CardSnapshot └──────────────────┘           └──────────┘
+                                       PanelClient / ModelGate
+                                       token 只存在于这一层
+```
+
+**token 与 PanelClient 全程留在 host 进程**，浏览器不直连 llamapad。因此：
+
+- llamapad **不需要加 CORS**（解耦文档 §4 第 3 条的待评估事项就此关闭，仍然不做）
+- API token 不进浏览器
+- host 侧已有的 `sharedModelGate` 被复用，卡片按钮与聊天路径、B 形态工具共用同一把锁
+
+三个方法（契约唯一出处 `src/rpc-contract.ts`）：`snapshot()` / `start(model)` / `stop(model)`，
+**全部返回 `CardSnapshot`**——动作做完顺带回传最新状态，省一次往返也避免中间态闪烁。
+
+### 错误语义：不抛，塞进 `panelError`
+
+面板不可达 / 鉴权失败这类运行期故障**不抛错**。RPC 抛错到浏览器侧只剩
+`{ ok:false, error }` 一个壳，信息更少也更难渲染。约定是把中文说明放进
+`CardSnapshot.panelError`，其余字段尽最大努力填，让卡片总能画出「面板连不上」**并继续显示
+「在浏览器中打开面板」按钮**——那是用户此时唯一的退路。只有 `model` 为空串这类编程错误才抛。
+
+同理，浏览器侧一次轮询失败也**不清空上一份快照**，只在顶部补一条「刷新失败，下方是上次读到
+的内容」。否则最需要退路的时刻恰好把退路按钮一起抹掉。
+
+## 3. 四条真机才暴露的硬约束
+
+这四条都不是读文档能得到的，全部由冒烟打出来，按踩到的顺序记录。
+
+### 3.1 `@Remote` 装饰器对第三方插件不可用，且**对齐版本号救不了**
+
+dsh 网关默认用 SRC 反射发现可远程调用的方法：`@Remote()` 装饰器把标记写进
+`@deepseek-ai/dsh-typert-protocol` 的**模块级 `WeakMap`**（`const markers = new WeakMap()`），
+网关的 `remoteMethods()` 从同一张表里读。
+
+而第三方插件从**自己的** `node_modules` 解析该包，宿主从 dsh 的安装目录解析：
+
+```
+插件:    .../llamapad-dsh-plugin/node_modules/.pnpm/@deepseek-ai+dsh-typert-protocol@0.1.1-rc.2.../
+宿主:    /root/.nvm/.../dsh/node_modules/@deepseek-ai/dsh-typert-protocol/
+```
+
+两份模块实例、**两张 WeakMap**。网关那份永远是空的，`collectSrcClaims()` 收不到端点，
+请求直接 404，而且没有任何报错——`claimsEndpoint` 返回 false 就是 404。
+
+> 这与本仓 `prepareCall` 那次版本漂移同源但更狠：那次是鸭子类型判定，**对齐版本号就能修**；
+> 模块级状态只要有两份模块实例就必然分裂，**版本一致也没用**。凡是依赖模块级单例
+> （WeakMap / Map / Symbol / 计数器）的宿主机制，第三方插件都要假定它不可用。
+
+**可行的通路**：向 `ctx.typert` 注册 strict 描述符。`ctx.typert` 是 cordis 服务，经 DI 拿到的
+是宿主那一份实例，`claimsEndpoint` 又优先查 `typert.local`：
+
+```ts
+ctx.inject(["typert"], (typertCtx) => {
+  typertCtx.typert.register({
+    package: RPC_PACKAGE,
+    face: "host",
+    schemas: [],
+    model: { services: [], events: [], objects: [] },
+    invocations: RPC_CONTRIBUTION.descriptors,
+  });
+});
+```
+
+装饰器随之成为死代码，已全部删除。连带好处：不再需要为 TC39 装饰器语法在 vitest 里塞
+esbuild 降级插件（Vite 8 + Vitest 4 那套转换管线不会自行下探装饰器，测试会 `SyntaxError`）。
+
+`TypertRemoteService` 基类**要保留**：网关的 `validateBinding` 要读实例上的 `typertRemote`，
+那是个普通冻结对象、结构化读取，跨模块实例没问题。
+
+### 3.2 `ctx.remote.<自己的命名空间>` 不能写进静态 `inject`
+
+cordis 对 `ctx.remote.<ns>` 有守卫，不声明就取会抛
+`cannot get property "remote.llamapadPanel" without inject`，真机表现是 dsh 首页一条
+**"Failed to load plugins"**。
+
+但这个服务恰恰是本插件自己 `$mount` 出来的——写进模块顶层的静态 `inject` 会让 apply 永远
+等不到自己的产物，死锁。官方包（如 `dsh-client-ui-settings-plugin-inventory`）能把
+`remote.pluginInventory` 写进静态 `inject`，是因为**挂载方与消费方是两个不同的插件**
+（`dsh-api-remotes` 的 client 半身统一 `$mount` 官方全部契约）。
+
+解法是响应式作用域：
+
+```ts
+const disposeMount = await ctx.remote.$mount(RPC_CONTRIBUTION);
+ctx.inject(["slots", `remote.${RPC_NAMESPACE}`], (inner) => {
+  const api = createPanelApi(inner.remote[RPC_NAMESPACE]);
+  return inner.slots.inject("settings.plugin.item", () => inner.slots.register(…));
+});
+```
+
+### 3.3 `exports` 必须放行 `./package.json`
+
+`dsh-client-modules` 的 `resolveMeta` 用 `require.resolve(\`${包名}/package.json\`)` 去读
+`dsh.client`。`exports` 不放行这条子路径时解析会抛，而它 `catch` 之后是**静默跳过**——
+不报错、不警告，卡片永远不出现，boot 图里也没有本插件那一行。官方每个 dsh 包的 `exports`
+里都有 `"./package.json": "./package.json"`，那不是惯例是必需项。
+
+### 3.4 `dsh.bundle` 与 `dsh.client` 是并列字段，别互相覆盖
+
+`dsh.bundle.patch` 是本包作为 **profile bundle** 时的默认挂载模板；`dsh.client` 是本包作为
+**浏览器插件**时的声明。整体赋值 `package.json` 的 `dsh` 字段会把另一个抹掉，症状是 dsh 启动
+即失败：`profile bundle "llamapad-dsh-plugin" declares no dsh.bundle in its package.json`。
+
+## 4. 浏览器产物：格式与构建
+
+产物格式很浅，`esbuild` 加 banner/footer 即可复刻，宿主不校验产物由谁打包：
+
+```js
+window.__ModuleLoader__.load({
+  id: "<npm 包全名>",
+  factory: (require) => { var module = { exports: {} }; …; return module.exports; }
+});
+```
+
+`scripts/build.mjs` 第二趟用 `platform:'browser'` + `format:'cjs'` + banner/footer 产出。三条
+红线写在该文件注释里，此处只列结论：
+
+- **只有 7 个 seed 模块能 external**：`react`、`react/jsx-runtime`、`react-dom`、
+  `react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-ui-slots`、
+  `@deepseek-ai/dsh-client-ui-primitives`。宿主的模块表是硬编码静态种子表，
+  **require 落空是 loud throw**，其余依赖必须真打进产物。`test/e2e/client-bundle-format.test.ts`
+  用 `node:vm` 模拟宿主 loader 守住这条。
+- **产物缺失 = 整个插件 FAILED**，不是「卡片不显示」。`dsh.client` 是 package.json 静态字段、
+  无法条件关闭，所以 `dist/` 虽不入库，**装载前必须先 `pnpm run build`**。这是选择「单包三入口」
+  而非「卡片单独成包」时明确接受的代价。
+- 依赖 `@deepseek-ai/dsh-client-ui-slots` / `-primitives` 只能作为 **devDependency**：它们没有
+  独立发布到 profile 的 node_modules，而是被打进宿主 shell 的 dist 当运行时单例，本地装只为
+  类型检查。
+
+## 5. settings namespace：两个常量，不是一个
+
+`RPC_NAMESPACE = "llamapadPanel"`（驼峰）——cordis service key 兼 wire 命名空间，浏览器侧
+表现为 `ctx.remote.llamapadPanel.*`，必须是合法 JS 标识符。
+
+`SETTINGS_NAMESPACE = "llamapad-panel"`（kebab）——`settingsNamespace()` 有硬校验
+`/^[a-z][a-z0-9-]*$/`，驼峰当场抛 `TypeError`。
+
+它同时是卡片的 slot key：Plugins 页签只渲染「**host 已服务的 settings namespace ∩ 已注册到
+`settings.plugin.item` 的卡片**」的交集（dsh 源码注释原文）。所以哪怕本轮不做配置表单，
+host 侧也**必须**调 `installSettingsSection` 注册这个 namespace，否则卡片不会被派发，
+且同样是静默的。
+
+**配置真源没有变**：注册了 namespace 但不提供表单，没有任何东西会写 `settings.yaml`，
+`scope.get()` 拿到的就是 `cordis.patch.yml` 的 entry 配置，行为与做卡片之前逐字一致。
+顺带确认了 token 不会泄漏到浏览器——wire 路径上 `dsh-host-apiproxy` 调的是
+`settings.describe({ redactSecrets: true })`，`role('secret')` 字段在过线前被结构性剥除，
+我们的 `token` 正是直接声明在 object 根上的 secret 字段。
+
+## 6. 已知缺口
+
+- 卡片的**渲染层**没有测试。纯逻辑（状态推导、按钮禁用条件、文案映射、RPC 外壳拆解）在
+  `src/client/state.ts` / `rpc.ts` 里已抽成纯函数并有单测，但「轮询失败保留上一份快照」这类
+  组件内行为只有真机验证过，没有回归测试——仓库没装 Testing Library，本轮不为此新增依赖。
+- 卡片内的**实时状态靠轮询**（5 秒），不是推送。第三方无法往
+  `API_REMOTE_FORWARDED_EVENTS` 白名单里追加事件名（那是写死在已发布 npm 包里的数组），
+  所以推送这条路对我们关闭。轮询只在卡片挂载期间进行，卸载即停。
+- 第三方 `settings.section` 的导航图标只能是通用齿轮（`navIcon()` 按 id 硬编码只认
+  `models`/`agent-presets`/`plugins`）。本轮不做独立页，暂时无影响，若日后要做需知悉。

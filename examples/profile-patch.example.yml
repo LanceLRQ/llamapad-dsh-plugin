@@ -6,6 +6,10 @@
   config:
     panelUrl: http://192.168.1.10:8080
     token: !!js process.env.LLAMAPAD_TOKEN
+    # 设置卡片里「在浏览器中打开面板」按钮用的地址。缺省回落 panelUrl，同机部署不用配；
+    # 但 panelUrl 是 dsh host 进程视角的地址（常见 127.0.0.1），而这颗按钮是在**用户的
+    # 浏览器**里打开的——跨机访问 dsh 时两者不是一回事，必须显式配成浏览器能到达的地址：
+    # panelPublicUrl: http://192.168.1.10:8080
     # 远程/端口不暴露时用默认 proxy 模式；同机低延迟可改 direct：
     # mode: direct
     # llamaBaseUrl: http://192.168.1.10:18080
