@@ -94,30 +94,28 @@ dsh web                            # 模型选择器出现面板里的模型
 
 ## 本地调试（不发布版本）
 
-**方式一：`--patch` 直挂源码（推荐——零构建零打包，不动 profile）**
+**方式一（推荐，已实测）：装进 web profile，`dsh web` 直接用**
 
 ```bash
-# 在本仓库根目录执行；两种挂法任选：
-dsh web --patch ./examples/dev.example.yml   # 免修改：panelUrl/token/model 全走环境变量
-# 或复制私有副本 examples/dev.yml（已 gitignore），写死自己的真实值：
-dsh web --patch ./examples/dev.yml
+# 一次性：本仓库作为 link: 软链依赖装进默认 web profile（dsh web 启动的就是它）
+dsh plugin --profile web add /绝对路径/llamapad-dsh-plugin
+# 配置写用户层 ~/.dsh/profiles/web/cordis.patch.yml（模板 examples/profile-patch.example.yml），然后：
+dsh web        # http://127.0.0.1:3080
 ```
 
-模板见 [examples/dev.example.yml](examples/dev.example.yml)：`name` 用相对路径直指 `src/index.ts`
-（已实测 npx 安装的 dsh CLI 也能加载 TS 源码，相对路径按 dsh 工作目录解析）；本地私有副本
-`examples/dev.yml` 已被 .gitignore 忽略，写真实地址/token 不会被提交。改完代码重启 dsh 即生效，
-`--patch` 作为 argv 层叠加在当前 profile 之上，验证「源码 + 显式配置」组合最顺手。
+软链意味着每轮改动只需 `npm run build` + 重启 dsh，**无需重新 add**。
+⚠️ 实测坑一：安装版 dsh（npx/全局）的 `--patch` **不解析模块路径行**——`./src/index.ts`、
+`./dist/index.js`、绝对路径都会被**静默忽略**（不加载、不报错、服务照常起），别用
+`dsh web --patch examples/dev.yml` 调试；判断插件是否加载，看启动日志有无
+`[llamapad-dsh-plugin]` 输出。
+⚠️ 实测坑二：**同版本 tgz** 重 `add` 不刷新（pnpm 按 spec 缓存）；目录 link 方式无此问题。
 
-**方式二：dev profile + 本地目录安装（贴近真实安装形态，发版前演练用）**
+**方式二（仅 dsh 源码仓库场景）：`--patch` 直挂 TS 源码**
 
-```bash
-npm run build
-dsh plugin --profile dev add /绝对路径/llamapad-dsh-plugin
-# 每轮改动后：npm run build && 重新执行同一条 add（实测目录重 add 会刷新实装拷贝）
-```
-
-⚠️ 注意坑：**同版本 tgz** 重新 `add` **不会**刷新——pnpm 按依赖 spec 路径缓存，文件名不变
-就跳过重装（实测确认）。要刷新已装的 tgz，换文件名（如复制改名 `-dev1.tgz`）或改用目录方式。
+从 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 源码检出运行
+`pnpm dsh web --patch /绝对路径/examples/dev.example.yml` 时可用（其开发 loader 支持路径加载
+TS），模板见 [examples/dev.example.yml](examples/dev.example.yml)，本地私有副本
+`examples/dev.yml` 已 gitignore。
 
 **方式三：测试回路**——`npm test` / `npm run test:e2e`（假面板），改适配器逻辑的主回路，
 不需要 dsh 与真实面板。

@@ -15,9 +15,10 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 - **打包发布**：内容变更后 `npm run release`（清洁检查→门禁→版本递增→构建→`npm pack` 出 tgz，
   流程/版本策略/用户侧更新见 `docs/packaging.md`）。产物不入库（.gitignore 忽略 `*.tgz`/`dist/`）；
   0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `npm run pack:dsh` 同版本重打。
-  本地调试不发布版本：`--patch` 直挂 `src/index.ts`（模板 `examples/dev.example.yml`，本地私有副本
-  `examples/dev.yml` 已 gitignore；安装版 CLI 可加载 TS）；profile 方式用**目录**重 add 刷新
-  （同版本 tgz 重 add 不刷新——pnpm 按 spec 缓存，实测确认）
+  本地调试不发布版本：装进 web profile（`dsh plugin --profile web add 本仓库` → link: 软链，
+  `npm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`；
+  **安装版 CLI 的 `--patch` 不解析模块路径行（静默跳过，实测）**，路径直挂仅限 dsh 源码仓库
+  场景（examples/dev.example.yml）；同版本 tgz 重 add 不刷新（pnpm 按 spec 缓存）
 
 ## 关键约束
 

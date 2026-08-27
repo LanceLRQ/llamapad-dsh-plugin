@@ -1,15 +1,13 @@
-# 本地调试预览模板（不发布版本、不动 profile）：--patch 把插件叠加到 dsh 上。
+# 本地调试模板——⚠️ 仅适用于「从 dsh 源码仓库运行」的场景：
+# 检出 deepseek-harness 后，在其仓库根目录执行（其开发 loader 支持路径加载 TS 源码）：
+#   pnpm dsh web --patch /绝对路径/llamapad-dsh-plugin/examples/dev.example.yml
 #
-# 用法一（免本地修改，全走环境变量）：在本仓库根目录直接挂本模板——
-#   LLAMAPAD_TOKEN=lp_xxx LLAMAPAD_URL=http://192.168.1.10:8080 \
-#     dsh web --patch ./examples/dev.example.yml
+# 安装版 dsh（npx/全局）的 --patch 不解析模块路径行，会静默忽略本文件——
+# 那种情况请用 profile 方式（README「本地调试」方式一）：
+#   dsh plugin --profile web add /绝对路径/llamapad-dsh-plugin
+#   # 配置写 ~/.dsh/profiles/web/cordis.patch.yml（模板 examples/profile-patch.example.yml）
 #
-# 用法二（本地私有副本，推荐）：复制为 examples/dev.yml（.gitignore 已忽略，不会被提交），
-# 把真实 panelUrl / token / model 直接写死进去，然后在本仓库根目录——
-#   dsh web --patch ./examples/dev.yml
-#
-# 说明：name 的相对路径按 dsh 进程工作目录解析（须从仓库根目录启动）；
-# 想贴近构建产物：先 npm run build，name 改 './dist/index.js'；改完代码重启 dsh 生效。
+# 本地私有副本 examples/dev.yml 已 gitignore；name 相对路径按 dsh 进程工作目录解析。
 - id: llamapad
   name: './src/index.ts'
   config:

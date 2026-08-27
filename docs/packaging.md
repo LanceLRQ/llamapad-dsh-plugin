@@ -60,10 +60,11 @@ spec 路径缓存，内容变了但路径没变就跳过重装。要刷新就换
 
 ## 本地调试（不发布版本）
 
-开发期预览不需要 release/pack：`--patch` 直挂源码（模板 `examples/dev.example.yml`，本地私有副本
-`examples/dev.yml` 已 gitignore；npx 安装的 dsh CLI 也能加载 TS 源码，重启 dsh 生效），或 dev
-profile 装本地目录后每轮 `npm run build` + 重 `add`。三种方式的对比与实测结论见
-README「本地调试（不发布版本）」。
+开发期预览不需要 release/pack：**装进 web profile**（`dsh plugin --profile web add 本仓库`，link:
+软链，每轮 `npm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`。
+⚠️ 安装版 dsh 的 `--patch` 不解析模块路径行（`./src/index.ts`、`./dist/index.js`、绝对路径均被
+静默忽略，实测确认）；路径直挂仅限从 dsh 源码仓库运行的场景（`examples/dev.example.yml`）。
+三种方式对比见 README「本地调试（不发布版本）」。
 
 ## 用户侧如何更新到新版
 
