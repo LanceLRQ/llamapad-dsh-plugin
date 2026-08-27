@@ -1,0 +1,28 @@
+# 本地调试预览模板（不发布版本、不动 profile）：--patch 把插件叠加到 dsh 上。
+#
+# 用法一（免本地修改，全走环境变量）：在本仓库根目录直接挂本模板——
+#   LLAMAPAD_TOKEN=lp_xxx LLAMAPAD_URL=http://192.168.1.10:8080 \
+#     dsh web --patch ./examples/dev.example.yml
+#
+# 用法二（本地私有副本，推荐）：复制为 examples/dev.yml（.gitignore 已忽略，不会被提交），
+# 把真实 panelUrl / token / model 直接写死进去，然后在本仓库根目录——
+#   dsh web --patch ./examples/dev.yml
+#
+# 说明：name 的相对路径按 dsh 进程工作目录解析（须从仓库根目录启动）；
+# 想贴近构建产物：先 npm run build，name 改 './dist/index.js'；改完代码重启 dsh 生效。
+- id: llamapad
+  name: './src/index.ts'
+  config:
+    panelUrl: !!js process.env.LLAMAPAD_URL || 'http://192.168.1.10:8080'
+    token: !!js process.env.LLAMAPAD_TOKEN || ''
+    # mode: direct
+    # llamaBaseUrl: http://192.168.1.10:18080
+
+# agent 默认走 llamapad（可选，不需要可整块删掉；模型名用 LLAMAPAD_MODEL 覆盖）：
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents:
+      - id: main
+        provider: llamapad
+        model: !!js process.env.LLAMAPAD_MODEL || 'qwen3-8b-q4'

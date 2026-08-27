@@ -97,12 +97,16 @@ dsh web                            # 模型选择器出现面板里的模型
 **方式一：`--patch` 直挂源码（推荐——零构建零打包，不动 profile）**
 
 ```bash
-LLAMAPAD_TOKEN=lp_xxx dsh web --patch /绝对路径/llamapad-dsh-plugin/examples/dev-preview.yml
+# 在本仓库根目录执行；两种挂法任选：
+dsh web --patch ./examples/dev.example.yml   # 免修改：panelUrl/token/model 全走环境变量
+# 或复制私有副本 examples/dev.yml（已 gitignore），写死自己的真实值：
+dsh web --patch ./examples/dev.yml
 ```
 
-模板见 [examples/dev-preview.yml](examples/dev-preview.yml)：`name` 直接指向 `src/index.ts`
-（已实测 npx 安装的 dsh CLI 也能加载 TS 源码），改完代码重启 dsh 即生效。`--patch` 作为
-argv 层叠加在当前 profile 之上，验证「源码 + 显式配置」组合最顺手。
+模板见 [examples/dev.example.yml](examples/dev.example.yml)：`name` 用相对路径直指 `src/index.ts`
+（已实测 npx 安装的 dsh CLI 也能加载 TS 源码，相对路径按 dsh 工作目录解析）；本地私有副本
+`examples/dev.yml` 已被 .gitignore 忽略，写真实地址/token 不会被提交。改完代码重启 dsh 即生效，
+`--patch` 作为 argv 层叠加在当前 profile 之上，验证「源码 + 显式配置」组合最顺手。
 
 **方式二：dev profile + 本地目录安装（贴近真实安装形态，发版前演练用）**
 
