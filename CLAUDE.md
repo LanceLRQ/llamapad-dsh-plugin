@@ -7,16 +7,20 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 - **执行模式**：里程碑/计划先经 writing-plans 细化为 micro-step 计划（`docs/plans/`），再以 subagent
   驱动逐任务实施（每任务派实现 subagent，主会话审查后提交）
 - **提交**：中文 Conventional Commits，一任务一提交；分支约定 `dev` 开发、`main` 收口
-- **代理**：所有 npm/网络命令先
+- **包管理器：pnpm**（2026-08-27 由 npm 迁入，与宿主 dsh 的 profile 同栈）。锁文件
+  `pnpm-lock.yaml` 入库，不要再生成 `package-lock.json`。`pnpm-workspace.yaml` 里
+  `allowBuilds: {esbuild: false}` 是有意为之——esbuild 的 postinstall 只做平台二进制兜底，
+  平台包走 optionalDependencies 已装好，声明它免得每次 install 刷 ERR_PNPM_IGNORED_BUILDS
+- **代理**：所有 pnpm/网络命令先
   `export HTTP_PROXY=http://10.22.33.1:20172 HTTPS_PROXY=http://10.22.33.1:20172 NO_PROXY=localhost,127.0.0.1`
   （GPU 服务器出口；旧记的 `127.0.0.1:20171` 是 Mac 开发机地址，在本机不存在）
-- **测试**：`npm test`（单测）/ `npm run test:e2e`（假面板 E2E，无需真实环境）/ `npm run typecheck`；
+- **测试**：`pnpm test`（单测）/ `pnpm run test:e2e`（假面板 E2E，无需真实环境）/ `pnpm run typecheck`；
   TDD——先写失败测试再实现
-- **打包发布**：内容变更后 `npm run release`（清洁检查→门禁→版本递增→构建→`npm pack` 出 tgz，
+- **打包发布**：内容变更后 `pnpm run release`（清洁检查→门禁→版本递增→构建→`pnpm pack` 出 tgz，
   流程/版本策略/用户侧更新见 `docs/packaging.md`）。产物不入库（.gitignore 忽略 `*.tgz`/`dist/`）；
-  0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `npm run pack:dsh` 同版本重打。
+  0.x 阶段行为/依赖变更 minor、修复 patch；纯随包文档改动用 `pnpm run pack:dsh` 同版本重打。
   本地调试不发布版本：装进 web profile（`dsh plugin --profile web add 本仓库` → link: 软链，
-  `npm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`；
+  `pnpm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`；
   **安装版 CLI 的 `--patch` 不解析模块路径行（静默跳过，实测）**，路径直挂仅限 dsh 源码仓库
   场景（examples/dev.example.yml）；同版本 tgz 重 add 不刷新（pnpm 按 spec 缓存）
 
@@ -66,10 +70,15 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 4 个工具经真实 `ToolRuntime` 管线跑通且输出过框架 schema 校验。结果见
 `docs/manual-smoke.md`「真机冒烟结果」。全部测试 111 单测 + 9 假面板 E2E 全绿。
 
+**模型选择器运行状态标记已实施**（2026-08-27）：`listModels` 按面板 `status` 字段给运行中模型加
+`●` 前缀、给 `missing-file`/`missing-mmproj` 追加提示（纯函数 `describeModel`，`adapter.ts`）；
+新增 `directory-refresh.ts` 轮询面板运行状态，仅在运行中模型变化时 `ctx.emit("llm/adapters-updated")`
+触发浏览器侧目录重拉，间隔由新增 Config 字段 `statusRefreshMs`（默认 5000ms，0 关闭）控制。
+
 待办：
 - 阶段二：生命周期控制的显式入口。**「零成本外链」那一步已被核实推翻**——host 侧单独注册在
   设置界面里什么都不显示，露出任何内容都要自行复刻浏览器端 client module 的产物格式（官方
   tsdown preset 未发布）。订正后的门槛结构见设计文档第 3 节；下一步是产物格式的专项调研 spike
 - **关注 llamapad M5**：其挂账②计划改造 llama webui 反代，而本插件依赖同一路由的 API 路径
   （`/api/v1/proxy/llama/v1/chat/completions` 与 `/health`），改造时须确认未打断
-- 打包发布：本轮改动尚未 `npm run release`（版本未递增、未出 tgz）
+- 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）

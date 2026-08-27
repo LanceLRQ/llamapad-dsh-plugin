@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 // 重新打包脚本：插件内容变更后产出新版可安装 tgz。
-// 流程：工作区清洁检查 → 质量门禁（typecheck / 单测 / E2E）→ 版本递增（同步 lock）→
-// 构建 → npm pack → 打印制品 sha256 与安装/更新命令。
+// 流程：工作区清洁检查 → 质量门禁（typecheck / 单测 / E2E）→ 版本递增 →
+// 构建 → pnpm pack → 打印制品 sha256 与安装/更新命令。
 // 用法：
-//   npm run release                    # patch 递增（默认）
-//   npm run release -- minor           # minor 递增（0.x 阶段的行为/依赖变更）
-//   npm run release -- 0.2.0           # 显式版本
-//   npm run release -- --allow-dirty   # 跳过清洁检查（不建议：制品无法溯源到提交）
+//   pnpm run release                    # patch 递增（默认）
+//   pnpm run release minor              # minor 递增（0.x 阶段的行为/依赖变更）
+//   pnpm run release 0.2.0              # 显式版本
+//   pnpm run release --allow-dirty      # 跳过清洁检查（不建议：制品无法溯源到提交）
 // 详细说明见 docs/packaging.md。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
@@ -46,9 +46,9 @@ if (!allowDirty) {
 
 // 2. 质量门禁
 console.log('[release] 质量门禁：typecheck / 单测 / E2E')
-run('npm', ['run', 'typecheck'])
-run('npm', ['test'])
-run('npm', ['run', 'test:e2e'])
+run('pnpm', ['run', 'typecheck'])
+run('pnpm', ['test'])
+run('pnpm', ['run', 'test:e2e'])
 
 // 3. 版本递增（patch | minor | major | 显式 x.y.z）
 function nextVersion(current, arg) {
@@ -70,23 +70,18 @@ const next = nextVersion(prev, bumpArg)
 pkg.version = next
 writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
 
-const lockPath = resolve(root, 'package-lock.json')
-if (existsSync(lockPath)) {
-  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
-  lock.version = next
-  if (lock.packages && lock.packages['']) lock.packages[''].version = next
-  writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`)
-}
+// pnpm-lock.yaml 不记录根包版本（npm 的 package-lock.json 才需要同步），
+// 所以这里只改 package.json，锁文件无需跟着动。
 console.log(`[release] 版本：${prev} → ${next}`)
 
-// 4. 构建 + 打包（npm pack 的 prepare 钩子会再构建一次，幂等）
-run('npm', ['run', 'build'])
-const pack = run('npm', ['pack'], { capture: true })
+// 4. 构建 + 打包（pack 的 prepare 钩子会再构建一次，幂等）
+run('pnpm', ['run', 'build'])
+const pack = run('pnpm', ['pack'], { capture: true })
 const tgz = [...pack.stdout.split('\n'), ...pack.stderr.split('\n')]
   .map((l) => l.trim())
   .find((l) => /^llamapad-dsh-plugin-[\w.-]+\.tgz$/.test(l))
 if (!tgz) {
-  console.error('[release] 未能从 npm pack 输出解析出制品文件名')
+  console.error('[release] 未能从 pnpm pack 输出解析出制品文件名')
   process.exit(1)
 }
 const artifact = resolve(root, tgz)
@@ -102,5 +97,5 @@ console.log(`
   安装    dsh plugin --profile <名> add ${artifact}
   更新    已装旧版的 profile 重新执行同一条 add 即覆盖更新（层列表不变）
   验证    dsh --profile <名> --dump-config   # 应看到 "# == llamapad-dsh-plugin" 层
-  提交    git add package.json package-lock.json && git commit -m "release: v${next}"
+  提交    git add package.json && git commit -m "release: v${next}"
 ${stale.length ? `  注意    根目录还有旧制品：${stale.join('、')}（确认无用后可 rm）` : ''}`)

@@ -1,0 +1,8 @@
+packages:
+  - .
+
+# esbuild 的 postinstall 只做平台二进制的校验/兜底下载，平台包本身走 optionalDependencies
+# 已经装好（`node -e "require('esbuild').version"` 实测可用）。显式声明"不给它跑构建脚本"，
+# 而不是放任 pnpm 每次 install 刷一条 ERR_PNPM_IGNORED_BUILDS。
+allowBuilds:
+  esbuild: false

@@ -1,6 +1,6 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
-import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelRuntimeStatus } from "./panel-client";
+import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
 import { decideRoute, type ChatBehavior } from "./routing";
 import { buildChatBody } from "./openai-wire";
@@ -33,12 +33,10 @@ export class LlamapadAdapter extends LlmAdapter {
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const models = await this.options.client.listModels();
-    return models.map((m) => ({
-      provider,
-      id: m.name,
-      name: m.displayName || m.name,
-      description: `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`,
-    }));
+    return models.map((m) => {
+      const { name, description } = describeModel(m);
+      return { provider, id: m.name, name, description };
+    });
   }
 
   override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -148,6 +146,25 @@ function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["runni
   } catch {
     return `${llamaBaseUrl}/v1/chat/completions`;
   }
+}
+
+/**
+ * 面板模型行 → 选择器展示文案。`LlmModelInfo` 没有状态位（见类型定义），状态只能
+ * 编码进 name/description 的文本里，抽成纯函数便于单测覆盖 4 种 status 而不必绕经
+ * listModels 的网络往返。
+ * - running：name 前加 ● 前缀（不用空格占位对齐，选择器变宽字体对不齐更乱）
+ * - missing-file / missing-mmproj：description 末尾按既有的 " · " 分隔追加提示——
+ *   选中这类模型必然在启动时 422，提前标出来省一次踩坑
+ * - ready：不加任何标记
+ */
+export function describeModel(m: PanelModelView): { name: string; description: string } {
+  const baseName = m.displayName || m.name;
+  const name = m.status === "running" ? `● ${baseName}` : baseName;
+  const baseDescription = `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`;
+  const suffix = m.status === "missing-file" ? " · 文件缺失"
+    : m.status === "missing-mmproj" ? " · mmproj 缺失"
+    : "";
+  return { name, description: `${baseDescription}${suffix}` };
 }
 
 function readCtxSize(overrides: unknown): number | undefined {

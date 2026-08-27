@@ -41,6 +41,12 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 - 插件内串行门 + 同目标合流避免并发抖动（仅 `auto-switch` 档会触发 start）
 - 切换等待期**静默**（不往对话注入提示文本——那会污染历史上下文，见
   [调研文档](docs/research/2026-08-24-dsh-plugin-research.md) §5）
+- **模型选择器上的运行状态标记**：运行中的模型名前会有 `●` 前缀；`missing-file`/
+  `missing-mmproj`（配置了但文件缺失）的模型会在说明文字后追加提示——选中这类模型
+  必然在启动时 422，提前标出来省一次踩坑。标记随 `statusRefreshMs` 轮询自动刷新：
+  插件定期查询面板运行状态，只在"当前运行中的模型"发生变化时才通知 dsh 重拉模型
+  目录（浏览器侧目录本身不轮询，只在收到通知时重拉），关掉轮询（`statusRefreshMs: 0`）
+  后标记会停在插件启动那一刻的旧值，不再跟随面板侧的启停更新
 
 ## B 形态：管理工具（`llamapad-dsh-plugin/tools`）
 
@@ -73,6 +79,7 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 | `drainTimeoutMs` | `60000` | 排空等待的最长时间（仅 `auto-switch` 档且 `drainOnSwitch=true` 时生效） |
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
+| `statusRefreshMs` | `5000` | 轮询面板运行状态并刷新模型选择器的间隔（毫秒）；`0` 关闭。仅影响选择器上的运行中标记，不影响对话 |
 
 挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
@@ -86,8 +93,8 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 
 ```bash
 # 仓库根目录打包（或直接用 Release 里附带的 tgz）
-npm run release         # 门禁 + 版本递增 + 构建 → llamapad-dsh-plugin-<版本>.tgz
-# 仅改了随包文档、不升版本时：npm run pack:dsh
+pnpm run release         # 门禁 + 版本递增 + 构建 → llamapad-dsh-plugin-<版本>.tgz
+# 仅改了随包文档、不升版本时：pnpm run pack:dsh
 
 # 装进一个 dsh profile
 dsh plugin --profile <名> add ./llamapad-dsh-plugin-<版本>.tgz
@@ -167,7 +174,7 @@ dsh plugin --profile web add /绝对路径/llamapad-dsh-plugin
 dsh web        # http://127.0.0.1:3080
 ```
 
-软链意味着每轮改动只需 `npm run build` + 重启 dsh，**无需重新 add**。
+软链意味着每轮改动只需 `pnpm run build` + 重启 dsh，**无需重新 add**。
 ⚠️ 实测坑一：安装版 dsh（npx/全局）的 `--patch` **不解析模块路径行**——`./src/index.ts`、
 `./dist/index.js`、绝对路径都会被**静默忽略**（不加载、不报错、服务照常起），别用
 `dsh web --patch examples/dev.yml` 调试；判断插件是否加载，看启动日志有无
@@ -181,19 +188,19 @@ dsh web        # http://127.0.0.1:3080
 TS），模板见 [examples/dev.example.yml](examples/dev.example.yml)，本地私有副本
 `examples/dev.yml` 已 gitignore。
 
-**方式三：测试回路**——`npm test` / `npm run test:e2e`（假面板），改适配器逻辑的主回路，
+**方式三：测试回路**——`pnpm test` / `pnpm run test:e2e`（假面板），改适配器逻辑的主回路，
 不需要 dsh 与真实面板。
 
 ## 开发
 
 ```bash
-npm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://10.22.33.1:20172
-npm run build         # esbuild 打包 src/ → dist/index.js（@deepseek-ai/* 保持 external）
-npm test              # 单元测试
-npm run test:e2e      # 假面板 E2E（无需真实 llamapad / GPU）
-npm run typecheck
-npm run release         # 重新打包：门禁 + 版本递增 + 构建 + tgz（详见 docs/packaging.md）
-npm pack              # prepare 钩子自动先 build，产出可安装 tgz
+pnpm install   # 需代理时先 export HTTP_PROXY/HTTPS_PROXY=http://10.22.33.1:20172
+pnpm run build         # esbuild 打包 src/ → dist/index.js（@deepseek-ai/* 保持 external）
+pnpm test              # 单元测试
+pnpm run test:e2e      # 假面板 E2E（无需真实 llamapad / GPU）
+pnpm run typecheck
+pnpm run release         # 重新打包：门禁 + 版本递增 + 构建 + tgz（详见 docs/packaging.md）
+pnpm pack              # prepare 钩子自动先 build，产出可安装 tgz
 ```
 
 ## 文档索引

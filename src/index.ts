@@ -1,6 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { LlamapadAdapter } from "./adapter";
+import { startDirectoryRefresh } from "./directory-refresh";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
 import { createModelGate, sharedModelGate } from "./switching";
 
@@ -17,6 +18,7 @@ export interface Config {
   drainTimeoutMs: number;
   requestTimeoutMs: number;
   defaultContextWindow?: number;
+  statusRefreshMs: number;
 }
 
 export const Config: Schema<Partial<Config>, Config> = Schema.object({
@@ -37,6 +39,9 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   drainTimeoutMs: Schema.number().default(DEFAULT_DRAIN_TIMEOUT_MS).description("排空等待的最长时间（毫秒，仅 auto-switch 档且 drainOnSwitch=true 时生效）"),
   requestTimeoutMs: Schema.number().default(30000).description("面板控制面单请求超时（毫秒）"),
   defaultContextWindow: Schema.number().description("模型未配置 ctx_size 时 resolveModel 的兜底上下文窗口"),
+  statusRefreshMs: Schema.number().default(5000).description(
+    "轮询面板运行状态并刷新 dsh 模型选择器的间隔（毫秒）；0 关闭。仅影响选择器上的运行中标记，不影响对话",
+  ),
 });
 
 export const name = "llamapad-dsh-plugin";
@@ -80,6 +85,7 @@ export function apply(ctx: Context, config: Config) {
     ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
     ...(config.defaultContextWindow ? { defaultContextWindow: config.defaultContextWindow } : {}),
   }));
+  startDirectoryRefresh({ ctx, client, intervalMs: config.statusRefreshMs });
 }
 
 export { LlamapadAdapter, createPanelClient, createModelGate };

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { LlamapadAdapter } from "../../src/adapter";
+import { LlamapadAdapter, describeModel } from "../../src/adapter";
+import type { PanelModelView } from "../../src/panel-client";
 
 function sseResponse(lines: string[], status = 200): Response {
   const payload = lines.map((l) => `data: ${l}\n\n`).join("");
@@ -36,18 +37,61 @@ async function drain(stream: AsyncIterable<unknown>): Promise<unknown[]> {
   return chunks;
 }
 
+describe("describeModel", () => {
+  const base: PanelModelView = {
+    name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "ready",
+  };
+
+  it("running → name 加 ● 前缀，description 不追加", () => {
+    expect(describeModel({ ...base, status: "running" })).toEqual({ name: "● 模型A", description: "main · Q4_K_M" });
+  });
+
+  it("ready → 不加任何标记", () => {
+    expect(describeModel({ ...base, status: "ready" })).toEqual({ name: "模型A", description: "main · Q4_K_M" });
+  });
+
+  it("missing-file → description 末尾追加「文件缺失」，name 不加前缀", () => {
+    expect(describeModel({ ...base, status: "missing-file" })).toEqual({ name: "模型A", description: "main · Q4_K_M · 文件缺失" });
+  });
+
+  it("missing-mmproj → description 末尾追加「mmproj 缺失」", () => {
+    expect(describeModel({ ...base, status: "missing-mmproj" })).toEqual({ name: "模型A", description: "main · Q4_K_M · mmproj 缺失" });
+  });
+
+  it("displayName 缺失时用 name 兜底，前缀加在兜底名前", () => {
+    expect(describeModel({ ...base, displayName: "", status: "running" })).toEqual({ name: "● a", description: "main · Q4_K_M" });
+  });
+
+  it("quant 为 null 时 description 不带量化分段", () => {
+    expect(describeModel({ ...base, quant: null, status: "ready" })).toEqual({ name: "模型A", description: "main" });
+  });
+});
+
 describe("LlamapadAdapter", () => {
   it("providerInfo id 等于 provider", () => {
     expect(makeAdapter().adapter.providerInfo("llamapad")).toEqual({ id: "llamapad", name: expect.any(String) });
   });
 
-  it("listModels 映射面板模型行", async () => {
+  it("listModels 映射面板模型行：ready 不加标记", async () => {
     const client = { baseUrl: "x", listModels: async () => [
-      { name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "stopped" },
+      { name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "ready" },
     ], getModel: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
     const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
     const models = await adapter.listModels("llamapad");
     expect(models).toEqual([{ provider: "llamapad", id: "a", name: "模型A", description: "main · Q4_K_M" }]);
+  });
+
+  it("listModels：运行中模型带 ● 前缀，缺件模型 description 追加提示，互不干扰", async () => {
+    const client = { baseUrl: "x", listModels: async () => [
+      { name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "running" },
+      { name: "b", displayName: "模型B", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "missing-file" },
+    ], getModel: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    const models = await adapter.listModels("llamapad");
+    expect(models).toEqual([
+      { provider: "llamapad", id: "a", name: "● 模型A", description: "main · Q4_K_M" },
+      { provider: "llamapad", id: "b", name: "模型B", description: "main · 文件缺失" },
+    ]);
   });
 
   it("resolveModel：overrides.server.ctx_size → context，缺省省略", async () => {

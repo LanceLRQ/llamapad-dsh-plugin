@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { apply, Config, name, inject } from "../../src/index";
 
 function fakeCtx() {
-  return { llm: { registerAdapter: vi.fn() } } as any;
+  return { llm: { registerAdapter: vi.fn() }, effect: vi.fn(), emit: vi.fn() } as any;
 }
 
 const valid = {
@@ -49,5 +49,25 @@ describe("插件入口", () => {
     expect(parsed.drainOnSwitch).toBe(true);
     expect(parsed.drainTimeoutMs).toBe(60000);
     expect(parsed.requestTimeoutMs).toBe(30000);
+    expect(parsed.statusRefreshMs).toBe(5000);
+  });
+
+  it("apply：注册后启动目录刷新器（ctx.effect 被调用一次）", () => {
+    const ctx = fakeCtx();
+    apply(ctx, Config(valid) as any);
+    expect(ctx.effect).toHaveBeenCalledTimes(1);
+  });
+
+  it("statusRefreshMs=0 时不启动目录刷新器", () => {
+    const ctx = fakeCtx();
+    apply(ctx, Config({ ...valid, statusRefreshMs: 0 }) as any);
+    expect(ctx.effect).not.toHaveBeenCalled();
+  });
+
+  it("缺 panelUrl/token 提前 return：既不注册 adapter 也不启动刷新器", () => {
+    const ctx = fakeCtx();
+    apply(ctx, Config({}) as any);
+    expect(ctx.llm.registerAdapter).not.toHaveBeenCalled();
+    expect(ctx.effect).not.toHaveBeenCalled();
   });
 });

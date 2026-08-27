@@ -36,9 +36,9 @@ B 入口必须用 `insert:` 形式追加，不能照抄 A 形态那种「按 id 
 ## 一键重打包
 
 ```bash
-npm run release              # patch 递增（默认）
-npm run release -- minor     # 行为/依赖变更（0.x 阶段破坏性改动也用 minor）
-npm run release -- 0.2.0     # 显式版本
+pnpm run release              # patch 递增（默认）
+ppnpm run release minor     # 行为/依赖变更（0.x 阶段破坏性改动也用 minor）
+ppnpm run release 0.2.0     # 显式版本
 ```
 
 脚本（`scripts/release.mjs`）依次执行：
@@ -47,7 +47,7 @@ npm run release -- 0.2.0     # 显式版本
 2. **质量门禁**：`typecheck` → 单测 → 假面板 E2E，任一失败即中止
 3. **版本递增**：写入 `package.json` 并同步 `package-lock.json` 两处 version
 4. **构建**：esbuild 打 `src/` → `dist/index.js`（`@deepseek-ai/*` 保持 external）
-5. **打包**：`npm pack`（prepare 钩子会再构建一次，幂等），产出 `llamapad-dsh-plugin-<版本>.tgz`
+5. **打包**：`pnpm pack`（prepare 钩子会再构建一次，幂等），产出 `llamapad-dsh-plugin-<版本>.tgz`
 6. **输出**：制品路径、sha256、安装/验证命令、建议的提交信息
 
 产物不入库（`.gitignore` 忽略 `*.tgz` 与 `dist/`）。旧版 tgz 脚本**不自动删**——留着可用于
@@ -61,7 +61,7 @@ npm run release -- 0.2.0     # 显式版本
 
 ## 提交惯例
 
-源码改动先按「一任务一提交」落地，再跑 `npm run release`，版本变更单独提交（脚本会打印建议的
+源码改动先按「一任务一提交」落地，再跑 `pnpm run release`，版本变更单独提交（脚本会打印建议的
 commit message，如 `release: v0.1.1`）。这样每份制品都能溯源：版本提交 ← 功能提交链。
 
 ## 同版本重打
@@ -69,7 +69,7 @@ commit message，如 `release: v0.1.1`）。这样每份制品都能溯源：版
 只改了随包的 README / examples、不值得升版本时：
 
 ```bash
-npm run pack:dsh    # 无门禁、不升版本，直接 npm pack
+pnpm run pack:dsh    # 无门禁、不升版本，直接 pnpm pack
 ```
 
 ⚠️ 实测坑：**同版本同文件名的 tgz 重新 `add` 到已装的 profile 不会刷新**——pnpm 按依赖
@@ -79,7 +79,7 @@ spec 路径缓存，内容变了但路径没变就跳过重装。要刷新就换
 ## 本地调试（不发布版本）
 
 开发期预览不需要 release/pack：**装进 web profile**（`dsh plugin --profile web add 本仓库`，link:
-软链，每轮 `npm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`。
+软链，每轮 `pnpm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`。
 ⚠️ 安装版 dsh 的 `--patch` 不解析模块路径行（`./src/index.ts`、`./dist/index.js`、绝对路径均被
 静默忽略，实测确认）；路径直挂仅限从 dsh 源码仓库运行的场景（`examples/dev.example.yml`）。
 三种方式对比见 README「本地调试（不发布版本）」。
