@@ -12,12 +12,23 @@ import {
 } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { CardSnapshot } from "../rpc-contract";
 import type { PanelApi } from "./rpc";
-import { buildCardView, inferringDotState, type InferringBadge, type PendingAction } from "./state";
+import {
+  buildCardView,
+  describeLoadingElapsed,
+  inferringDotState,
+  type InferringBadge,
+  type LoadingElapsed,
+  type PendingAction,
+} from "./state";
 import { injectCardStyles } from "./styles";
 import type { LocaleKey } from "./locale";
 
-/** 轮询间隔：卡片挂载期间定时刷新；卸载时清掉，不常驻打面板。 */
+/**
+ * 轮询间隔：卡片挂载期间定时刷新；phase 为 starting 时提速到 2s——对齐 llamapad
+ * 面板自身启动进度条的刷新口径，其它阶段回落到 5s。卸载时清掉，不常驻打面板。
+ */
 const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_STARTING_MS = 2000;
 
 // 模块加载时注入一次即可（injectCardStyles 内部按 tag id 判重），不必放进渲染函数
 // 里每次渲染都查一遍 DOM——与官方 dsh-client-ui-settings-general 的 CSS 注入时机一致。
@@ -61,9 +72,16 @@ export function Card({ api, t }: CardProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
+
+  // 只在这个布尔值上做文章，不直接用 snapshot：snapshot 每次轮询都会换一个新对象，
+  // 若把它塞进下面两个 effect 的依赖数组，效果就是定时器永远「刚建好就被清理重建」，
+  // 轮询被自己不断打断。isStarting 只在真正跨越 starting 边界时才改变引用相等性。
+  const isStarting = snapshot !== null && snapshot.phase === "starting";
 
   // 只在卡片挂载（可见）期间轮询；effect 的清理函数负责在卸载时停表，
-  // 不让它常驻在后台打面板。
+  // 不让它常驻在后台打面板。phase 跨过 starting 边界时才重建定时器，换挡到
+  // 2s/5s 两档中的一档——不能让这个 effect 因为快照内容变化而频繁重建。
   const apiRef = useRef(api);
   apiRef.current = api;
   useEffect(() => {
@@ -81,12 +99,21 @@ export function Card({ api, t }: CardProps) {
     void load();
     const timer = setInterval(() => {
       void load();
-    }, POLL_INTERVAL_MS);
+    }, isStarting ? POLL_INTERVAL_STARTING_MS : POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [isStarting]);
+
+  // 秒表：只在 phase===starting 期间走动，驱动「已加载 N 秒」的文案；一旦跨出这个
+  // 阶段就清掉 interval，不让它常驻在背景空转——其它阶段完全不需要按秒刷新。
+  useEffect(() => {
+    if (!isStarting) return;
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [isStarting]);
 
   const runAction = (model: string, kind: "start" | "stop") => {
     setPending({ model, kind });
@@ -143,7 +170,23 @@ export function Card({ api, t }: CardProps) {
         ) : null}
 
         <div className="llamapad-card__status">
-          {snapshot.running !== null ? (
+          {view.phase === "idle" ? (
+            <span>{t("noModelRunning")}</span>
+          ) : view.phase === "starting" ? (
+            <>
+              {/* ongoing 是 StateDot 四态里唯一带动效的一档（内置的像素追逐动画），
+                  拿来当「正在加载」的视觉提示比 done/warning 更贴切，不需要我们
+                  自己另写一份加载动画样式。 */}
+              <StateDot state="ongoing" />
+              <span>
+                {loadingLabel(
+                  t,
+                  view.runningModel?.displayName ?? snapshot.running,
+                  describeLoadingElapsed(snapshot.startedAt, now),
+                )}
+              </span>
+            </>
+          ) : (
             <>
               <StateDot state={view.inferring !== null ? inferringDotState(view.inferring) : "done"} />
               {/* 运行中的模型有可能已经不在列表里（配置删了但容器还在跑），
@@ -153,10 +196,14 @@ export function Card({ api, t }: CardProps) {
                 <Pill active={view.inferring === "inferring"}>{t(inferringLabelKey(view.inferring))}</Pill>
               ) : null}
             </>
-          ) : (
-            <span>{t("noModelRunning")}</span>
           )}
         </div>
+
+        {/* 排空说明放在这里而不是按钮上：这句话足够长，塞进按钮会把整行撑到换行、
+            把模型名挤成省略号，而它恰恰是「为什么停止要等这么久」的唯一解释。 */}
+        {pending?.kind === "stop" ? (
+          <p className="llamapad-card__hint">{t("stopPendingHint")}</p>
+        ) : null}
 
         {actionError !== null ? (
           <p className="llamapad-card__actionError" role="alert">{actionError}</p>
@@ -191,6 +238,13 @@ export function Card({ api, t }: CardProps) {
       </div>
     </div>
   );
+}
+
+/** 加载中状态行的文案：耗时算不出来（startedAt 缺失/解析失败）时退化成不带耗时的兜底句。 */
+function loadingLabel(t: Translate, name: string | null, elapsed: LoadingElapsed | null): string {
+  if (elapsed === null) return t("loadingModelPlain", { name });
+  if (elapsed.unit === "seconds") return t("loadingModel", { name, sec: elapsed.seconds });
+  return t("loadingModelLong", { name, min: elapsed.minutes, sec: elapsed.seconds });
 }
 
 function inferringLabelKey(badge: InferringBadge): LocaleKey {

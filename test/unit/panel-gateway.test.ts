@@ -67,6 +67,8 @@ describe("PanelGateway", () => {
           { name: "b", displayName: "模型 A", namespace: "main", quant: null, status: "ready" },
         ],
         running: "a",
+        phase: "ready",
+        startedAt: null,
         inferring: true,
         openUrl: "http://panel:8080",
         panelError: null,
@@ -75,13 +77,15 @@ describe("PanelGateway", () => {
       expect(runtimeStatus).toHaveBeenCalledTimes(1);
     });
 
-    it("无运行中模型、busy 为 null：running/inferring 均为 null", async () => {
+    it("无运行中模型、busy 为 null：running/inferring 均为 null，phase 为 idle，startedAt 为 null", async () => {
       const { gateway } = makeGateway({
         client: fakeClient({ runtimeStatus: async () => ({ running: null, busy: null }) }),
       });
       const snapshot = await gateway.snapshot();
       expect(snapshot.running).toBeNull();
       expect(snapshot.inferring).toBeNull();
+      expect(snapshot.phase).toBe("idle");
+      expect(snapshot.startedAt).toBeNull();
     });
 
     it("listModels 失败：models 兜底为空数组，panelError 非空，不抛错", async () => {
@@ -109,6 +113,70 @@ describe("PanelGateway", () => {
       expect(snapshot.running).toBeNull();
       expect(snapshot.inferring).toBeNull();
       expect(snapshot.panelError).toContain("token");
+      // runtimeStatus 整体 rejected 时 running 本来就折算成 null，phase 走跟 running
+      // 为 null 时同一条规则得到 idle，不需要为"rejected"单独分支。
+      expect(snapshot.phase).toBe("idle");
+    });
+  });
+
+  describe("phase 判定（/health 与 /slots 状态码同步性推导出的三态）", () => {
+    it("busy 非 null：phase 为 ready，且不调用 llamaHealth（稳态零开销的守卫）", async () => {
+      const llamaHealth = vi.fn(async () => true);
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: { model: "a", startedAt: "2026-08-28T00:00:00.000Z" },
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+          llamaHealth,
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.phase).toBe("ready");
+      expect(llamaHealth).not.toHaveBeenCalled();
+    });
+
+    it("busy 为 null 且 llamaHealth 探测成功：phase 为 ready", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({ running: { model: "a" }, busy: null }),
+          llamaHealth: async () => true,
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.phase).toBe("ready");
+    });
+
+    it("busy 为 null 且 llamaHealth 探测失败：phase 为 starting（加载窗口）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({ running: { model: "a" }, busy: null }),
+          llamaHealth: async () => false,
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.phase).toBe("starting");
+    });
+
+    it("startedAt 从面板响应的 running.startedAt 透传到 snapshot", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: { model: "a", startedAt: "2026-08-28T01:23:45.000Z" },
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.startedAt).toBe("2026-08-28T01:23:45.000Z");
     });
   });
 
@@ -141,6 +209,22 @@ describe("PanelGateway", () => {
       expect(snapshot.panelError).toBeNull();
     });
 
+    it("成功路径 snapshot 带上正确的 phase/startedAt（复用 buildSnapshot，未被裁剪）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: { model: "a", startedAt: "2026-08-28T00:00:00.000Z" },
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.start("a");
+
+      expect(snapshot.phase).toBe("ready");
+      expect(snapshot.startedAt).toBe("2026-08-28T00:00:00.000Z");
+    });
+
     it("排空参数透传：drainOnSwitch/drainTimeoutMs 原样带进 gate.ensure", async () => {
       const ensure = vi.fn(async () => {});
       const { gateway } = makeGateway({ gate: fakeGate({ ensure }), drainOnSwitch: true, drainTimeoutMs: 12345 });
@@ -167,6 +251,9 @@ describe("PanelGateway", () => {
 
       expect(snapshot.panelError).toContain("模型不存在");
       expect(snapshot.models).toHaveLength(1); // buildSnapshot 仍尽量填了 listModels 的结果
+      // 错误分支是 { ...(await this.buildSnapshot()), panelError } 展开出来的，
+      // phase 必须跟着 buildSnapshot 走，不能因为展开写法漏掉。
+      expect(snapshot.phase).toBe("idle");
     });
 
     it("model 为空串：属于编程错误，直接抛而不是塞进 panelError", async () => {
@@ -190,6 +277,22 @@ describe("PanelGateway", () => {
       expect(snapshot.panelError).toBeNull();
     });
 
+    it("成功路径 snapshot 带上正确的 phase/startedAt（复用 buildSnapshot，未被裁剪）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: { model: "a", startedAt: "2026-08-28T00:00:00.000Z" },
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.stop("a");
+
+      expect(snapshot.phase).toBe("ready");
+      expect(snapshot.startedAt).toBe("2026-08-28T00:00:00.000Z");
+    });
+
     it("client.stopModel 抛错：不外抛，走 panelError", async () => {
       const stopModel = vi.fn(async () => { throw new PanelError("停止失败: 服务异常", "PANEL_HTTP", 500); });
       const { gateway } = makeGateway({ client: fakeClient({ stopModel }) });
@@ -197,6 +300,8 @@ describe("PanelGateway", () => {
       const snapshot = await gateway.stop("a");
 
       expect(snapshot.panelError).toContain("停止失败");
+      // 同 start() 的错误分支，展开写法不能漏掉 phase。
+      expect(snapshot.phase).toBe("idle");
     });
 
     it("model 为空串：属于编程错误，直接抛而不是塞进 panelError", async () => {

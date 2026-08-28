@@ -6,6 +6,12 @@ function fakeSnapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
   return {
     models: [],
     running: null,
+    // 本文件测的是 RPC 外壳拆解，不涉及 phase/startedAt 的推导逻辑（那是
+    // client-state.test.ts 的范围），这里两处用例都会把 running 覆盖成 "m1"，
+    // 语义上是一个已就绪、可服务的运行中模型，所以默认给 "ready"；startedAt
+    // 具体值本文件不断言，留 null（契约允许的合法值）即可。
+    phase: "ready",
+    startedAt: null,
     inferring: null,
     openUrl: "http://panel.local",
     panelError: null,

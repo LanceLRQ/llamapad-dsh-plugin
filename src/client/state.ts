@@ -1,7 +1,7 @@
 // 卡片的纯逻辑：把一份 CardSnapshot（+ 本地的「动作在途」态）折算成渲染要用的
 // 展示值。刻意不掺 React——状态推导本身没有理由依赖运行环境，纯函数才好单测，
 // 也让 Card 组件本身只剩"照着 view 摆控件"这一件事。
-import type { CardModel, CardSnapshot } from "../rpc-contract";
+import type { CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
 
 /** 一次启动/停止动作的进行中态：哪个模型、哪种动作。 */
 export interface PendingAction {
@@ -35,6 +35,34 @@ export function inferringDotState(badge: InferringBadge): "done" | "warning" | "
   return "done";
 }
 
+/**
+ * 加载耗时的两档展示形态：不满 60 秒只给秒数，满 60 秒给分钟 + 秒钟，
+ * Card.tsx 按这个形态挑 loadingModel / loadingModelLong 两套文案模板。
+ */
+export type LoadingElapsed =
+  | { readonly unit: "seconds"; readonly seconds: number }
+  | { readonly unit: "minutes"; readonly minutes: number; readonly seconds: number };
+
+/**
+ * 推导「模型已加载 N 秒」的展示值。
+ *
+ * now 必须由调用方传入（不用 Date.now()）——这样测试不用挂真实时钟，Card.tsx 的
+ * 1 秒 tick 也只是把它自己存的时间戳灌进来，两边不必各写一遍「怎么算耗时」。
+ * startedAt 为 null 或解析失败（Date.parse 得到 NaN）时返回 null，卡片退化成不带
+ * 耗时的兜底文案；now 早于 startedAt（时钟偏移）按 0 秒处理，不展示负数。
+ *
+ * @param startedAt 运行中容器的启动时刻（ISO 8601），见 rpc-contract.ts 的注释。
+ * @param now 当前时刻的毫秒时间戳，由调用方注入。
+ */
+export function describeLoadingElapsed(startedAt: string | null, now: number): LoadingElapsed | null {
+  if (startedAt === null) return null;
+  const startedAtMs = Date.parse(startedAt);
+  if (Number.isNaN(startedAtMs)) return null;
+  const totalSeconds = Math.max(0, Math.floor((now - startedAtMs) / 1000));
+  if (totalSeconds < 60) return { unit: "seconds", seconds: totalSeconds };
+  return { unit: "minutes", minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
+}
+
 function missingReasonOf(status: string): "missing-file" | "missing-mmproj" | null {
   return status === "missing-file" || status === "missing-mmproj" ? status : null;
 }
@@ -54,9 +82,16 @@ export interface RowAction {
  * 一个模型，允许在途动作时继续点别的行等于给同一面板发互相插队的启停请求。
  */
 export function rowActionFor(model: CardModel, pending: PendingAction | null): RowAction {
-  const kind: "start" | "stop" = model.status === "running" ? "stop" : "start";
   const missingReason = missingReasonOf(model.status);
   const isPendingRow = pending !== null && pending.model === model.name;
+  // 本行有动作在途时，按钮语义取用户实际发起的那个动作，不按 model.status 现推：
+  // 启动过程中容器一起来 status 就变成 running，再推导就成了「停止」——用户点的明明
+  // 是启动，按钮却显示「停止中…」。轮询提速到 2s 后这个中间态尤其容易被看见。
+  const kind: "start" | "stop" = isPendingRow
+    ? pending.kind
+    : model.status === "running"
+      ? "stop"
+      : "start";
   const disabled = missingReason !== null || pending !== null;
   return { kind, disabled, missingReason, pending: isPendingRow };
 }
@@ -70,16 +105,22 @@ export interface CardRowView {
 export interface CardView {
   readonly rows: readonly CardRowView[];
   readonly runningModel: CardModel | null;
+  readonly phase: RuntimePhase;
   readonly inferring: InferringBadge | null;
   readonly openDisabled: boolean;
 }
 
 export function buildCardView(snapshot: CardSnapshot, pending: PendingAction | null): CardView {
   const runningModel = snapshot.models.find((model) => model.name === snapshot.running) ?? null;
+  // starting 阶段按契约 inferring 必为 null，但这里不依赖上游守规矩——即使它恰好
+  // 不是 null，也不该在加载中画「推理状态未知」，那句话在这个阶段是纯噪音，
+  // 所以直接跳过 describeInferring，而不是让它认识 phase 这个新概念。
+  const inferring = snapshot.phase === "starting" ? null : describeInferring(snapshot.running, snapshot.inferring);
   return {
     rows: snapshot.models.map((model) => ({ model, action: rowActionFor(model, pending) })),
     runningModel,
-    inferring: describeInferring(snapshot.running, snapshot.inferring),
+    phase: snapshot.phase,
+    inferring,
     openDisabled: snapshot.openUrl.length === 0,
   };
 }

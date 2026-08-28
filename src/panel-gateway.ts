@@ -12,7 +12,7 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { RPC_NAMESPACE, type CardModel, type CardSnapshot } from "./rpc-contract";
+import { RPC_NAMESPACE, type CardModel, type CardSnapshot, type RuntimePhase } from "./rpc-contract";
 import { PanelError, type PanelClient, type PanelModelView } from "./panel-client";
 import type { ModelGate } from "./switching";
 
@@ -90,7 +90,12 @@ export class PanelGateway extends TypertRemoteService {
     ]);
     const models = modelsResult.status === "fulfilled" ? modelsResult.value.map(toCardModel) : [];
     const running = statusResult.status === "fulfilled" ? statusResult.value.running?.model ?? null : null;
-    const inferring = statusResult.status === "fulfilled" ? statusResult.value.busy?.inferring ?? null : null;
+    const startedAt = statusResult.status === "fulfilled" ? statusResult.value.running?.startedAt ?? null : null;
+    // busy 是 runtimeStatus({busy:true}) 才会填的字段，undefined（面板未按此模式响应）
+    // 归一到 null，与"探测失败/不可知"同等对待，phase 判定只关心它是不是 null。
+    const busy = statusResult.status === "fulfilled" ? statusResult.value.busy ?? null : null;
+    const inferring = busy?.inferring ?? null;
+    const phase = await this.resolvePhase(running, busy);
     const panelError = modelsResult.status === "rejected"
       ? describePanelError(modelsResult.reason)
       : statusResult.status === "rejected"
@@ -99,10 +104,34 @@ export class PanelGateway extends TypertRemoteService {
     return {
       models,
       running,
+      phase,
+      startedAt,
       inferring,
       openUrl: this.options.panelPublicUrl || this.options.panelUrl,
       panelError,
     };
+  }
+
+  /**
+   * phase 判定，依据是真机实测出的 /health 与 /slots 状态码同步性（见
+   * rpc-contract.ts 的 RuntimePhase 注释）：/slots 探得通就意味着模型必然已加载完，
+   * 所以稳态（有 busy 结果）下完全不需要另外确认，只有"有模型在跑但 busy 不可知"
+   * 这唯一的加载窗口才值得多打一次 /health。
+   *
+   * busy 不可知有两种成因——面板没按 busy 模式响应、或 runtimeStatus 本身失败——
+   * 到这里已经统一折算成 null，处理方式相同。
+   */
+  private async resolvePhase(
+    running: string | null,
+    busy: { inferring: boolean; slotsRunning: number } | null,
+  ): Promise<RuntimePhase> {
+    if (running === null) return "idle";
+    if (busy !== null) return "ready";
+    // llamaHealth() 内部已经把网络异常等一切失败折算成 false，这里无法区分
+    // "面板 proxy 端口未就绪的 502"与"加载中透传的 503"——两者都非 200。真挂了的
+    // 模型会一直卡在 starting，配合卡片上的已耗时用户能自行判断，不必为此改
+    // llamaHealth() 的签名（它还被 src/tools.ts 复用）。
+    return (await this.options.client.llamaHealth()) ? "ready" : "starting";
   }
 }
 

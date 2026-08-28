@@ -30,7 +30,8 @@ export interface PanelModelDetail {
 }
 
 export interface PanelRuntimeStatus {
-  running: { model: string; displayName?: string; hostPort?: number | null } | null;
+  /** startedAt 是运行中容器的启动时刻（ISO 8601），面板一直有返回，这里只是补齐类型 */
+  running: { model: string; displayName?: string; hostPort?: number | null; startedAt?: string | null } | null;
   /** 仅 runtimeStatus({ busy: true }) 时返回；null 代表"不可知"，不代表"不忙" */
   busy?: { inferring: boolean; slotsRunning: number } | null;
 }

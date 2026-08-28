@@ -51,11 +51,34 @@ export interface CardModel {
   status: string;
 }
 
+/**
+ * 运行阶段。由 host 侧折算后下发，浏览器端不重复推导——判定依据（/slots 与
+ * /health 的状态码同步性）是真机实测出来的，只该有一处知道它，见
+ * panel-gateway.ts 的 buildSnapshot。
+ *
+ * - `idle`     无模型在跑
+ * - `starting` 容器已起、llama-server 仍在把模型读进显存（实测 27B/Q4 约 33 秒，
+ *              期间 /health 与 /slots 一律 503 `{"message":"Loading model"}`）
+ * - `ready`    可服务
+ *
+ * 与 inferring 的关系：`starting` 时 /slots 必然探不到，所以 inferring 必为 null。
+ * 卡片在这一阶段不要画「推理状态未知」——那句话在加载中是纯噪音。
+ */
+export type RuntimePhase = "idle" | "starting" | "ready";
+
 /** 卡片一次轮询拿到的全部内容：列表 + 运行状态 + 打开面板用的地址。 */
 export interface CardSnapshot {
   models: CardModel[];
   /** 运行中模型的 name；无模型在跑为 null */
   running: string | null;
+  /** 运行阶段，三态语义见 RuntimePhase */
+  phase: RuntimePhase;
+  /**
+   * 运行中容器的启动时刻（ISO 8601 字符串）；无模型在跑、或面板没给为 null。
+   * 卡片用它算「已加载 N 秒」——传绝对时刻而不是让卡片自己按住秒表，
+   * 这样轮询抖动、组件重挂载、以及「模型是别的客户端启动的」三种情况下都还准。
+   */
+  startedAt: string | null;
   /** true=正在推理，false=空闲，null=不可知（面板没给或探测失败），不等于「不忙」 */
   inferring: boolean | null;
   /** 浏览器可见的面板地址，供「用浏览器打开」按钮使用（host 侧的 panelUrl 未必可达） */
@@ -122,9 +145,15 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
   if (!Array.isArray(models)) fail("snapshot.models", "array");
   const inferring = row["inferring"];
   if (inferring !== null && typeof inferring !== "boolean") fail("snapshot.inferring", "boolean | null");
+  const phase = row["phase"];
+  if (phase !== "idle" && phase !== "starting" && phase !== "ready") {
+    fail("snapshot.phase", '"idle" | "starting" | "ready"');
+  }
   return {
     models: models.map((item, index) => parseCardModel(item, `snapshot.models[${index}]`)),
     running: asNullableString(row["running"], "snapshot.running"),
+    phase,
+    startedAt: asNullableString(row["startedAt"], "snapshot.startedAt"),
     inferring,
     openUrl: asString(row["openUrl"], "snapshot.openUrl"),
     panelError: asNullableString(row["panelError"], "snapshot.panelError"),
