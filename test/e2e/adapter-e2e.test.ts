@@ -70,6 +70,11 @@ describe("LlamapadAdapter E2E（假面板）", () => {
     await expect(drain(makeAdapter(), "nope")).rejects.toMatchObject({ code: "MODEL_NOT_FOUND" });
   });
 
+  it("resolveModel：contextWindow 取自面板 /effective 的 merged.server.ctx_size（真实 HTTP 接线，非 mock）", async () => {
+    const resolved = await makeAdapter().resolveModel("llamapad", "qwen-small");
+    expect(resolved).toMatchObject({ context: { contextWindow: 131072 } });
+  });
+
   it("strict 档：请求非运行中模型 → MODEL_NOT_RUNNING，且假面板没有收到任何新的 start 请求", async () => {
     // 先用 auto-switch 把 qwen-small 稳定跑起来，确定下面 strict 场景的前置条件
     await drain(makeAdapter(), "qwen-small");

@@ -16,7 +16,7 @@ function makeAdapter(over: Record<string, unknown> = {}) {
     `{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
     `[DONE]`,
   ]));
-  const client = { baseUrl: "http://panel:8080", listModels: async () => [], getModel: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
+  const client = { baseUrl: "http://panel:8080", listModels: async () => [], getModel: async () => null, getEffectiveConfig: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
   const adapter = new LlamapadAdapter({
     client, gate: { ensure, lastStarted: () => null }, token: "lp_t", mode: "proxy", fetchImpl,
     ...over,
@@ -50,12 +50,12 @@ describe("describeModel", () => {
     expect(describeModel({ ...base, status: "ready" })).toEqual({ name: "模型A", description: "main · Q4_K_M" });
   });
 
-  it("missing-file → description 末尾追加「文件缺失」，name 不加前缀", () => {
-    expect(describeModel({ ...base, status: "missing-file" })).toEqual({ name: "模型A", description: "main · Q4_K_M · 文件缺失" });
+  it("missing-file → description 末尾追加「文件缺失（面板文件页可自动寻找）」，name 不加前缀", () => {
+    expect(describeModel({ ...base, status: "missing-file" })).toEqual({ name: "模型A", description: "main · Q4_K_M · 文件缺失（面板文件页可自动寻找）" });
   });
 
-  it("missing-mmproj → description 末尾追加「mmproj 缺失」", () => {
-    expect(describeModel({ ...base, status: "missing-mmproj" })).toEqual({ name: "模型A", description: "main · Q4_K_M · mmproj 缺失" });
+  it("missing-mmproj → description 末尾追加「mmproj 缺失（面板文件页可自动寻找）」", () => {
+    expect(describeModel({ ...base, status: "missing-mmproj" })).toEqual({ name: "模型A", description: "main · Q4_K_M · mmproj 缺失（面板文件页可自动寻找）" });
   });
 
   it("displayName 缺失时用 name 兜底，前缀加在兜底名前", () => {
@@ -90,15 +90,59 @@ describe("LlamapadAdapter", () => {
     const models = await adapter.listModels("llamapad");
     expect(models).toEqual([
       { provider: "llamapad", id: "a", name: "● 模型A", description: "main · Q4_K_M" },
-      { provider: "llamapad", id: "b", name: "模型B", description: "main · 文件缺失" },
+      { provider: "llamapad", id: "b", name: "模型B", description: "main · 文件缺失（面板文件页可自动寻找）" },
     ]);
   });
 
-  it("resolveModel：overrides.server.ctx_size → context，缺省省略", async () => {
-    const client = { baseUrl: "x", listModels: async () => [], getModel: async (n: string) => n === "a" ? { name: "a", displayName: "A", namespace: "main", overrides: { server: { ctx_size: 8192 } } } : null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
+  it("resolveModel：/effective 不可用时回退读 overrides.server.ctx_size，缺省省略", async () => {
+    const client = { baseUrl: "x", listModels: async () => [], getModel: async (n: string) => n === "a" ? { name: "a", displayName: "A", namespace: "main", overrides: { server: { ctx_size: 8192 } } } : null, getEffectiveConfig: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
     const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
     await expect(adapter.resolveModel("llamapad", "a")).resolves.toMatchObject({ context: { contextWindow: 8192 } });
     await expect(adapter.resolveModel("llamapad", "b")).resolves.not.toHaveProperty("context");
+  });
+
+  it("resolveModel：/effective 的 merged.server.ctx_size 优先于模型级 overrides（修既有偏差：未覆盖 ctx_size 的模型也能报出面板默认值）", async () => {
+    const client = {
+      baseUrl: "x", listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "A", namespace: "main", overrides: {} }),
+      getEffectiveConfig: async () => ({ merged: { docker: {}, server: { ctx_size: 131072 } } }),
+      runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    await expect(adapter.resolveModel("llamapad", "a")).resolves.toMatchObject({ context: { contextWindow: 131072 } });
+  });
+
+  it("resolveModel：merged.docker.args_override 非空数组时不上报 context（回退链短路，即使 ctx_size 处处都有值）", async () => {
+    const client = {
+      baseUrl: "x", listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "A", namespace: "main", overrides: { server: { ctx_size: 8192 } } }),
+      getEffectiveConfig: async () => ({ merged: { docker: { args_override: ["--foo"] }, server: { ctx_size: 131072 } } }),
+      runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    await expect(adapter.resolveModel("llamapad", "a")).resolves.not.toHaveProperty("context");
+  });
+
+  it("resolveModel：/effective 返回 null（端点不可用）→ 回退读模型级 overrides.server.ctx_size", async () => {
+    const client = {
+      baseUrl: "x", listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "A", namespace: "main", overrides: { server: { ctx_size: 4096 } } }),
+      getEffectiveConfig: async () => null,
+      runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    await expect(adapter.resolveModel("llamapad", "a")).resolves.toMatchObject({ context: { contextWindow: 4096 } });
+  });
+
+  it("resolveModel：/effective 不可用且模型级 overrides.docker.args_override 存在 → 不上报 context", async () => {
+    const client = {
+      baseUrl: "x", listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "A", namespace: "main", overrides: { server: { ctx_size: 4096 }, docker: { args_override: ["--foo"] } } }),
+      getEffectiveConfig: async () => null,
+      runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    await expect(adapter.resolveModel("llamapad", "a")).resolves.not.toHaveProperty("context");
   });
 
   // 宿主 dsh-llm 0.1.x 的派发路径无条件 `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的

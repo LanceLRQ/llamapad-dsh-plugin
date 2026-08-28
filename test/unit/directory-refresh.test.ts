@@ -40,6 +40,7 @@ function fakeClient(runtimeStatus: PanelClient["runtimeStatus"]): PanelClient {
     baseUrl: "http://panel:8080",
     listModels: async () => [],
     getModel: async () => null,
+    getEffectiveConfig: async () => null,
     runtimeStatus,
     startModel: async () => {},
     stopModel: async () => ({ ok: true }),

@@ -15,6 +15,14 @@ export function createFakePanel({ loadMs = 100 } = {}) {
     if (!/^Bearer lp_/.test(req.headers.authorization ?? "")) return json(401, { error: "unauthorized" });
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/api/v1/models") return json(200, { models: MODELS });
+    const effectiveMatch = /^\/api\/v1\/models\/([^/]+)\/effective$/.exec(url.pathname);
+    if (req.method === "GET" && effectiveMatch) {
+      const name = decodeURIComponent(effectiveMatch[1]);
+      if (!MODELS.some((m) => m.name === name)) return json(404, { error: `模型不存在: ${name}` });
+      // 假面板只喂插件读 merged.server.ctx_size 用得到的最小形状；defaults/params/overriddenKeys
+      // 插件不读，给空值占位即可
+      return json(200, { defaults: {}, merged: { docker: {}, server: { ctx_size: 131072 } }, params: {}, overriddenKeys: [] });
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/runtime/status") {
       const body = { running: state.running ? { model: state.running, hostPort: 18080 } : null };
       if (url.searchParams.get("busy") === "1") body.busy = state.busy;

@@ -40,8 +40,16 @@ export class LlamapadAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    const detail = await this.options.client.getModel(model).catch(() => null);
-    const contextWindow = readCtxSize(detail?.overrides) ?? this.options.defaultContextWindow;
+    const [detail, effective] = await Promise.all([
+      this.options.client.getModel(model).catch(() => null),
+      this.options.client.getEffectiveConfig(model).catch(() => null),
+    ]);
+    // /effective 是权威来源（合并了全局默认与模型覆盖）：只要它可用就完全以它为准，
+    // 包括「读不出来」这个结论本身——不能再回落去读模型级 ctx_size，否则 args_override
+    // 配在全局层时会把那个已经失效的数字又捡回来。端点整个不可用（老版面板没有它 /
+    // 请求失败）才退回旧的模型级 overrides 路径。
+    const source = effective !== null ? effective.merged : detail?.overrides;
+    const contextWindow = readCtxSize(source) ?? this.options.defaultContextWindow;
     return {
       provider,
       id: model,
@@ -161,16 +169,29 @@ export function describeModel(m: PanelModelView): { name: string; description: s
   const baseName = m.displayName || m.name;
   const name = m.status === "running" ? `● ${baseName}` : baseName;
   const baseDescription = `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`;
-  const suffix = m.status === "missing-file" ? " · 文件缺失"
-    : m.status === "missing-mmproj" ? " · mmproj 缺失"
+  const suffix = m.status === "missing-file" ? " · 文件缺失（面板文件页可自动寻找）"
+    : m.status === "missing-mmproj" ? " · mmproj 缺失（面板文件页可自动寻找）"
     : "";
   return { name, description: `${baseDescription}${suffix}` };
 }
 
-function readCtxSize(overrides: unknown): number | undefined {
-  // llamapad overrides JSON：{ server?: { ctx_size?: number }, docker?: {...} }
-  if (overrides === null || typeof overrides !== "object") return undefined;
-  const server = (overrides as { server?: { ctx_size?: unknown } }).server;
+/**
+ * 从 llamapad 配置对象读 ctx_size。两个来源共用本函数：`/effective` 的 merged（全局默认
+ * 与模型覆盖合并后的权威值）与模型级 overrides（`/effective` 不可用时的回退来源）——
+ * 两者是同一套 `{ docker?, server? }` 两段结构，读法完全一致；「哪个来源更权威」由调用方
+ * （resolveModel）选定后再交给本函数，不是本函数的职责。
+ */
+function readCtxSize(config: unknown): number | undefined {
+  if (config === null || typeof config !== "object") return undefined;
+  // docker.args_override 一旦设置（非空数组），llama-server 的生成参数整段被取代，
+  // server.* 全段（含 ctx_size）不再生效——此时 ctx_size 已经不是权威值，宁可不报
+  // 也不能报一个已经失效的数字。
+  const docker = (config as { docker?: unknown }).docker;
+  if (docker !== null && typeof docker === "object") {
+    const argsOverride = (docker as { args_override?: unknown }).args_override;
+    if (Array.isArray(argsOverride) && argsOverride.length > 0) return undefined;
+  }
+  const server = (config as { server?: { ctx_size?: unknown } }).server;
   if (server === null || typeof server !== "object") return undefined;
   const ctx = (server as { ctx_size?: unknown }).ctx_size;
   return typeof ctx === "number" && ctx > 0 ? ctx : undefined;

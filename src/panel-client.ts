@@ -1,5 +1,5 @@
 /**
- * llamapad 面板控制面 REST 客户端（列模型 / 启停 / 状态 / 就绪探测）。
+ * llamapad 面板控制面 REST 客户端（列模型 / 启停 / 状态 / 生效配置 / 就绪探测）。
  * 推理数据面不走这里（见 adapter.ts 的 proxy/direct 双模式）。
  * 失败一律抛 PanelError，code 为稳定机器码：
  * AUTH | MODEL_NOT_FOUND | MODEL_FILES_MISSING | PANEL_HTTP | PANEL_UNREACHABLE
@@ -27,6 +27,13 @@ export interface PanelModelView {
 
 export interface PanelModelDetail {
   name: string; displayName: string; namespace: string; overrides?: unknown;
+}
+
+/** GET /api/v1/models/:name/effective 的插件侧投影：只取合并后配置，
+ *  其余字段（defaults/params/overriddenKeys）插件用不到不声明 */
+export interface PanelEffectiveConfig {
+  /** mergeConfig(defaults, overrides) 的结果，形状校验交给读取方 */
+  merged?: unknown;
 }
 
 export interface PanelRuntimeStatus {
@@ -63,6 +70,7 @@ export interface PanelClient {
   readonly baseUrl: string;
   listModels(): Promise<PanelModelView[]>;
   getModel(name: string): Promise<PanelModelDetail | null>;
+  getEffectiveConfig(name: string): Promise<PanelEffectiveConfig | null>;
   runtimeStatus(options?: { busy?: boolean }): Promise<PanelRuntimeStatus>;
   startModel(name: string, options?: StartModelOptions): Promise<void>;
   stopModel(name: string, options?: StopModelOptions): Promise<StopModelResult>;
@@ -146,6 +154,12 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       if (res.status === 404) return null;
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
       return (await res.json()) as PanelModelDetail;
+    },
+    async getEffectiveConfig(name) {
+      const res = await request(`/api/v1/models/${encodeURIComponent(name)}/effective`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
+      return (await res.json()) as PanelEffectiveConfig;
     },
     async runtimeStatus(options) {
       const res = await request(`/api/v1/runtime/status${options?.busy ? "?busy=1" : ""}`);

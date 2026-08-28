@@ -129,6 +129,15 @@ describe("createPanelClient", () => {
     await expect(createPanelClient({ ...base, fetch: hit.fn as any }).getModel("x")).resolves.toMatchObject({ name: "x" });
   });
 
+  it("getEffectiveConfig：404→null，200→返回体，非 ok→PanelError", async () => {
+    const miss = fakeFetch([{ status: 404, body: { error: "no" } }]);
+    await expect(createPanelClient({ ...base, fetch: miss.fn as any }).getEffectiveConfig("x")).resolves.toBeNull();
+    const hit = fakeFetch([{ body: { merged: { server: { ctx_size: 131072 } } } }]);
+    await expect(createPanelClient({ ...base, fetch: hit.fn as any }).getEffectiveConfig("x")).resolves.toEqual({ merged: { server: { ctx_size: 131072 } } });
+    const err = fakeFetch([{ status: 500, body: { error: "boom" } }]);
+    await expect(createPanelClient({ ...base, fetch: err.fn as any }).getEffectiveConfig("x")).rejects.toMatchObject({ code: "PANEL_HTTP" });
+  });
+
   describe("stopModel", () => {
     it("不带 drain 选项时不发请求体，走默认 requestTimeoutMs", async () => {
       const spy = vi.spyOn(AbortSignal, "timeout");

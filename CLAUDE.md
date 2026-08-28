@@ -42,6 +42,13 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 - E2E 用假面板（Node http 假服务器），逻辑正确性不依赖真实环境；**API 层真机校准已于 2026-08-25
   在本机 GPU 服务器完成**（usage 计数、reasoning_content、切换延迟、就绪探测语义），结果见
   `docs/manual-smoke.md` 的「真机校准结果」
+- **自定义镜像逃生口会打断插件的三条硬依赖**：插件硬依赖 llama.cpp server 的三个行为——
+  `/api/v1/proxy/llama/health` 的 503→200 就绪语义、`/slots`（排空判定）、OpenAI 兼容的 SSE
+  `/v1/chat/completions`。面板 2026-08-28 起提供 `docker.entrypoint` / `args_override` /
+  `extra_args` / `env` / `model_mount` 五个自定义镜像字段（面板设计里明确标为进阶用法、配错自负）。
+  用户换成非 llama.cpp-server 的镜像后：排空会优雅降级（`drain.ts` 探测不到 `/slots` 即回
+  `unavailable`/`skipped`，已有设计覆盖），但**就绪探测会一路等到 `startTimeoutMs` 超时**、chat
+  直接 404。这是「start 报成功但就绪探测超时」的一个已知成因，排查时先确认面板侧有没有配这几个字段
 
 ## 当前阶段
 
@@ -74,6 +81,16 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 `●` 前缀、给 `missing-file`/`missing-mmproj` 追加提示（纯函数 `describeModel`，`adapter.ts`）；
 新增 `directory-refresh.ts` 轮询面板运行状态，仅在运行中模型变化时 `ctx.emit("llm/adapters-updated")`
 触发浏览器侧目录重拉，间隔由新增 Config 字段 `statusRefreshMs`（默认 5000ms，0 关闭）控制。
+
+**resolveModel 的 contextWindow 改用面板生效配置为权威来源**（2026-08-28）：改读
+`GET /api/v1/models/:name/effective` 的 `merged`（`mergeConfig(defaults, overrides)`，同时覆盖
+全局默认与模型覆盖两层），修掉一处既有偏差——此前只读模型级 overrides，未单独覆盖 `ctx_size`
+的模型会向 dsh 报告「不可知」，而面板内置默认其实是 131072。`docker.args_override` 非空数组时
+（生成参数被整体取代，`server.*` 全段失效）不再上报 `context`，宁可省略也不报一个已失效的数字，
+`/effective` 与旧的模型级 overrides 回退两条路径均受此约束；`/effective` 端点整个不可用时才回退
+到旧的模型级 overrides 路径，回退不会捡回已被 `/effective` 判定为不可知的数字（见 `adapter.ts`
+的 `readCtxSize`，两个来源共用它，选源在 `resolveModel`）。同时把 `describeModel` 的缺件提示文案指向面板新增的
+文件页「自动寻找」入口。
 
 待办：
 - 阶段二：生命周期控制的显式入口。**「零成本外链」那一步已被核实推翻**——host 侧单独注册在
