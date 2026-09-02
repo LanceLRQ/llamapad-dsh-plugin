@@ -7,6 +7,9 @@ export type LocaleKey = keyof typeof zh;
 
 export const zh = {
   title: "llamapad 模型面板",
+  subtitle: "本地 llama.cpp 模型的启停与状态。",
+  expand: "展开",
+  collapse: "收起",
   openPanel: "在浏览器中打开面板",
   loading: "正在读取面板状态…",
   panelUnavailable: "暂时无法连接到面板。",
@@ -30,6 +33,9 @@ export const zh = {
 
 export const en = {
   title: "llamapad Model Panel",
+  subtitle: "Start, stop and watch local llama.cpp models.",
+  expand: "Expand",
+  collapse: "Collapse",
   openPanel: "Open panel in browser",
   loading: "Loading panel status…",
   panelUnavailable: "The panel is temporarily unreachable.",

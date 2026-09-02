@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CARD_STYLE_TAG_ID, injectCardStyles } from "../../src/client/styles";
+import { CARD_CSS, CARD_STYLE_TAG_ID, injectCardStyles } from "../../src/client/styles";
 
 // 卡片的 CSS 注入抄的是官方 dsh-client-ui-settings-general 的判重写法：
 // <style data-plugin-css="..."> + document.querySelector 判重。这里不装 jsdom，
@@ -61,5 +61,32 @@ describe("injectCardStyles", () => {
     injectCardStyles();
     injectCardStyles();
     expect(created).toHaveLength(1);
+  });
+});
+
+describe("CARD_CSS：折叠态与网格布局的关键规则", () => {
+  it("列表是两列网格", () => {
+    expect(CARD_CSS).toContain("grid-template-columns:repeat(2,minmax(0,1fr))");
+  });
+
+  it("列表定高且纵向滚动", () => {
+    expect(CARD_CSS).toMatch(/\.llamapad-card__list\{[^}]*max-height:\d+px/);
+    expect(CARD_CSS).toMatch(/\.llamapad-card__list\{[^}]*overflow-y:auto/);
+  });
+
+  it("窄容器回落单列（设置面板宽度不可控，两列挤不下时要能退）", () => {
+    expect(CARD_CSS).toContain("@media (max-width:520px)");
+  });
+
+  it("展开态 chevron 旋转 180 度", () => {
+    expect(CARD_CSS).toContain(".llamapad-card__chevronOpen{transform:rotate(180deg)}");
+  });
+
+  it("标题行是按钮，带键盘焦点环（照抄官方 PluginCard）", () => {
+    expect(CARD_CSS).toContain(".llamapad-card__header:focus-visible");
+  });
+
+  it("滚动条颜色跟随宿主主题 token，不硬编码", () => {
+    expect(CARD_CSS).toContain("--dsw-alias-scrollbar-bg-l2");
   });
 });
