@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCardView,
+  connectionFormState,
   describeInferring,
   describeLoadingElapsed,
   inferringDotState,
@@ -216,5 +217,45 @@ describe("describeLoadingElapsed", () => {
   it("不满 1 秒的余量向下取整，不四舍五入", () => {
     const result = describeLoadingElapsed(START, startedAtMs + 1_999);
     expect(result).toEqual({ unit: "seconds", seconds: 1 });
+  });
+});
+
+describe("connectionFormState：连接表单的可保存判定", () => {
+  const conn = { panelUrl: "http://p:8080", tokenConfigured: true };
+
+  it("草稿与现值相同 → 不可保存（没什么可写的）", () => {
+    expect(connectionFormState(conn, { panelUrl: "http://p:8080", token: "" }).canSave).toBe(false);
+  });
+
+  it("地址改了 → 可保存", () => {
+    expect(connectionFormState(conn, { panelUrl: "http://q:9090", token: "" }).canSave).toBe(true);
+  });
+
+  it("只填了 token → 可保存（换 token 不换地址是常见操作）", () => {
+    expect(connectionFormState(conn, { panelUrl: "http://p:8080", token: "lp_new" }).canSave).toBe(true);
+  });
+
+  it("地址被清空 → 不可保存，且给出原因", () => {
+    const state = connectionFormState(conn, { panelUrl: "  ", token: "" });
+    expect(state.canSave).toBe(false);
+    expect(state.blockedReason).toBe("urlRequired");
+  });
+
+  it("token 未配置且草稿也没填 → 提示缺 token，但地址仍可单独保存", () => {
+    const state = connectionFormState(
+      { panelUrl: "http://p:8080", tokenConfigured: false },
+      { panelUrl: "http://q:9090", token: "" });
+    expect(state.canSave).toBe(true);
+    expect(state.tokenHint).toBe("unset");
+  });
+
+  it("token 已配置且草稿留空 → 提示保持原值", () => {
+    expect(connectionFormState(conn, { panelUrl: "http://p:8080", token: "" }).tokenHint)
+      .toBe("keep");
+  });
+
+  it("草稿填了 token → 提示将被覆盖", () => {
+    expect(connectionFormState(conn, { panelUrl: "http://p:8080", token: "x" }).tokenHint)
+      .toBe("replace");
   });
 });

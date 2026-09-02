@@ -89,4 +89,8 @@ describe("CARD_CSS：折叠态与网格布局的关键规则", () => {
   it("滚动条颜色跟随宿主主题 token，不硬编码", () => {
     expect(CARD_CSS).toContain("--dsw-alias-scrollbar-bg-l2");
   });
+
+  it("连接配置区有独立分隔与纵向排布", () => {
+    expect(CARD_CSS).toContain(".llamapad-card__conn{");
+  });
 });

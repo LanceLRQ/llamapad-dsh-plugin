@@ -1,7 +1,7 @@
 // 卡片的纯逻辑：把一份 CardSnapshot（+ 本地的「动作在途」态）折算成渲染要用的
 // 展示值。刻意不掺 React——状态推导本身没有理由依赖运行环境，纯函数才好单测，
 // 也让 Card 组件本身只剩"照着 view 摆控件"这一件事。
-import type { CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
+import type { CardConnection, CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
 
 /** 一次启动/停止动作的进行中态：哪个模型、哪种动作。 */
 export interface PendingAction {
@@ -123,4 +123,41 @@ export function buildCardView(snapshot: CardSnapshot, pending: PendingAction | n
     inferring,
     openDisabled: snapshot.openUrl.length === 0,
   };
+}
+
+/** 连接表单的两个草稿输入框。 */
+export interface ConnectionDraft {
+  readonly panelUrl: string;
+  readonly token: string;
+}
+
+/** token 输入框下方的提示语义：留空保持原值 / 将被覆盖 / 从未配置过。 */
+export type TokenHint = "keep" | "replace" | "unset";
+
+export interface ConnectionFormState {
+  readonly canSave: boolean;
+  /** canSave 为 false 且原因值得说明时给出；null = 单纯没改动，不必提示 */
+  readonly blockedReason: "urlRequired" | null;
+  readonly tokenHint: TokenHint;
+}
+
+/**
+ * 连接表单能不能保存。
+ *
+ * 「地址没变 + token 留空」意味着这次保存什么都不会写，直接禁用按钮而不是让用户点一次
+ * 空操作。地址被清空则是另一回事：那不是「没改动」而是「改坏了」，要说明原因——空地址
+ * 会让插件彻底失联，而这张卡片正是唯一的补救入口。
+ */
+export function connectionFormState(
+  current: CardConnection,
+  draft: ConnectionDraft,
+): ConnectionFormState {
+  const url = draft.panelUrl.trim();
+  const token = draft.token.trim();
+  const tokenHint: TokenHint = token !== "" ? "replace"
+    : current.tokenConfigured ? "keep" : "unset";
+
+  if (url === "") return { canSave: false, blockedReason: "urlRequired", tokenHint };
+  const changed = url !== current.panelUrl.trim() || token !== "";
+  return { canSave: changed, blockedReason: null, tokenHint };
 }

@@ -8,6 +8,7 @@ import {
   IconPlayOutline16,
   IconStopFill16,
   IconWarningOutline16,
+  Input,
   Pill,
   StateDot,
 } from "@deepseek-ai/dsh-client-ui-primitives";
@@ -15,11 +16,14 @@ import type { CardSnapshot } from "../rpc-contract";
 import type { PanelApi } from "./rpc";
 import {
   buildCardView,
+  connectionFormState,
   describeLoadingElapsed,
   inferringDotState,
+  type ConnectionDraft,
   type InferringBadge,
   type LoadingElapsed,
   type PendingAction,
+  type TokenHint,
 } from "./state";
 import { injectCardStyles } from "./styles";
 import type { LocaleKey } from "./locale";
@@ -103,6 +107,20 @@ export function Card({ api, t }: CardProps) {
   // 折叠态不持久化——官方 PluginCard 同样是每次挂载都从头开始，跨会话记住反而意外。
   const [open, setOpen] = useState(true);
 
+  // 连接配置区草稿：token 从不预填（它根本不下发，见 CardConnection 注释），
+  // panelUrl 由下面的 effect 在「用户还没动过输入框」时跟随快照预填。
+  const [draft, setDraft] = useState<ConnectionDraft>({ panelUrl: "", token: "" });
+  const [savingConn, setSavingConn] = useState(false);
+  const [connSaved, setConnSaved] = useState(false);
+
+  // 快照到达后用当前地址预填一次输入框。只在用户还没动过输入框时填，否则轮询
+  // 到来会把正在输入的内容冲掉——touchedRef 一旦被点击/输入置真就再也不回退。
+  const snapshotUrl = snapshot?.connection.panelUrl ?? "";
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    if (!touchedRef.current) setDraft((d) => ({ ...d, panelUrl: snapshotUrl }));
+  }, [snapshotUrl]);
+
   // 只在这个布尔值上做文章，不直接用 snapshot：snapshot 每次轮询都会换一个新对象，
   // 若把它塞进下面两个 effect 的依赖数组，效果就是定时器永远「刚建好就被清理重建」，
   // 轮询被自己不断打断。isStarting 只在真正跨越 starting 边界时才改变引用相等性。
@@ -183,6 +201,7 @@ export function Card({ api, t }: CardProps) {
   }
 
   const view = buildCardView(snapshot, pending);
+  const connForm = connectionFormState(snapshot.connection, draft);
 
   return (
     <div className={`llamapad-card${open ? " llamapad-cardOpen" : ""}`}>
@@ -270,6 +289,62 @@ export function Card({ api, t }: CardProps) {
               </li>
             ))}
           </ul>
+
+          <div className="llamapad-card__conn">
+            <span className="llamapad-card__title">{t("connTitle")}</span>
+            <label className="llamapad-card__connField">
+              <span className="llamapad-card__connLabel">{t("connUrlLabel")}</span>
+              <Input
+                value={draft.panelUrl}
+                placeholder={t("connUrlPlaceholder")}
+                disabled={savingConn}
+                onChange={(e) => {
+                  touchedRef.current = true;
+                  setDraft({ ...draft, panelUrl: e.target.value });
+                  setConnSaved(false);
+                }}
+              />
+            </label>
+            <label className="llamapad-card__connField">
+              <span className="llamapad-card__connLabel">{t("connTokenLabel")}</span>
+              <Input
+                type="password"
+                value={draft.token}
+                disabled={savingConn}
+                onChange={(e) => {
+                  setDraft({ ...draft, token: e.target.value });
+                  setConnSaved(false);
+                }}
+              />
+              <span className="llamapad-card__rowMeta">{t(tokenHintKey(connForm.tokenHint))}</span>
+            </label>
+            <div className="llamapad-card__connActions">
+              {connForm.blockedReason === "urlRequired" ? (
+                <span className="llamapad-card__actionError">{t("connUrlRequired")}</span>
+              ) : connSaved ? (
+                <span className="llamapad-card__rowMeta">{t("connSaved")}</span>
+              ) : null}
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                disabled={!connForm.canSave || savingConn}
+                onClick={() => {
+                  setSavingConn(true);
+                  apiRef.current.saveConnection(draft.panelUrl, draft.token)
+                    .then((next) => {
+                      setSnapshot(next);
+                      setDraft((d) => ({ ...d, token: "" }));   // 存完就把密文草稿清掉
+                      setConnSaved(true);
+                    })
+                    .catch((error: unknown) => setActionError(describeError(error)))
+                    .finally(() => setSavingConn(false));
+                }}
+              >
+                {savingConn ? t("connSaving") : t("connSave")}
+              </Button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>
@@ -295,6 +370,10 @@ function pendingLabelKey(kind: "start" | "stop"): LocaleKey {
 
 function missingReasonKey(reason: "missing-file" | "missing-mmproj"): LocaleKey {
   return reason === "missing-file" ? "missingFile" : "missingMmproj";
+}
+
+function tokenHintKey(hint: TokenHint): LocaleKey {
+  return hint === "keep" ? "connTokenKeep" : hint === "replace" ? "connTokenReplace" : "connTokenUnset";
 }
 
 function describeError(error: unknown): string {

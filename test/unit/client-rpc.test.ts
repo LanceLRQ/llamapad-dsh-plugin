@@ -32,6 +32,7 @@ describe("createPanelApi", () => {
       snapshot: vi.fn(async () => ({ ok: true as const, value })),
       start: vi.fn(),
       stop: vi.fn(),
+      saveConnection: vi.fn(),
     };
     const api = createPanelApi(namespace);
     await expect(api.snapshot()).resolves.toEqual(value);
@@ -42,6 +43,7 @@ describe("createPanelApi", () => {
       snapshot: vi.fn(async () => ({ ok: false as const, error: { code: "PANEL_UNREACHABLE", message: "连接超时" } })),
       start: vi.fn(),
       stop: vi.fn(),
+      saveConnection: vi.fn(),
     };
     const api = createPanelApi(namespace);
     await expect(api.snapshot()).rejects.toThrow(/PANEL_UNREACHABLE/);
@@ -51,14 +53,14 @@ describe("createPanelApi", () => {
   it("start 成功 → 透传形参并返回新 snapshot", async () => {
     const value = fakeSnapshot({ running: "m1" });
     const start = vi.fn(async (model: string) => ({ ok: true as const, value: { ...value, running: model } }));
-    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn() });
+    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn() });
     await expect(api.start("m1")).resolves.toEqual({ ...value, running: "m1" });
     expect(start).toHaveBeenCalledWith("m1");
   });
 
   it("stop 失败 → 抛出 Error 且不吞掉底层 message", async () => {
     const stop = vi.fn(async () => ({ ok: false as const, error: { code: "DRAIN_TIMEOUT", message: "排空超时" } }));
-    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop });
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn() });
     await expect(api.stop("m1")).rejects.toThrow(/DRAIN_TIMEOUT/);
     expect(stop).toHaveBeenCalledWith("m1");
   });

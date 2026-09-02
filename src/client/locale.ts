@@ -29,6 +29,17 @@ export const zh = {
   stopPendingHint: "停止前会等待在途请求处理完毕，最长约 60 秒。",
   missingFile: "模型文件缺失",
   missingMmproj: "mmproj 文件缺失",
+  connTitle: "连接设置",
+  connUrlLabel: "面板地址",
+  connUrlPlaceholder: "http://192.168.1.10:8080",
+  connTokenLabel: "API token",
+  connTokenKeep: "留空则保持当前已配置的 token 不变",
+  connTokenReplace: "保存后将覆盖当前的 token",
+  connTokenUnset: "尚未配置 token，面板会拒绝所有请求",
+  connUrlRequired: "面板地址不能为空",
+  connSave: "保存",
+  connSaving: "保存中…",
+  connSaved: "已保存，正在用新配置重连",
 } as const;
 
 export const en = {
@@ -55,4 +66,15 @@ export const en = {
   stopPendingHint: "Waiting for in-flight requests to drain before stopping (up to ~60s).",
   missingFile: "Model file missing",
   missingMmproj: "mmproj file missing",
+  connTitle: "Connection",
+  connUrlLabel: "Panel URL",
+  connUrlPlaceholder: "http://192.168.1.10:8080",
+  connTokenLabel: "API token",
+  connTokenKeep: "Leave blank to keep the configured token",
+  connTokenReplace: "Saving will replace the current token",
+  connTokenUnset: "No token configured; the panel will reject every request",
+  connUrlRequired: "Panel URL is required",
+  connSave: "Save",
+  connSaving: "Saving…",
+  connSaved: "Saved. Reconnecting with the new settings.",
 } satisfies Record<LocaleKey, string>;

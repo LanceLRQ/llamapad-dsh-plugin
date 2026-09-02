@@ -50,6 +50,10 @@ export const CARD_CSS = `
 .llamapad-card__rowName{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .llamapad-card__rowMeta{color:var(--dsw-alias-label-tertiary);font-size:12px}
 .llamapad-card__rowMissing{color:var(--dsw-alias-state-warn-primary);font-size:12px}
+.llamapad-card__conn{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:12px}
+.llamapad-card__connField{display:flex;flex-direction:column;gap:4px}
+.llamapad-card__connLabel{color:var(--dsw-alias-label-secondary);font-size:12px}
+.llamapad-card__connActions{display:flex;justify-content:flex-end;align-items:center;gap:8px}
 @media (max-width:520px){.llamapad-card__list{grid-template-columns:1fr}}
 `;
 

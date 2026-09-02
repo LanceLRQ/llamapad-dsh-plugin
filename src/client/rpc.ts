@@ -14,11 +14,12 @@ type RemoteResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: RemoteFailure };
 
-/** ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的三个方法一一对应。 */
+/** ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的四个方法一一对应。 */
 export interface PanelRemoteNamespace {
   snapshot(): Promise<RemoteResult<CardSnapshot>>;
   start(model: string): Promise<RemoteResult<CardSnapshot>>;
   stop(model: string): Promise<RemoteResult<CardSnapshot>>;
+  saveConnection(panelUrl: string, token: string): Promise<RemoteResult<CardSnapshot>>;
 }
 
 /** 卡片真正调用的接口：拆完外壳、失败已经是 Error，调用方只需要 try/catch。 */
@@ -26,6 +27,7 @@ export interface PanelApi {
   snapshot(): Promise<CardSnapshot>;
   start(model: string): Promise<CardSnapshot>;
   stop(model: string): Promise<CardSnapshot>;
+  saveConnection(panelUrl: string, token: string): Promise<CardSnapshot>;
 }
 
 async function unwrap<T>(result: Promise<RemoteResult<T>>, label: string): Promise<T> {
@@ -41,5 +43,7 @@ export function createPanelApi(namespace: PanelRemoteNamespace): PanelApi {
     snapshot: () => unwrap(namespace.snapshot(), "snapshot"),
     start: (model) => unwrap(namespace.start(model), "start"),
     stop: (model) => unwrap(namespace.stop(model), "stop"),
+    saveConnection: (panelUrl, token) =>
+      unwrap(namespace.saveConnection(panelUrl, token), "saveConnection"),
   };
 }
