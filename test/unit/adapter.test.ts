@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LlamapadAdapter, describeModel } from "../../src/adapter";
+import { LlamapadAdapter, describeModel, filterModelsForSelector } from "../../src/adapter";
 import type { PanelModelView } from "../../src/panel-client";
 
 function sseResponse(lines: string[], status = 200): Response {
@@ -42,10 +42,6 @@ describe("describeModel", () => {
     name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "ready",
   };
 
-  it("running → name 加 ● 前缀，description 不追加", () => {
-    expect(describeModel({ ...base, status: "running" })).toEqual({ name: "● 模型A", description: "main · Q4_K_M" });
-  });
-
   it("ready → 不加任何标记", () => {
     expect(describeModel({ ...base, status: "ready" })).toEqual({ name: "模型A", description: "main · Q4_K_M" });
   });
@@ -59,12 +55,12 @@ describe("describeModel", () => {
   });
 
   it("displayName 缺失时用 name 兜底，前缀加在兜底名前", () => {
-    expect(describeModel({ ...base, displayName: "", status: "running" })).toEqual({ name: "● a", description: "main · Q4_K_M" });
+    expect(describeModel({ ...base, displayName: "", status: "running" })).toEqual({ name: "▶︎ a", description: "main · Q4_K_M" });
   });
 
-  it("running + configStale → ● 前缀之外追加「配置已改，重启后生效」", () => {
+  it("running + configStale → ▶︎ 前缀之外追加「配置已改，重启后生效」", () => {
     expect(describeModel({ ...base, status: "running", configStale: true })).toEqual({
-      name: "● 模型A", description: "main · Q4_K_M · 配置已改，重启后生效",
+      name: "▶︎ 模型A", description: "main · Q4_K_M · 配置已改，重启后生效",
     });
   });
 
@@ -92,7 +88,7 @@ describe("LlamapadAdapter", () => {
     expect(models).toEqual([{ provider: "llamapad", id: "a", name: "模型A", description: "main · Q4_K_M" }]);
   });
 
-  it("listModels：运行中模型带 ● 前缀，缺件模型 description 追加提示，互不干扰", async () => {
+  it("listModels：运行中模型带 ▶︎ 前缀，缺件模型 description 追加提示，互不干扰", async () => {
     const client = { baseUrl: "x", listModels: async () => [
       { name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "running" },
       { name: "b", displayName: "模型B", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "missing-file" },
@@ -100,7 +96,7 @@ describe("LlamapadAdapter", () => {
     const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
     const models = await adapter.listModels("llamapad");
     expect(models).toEqual([
-      { provider: "llamapad", id: "a", name: "● 模型A", description: "main · Q4_K_M" },
+      { provider: "llamapad", id: "a", name: "▶︎ 模型A", description: "main · Q4_K_M" },
       { provider: "llamapad", id: "b", name: "模型B", description: "main · 文件缺失（面板文件页可自动寻找）" },
     ]);
   });
@@ -488,5 +484,46 @@ describe("resolveModel：思考强度上报", () => {
     const resolved = await build(client).resolveModel("llamapad", "a");
     expect(resolved.name).toBe("模型A");
     expect(resolved.reasoning?.efforts).toHaveLength(6);
+  });
+});
+
+function view(name: string, status: string): PanelModelView {
+  return { name, displayName: name, namespace: "main", quant: "Q4_K_M",
+           sizeBytes: 0, hostPort: 18080, status };
+}
+
+describe("filterModelsForSelector：选择器可见模型过滤", () => {
+  const models = [view("a", "ready"), view("b", "running"), view("c", "missing-file")];
+
+  it("runningOnly=false 时原样返回全部（默认行为不变）", () => {
+    expect(filterModelsForSelector(models, false).map((m) => m.name)).toEqual(["a", "b", "c"]);
+  });
+
+  it("runningOnly=true 时只留 status==='running' 的那一个", () => {
+    expect(filterModelsForSelector(models, true).map((m) => m.name)).toEqual(["b"]);
+  });
+
+  it("runningOnly=true 且无模型在跑时返回空数组（选择器会空，是预期代价）", () => {
+    expect(filterModelsForSelector([view("a", "ready")], true)).toEqual([]);
+  });
+
+  it("不修改传入数组（纯函数）", () => {
+    const input = [view("a", "ready"), view("b", "running")];
+    filterModelsForSelector(input, true);
+    expect(input).toHaveLength(2);
+  });
+});
+
+describe("describeModel：运行标记用实心播放三角", () => {
+  it("running → name 前缀为 ▶︎ 加一个空格", () => {
+    expect(describeModel(view("qwen3-4b", "running")).name).toBe("▶︎ qwen3-4b");
+  });
+
+  it("非 running 不加任何前缀", () => {
+    expect(describeModel(view("qwen3-4b", "ready")).name).toBe("qwen3-4b");
+  });
+
+  it("前缀带 U+FE0E 变体选择符，强制文本形态而非彩色 emoji", () => {
+    expect(describeModel(view("x", "running")).name.codePointAt(1)).toBe(0xfe0e);
   });
 });

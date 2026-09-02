@@ -22,6 +22,8 @@ export interface LlamapadAdapterOptions {
   /** 排空等待的最长时间（毫秒），默认 60000，仅 drainOnSwitch=true 时生效 */
   drainTimeoutMs?: number;
   defaultContextWindow?: number;
+  /** 选择器只显示运行中的模型；auto-switch 档由调用方负责忽略（见 filterModelsForSelector 注释） */
+  hideStoppedModels?: boolean;
   fetchImpl?: typeof fetch;
 }
 
@@ -34,7 +36,8 @@ export class LlamapadAdapter extends LlmAdapter {
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const models = await this.options.client.listModels();
-    return models.map((m) => {
+    const visible = filterModelsForSelector(models, this.options.hideStoppedModels === true);
+    return visible.map((m) => {
       const { name, description } = describeModel(m);
       return { provider, id: m.name, name, description };
     });
@@ -182,10 +185,26 @@ function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["runni
 }
 
 /**
+ * 选择器可见模型过滤。`runningOnly` 为真时只留运行中的那一个——用户用它把选择器
+ * 收敛成「现在能聊的模型」，代价是没有模型在跑时列表为空（此时本来也聊不了）。
+ *
+ * 不在这里判断 chatBehavior：auto-switch 档必须忽略这个开关（那一档靠选中未启动的
+ * 模型来触发自动启动，藏起来就没法用了），但「当前是哪一档」是调用方的上下文，
+ * 纯函数只认最终结论，不认判定这个结论的过程。
+ */
+export function filterModelsForSelector(
+  models: readonly PanelModelView[],
+  runningOnly: boolean,
+): PanelModelView[] {
+  return runningOnly ? models.filter((m) => m.status === "running") : [...models];
+}
+
+/**
  * 面板模型行 → 选择器展示文案。`LlmModelInfo` 没有状态位（见类型定义），状态只能
  * 编码进 name/description 的文本里，抽成纯函数便于单测覆盖 4 种 status 而不必绕经
  * listModels 的网络往返。
- * - running：name 前加 ● 前缀（不用空格占位对齐，选择器变宽字体对不齐更乱）
+ * - running：name 前加 ▶︎ 前缀（实心播放三角，带 U+FE0E 变体选择符强制文本形态，
+ *   避免被渲染成宽窄不一的彩色 emoji；不用空格占位对齐，选择器变宽字体对不齐更乱）
  * - missing-file / missing-mmproj：description 末尾按既有的 " · " 分隔追加提示——
  *   选中这类模型必然在启动时 422，提前标出来省一次踩坑
  * - configStale：运行中且启动后配置又被保存过——容器参数不热更新，description 末尾提示需重启
@@ -193,7 +212,9 @@ function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["runni
  */
 export function describeModel(m: PanelModelView): { name: string; description: string } {
   const baseName = m.displayName || m.name;
-  const name = m.status === "running" ? `● ${baseName}` : baseName;
+  // U+25B6 后面必须跟 U+FE0E（变体选择符-15）：裸 ▶ 在部分系统会被渲染成彩色 emoji，
+  // 字宽随之突变，选择器里一行高矮不齐。加上它强制取文本形态。
+  const name = m.status === "running" ? `▶︎ ${baseName}` : baseName;
   const baseDescription = `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`;
   // 三种提示互斥且有优先级：缺件是"起都起不来"，最要紧；configStale 只在 running 时
   // 由面板置真，与缺件天然不同时出现，放末位不会被吃掉

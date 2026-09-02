@@ -30,6 +30,7 @@ export interface Config {
   requestTimeoutMs: number;
   defaultContextWindow?: number;
   statusRefreshMs: number;
+  hideStoppedModels: boolean;
 }
 
 export const Config: Schema<Partial<Config>, Config> = Schema.object({
@@ -61,6 +62,10 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   statusRefreshMs: Schema.number().default(5000).description(
     "轮询面板运行状态并刷新 dsh 模型选择器的间隔（毫秒）；0 关闭。仅影响选择器上的运行中标记，不影响对话",
   ),
+  hideStoppedModels: Schema.boolean().default(false).description(
+    "模型选择器只显示运行中的模型（默认关闭）。开启后没有模型在跑时选择器会是空的；"
+    + "auto-switch 档下该开关被忽略——那一档要靠选中未启动的模型来触发自动启动",
+  ),
 });
 
 export const name = "llamapad-dsh-plugin";
@@ -91,6 +96,15 @@ export function apply(ctx: Context, config: Config) {
   // 共享门：与 B 形态（tools.ts）的 start 工具共用同一把锁，避免同一面板出现两把锁
   // 各自判断"要不要起/停"而互相插队（见 switching.ts 的 sharedModelGate 注释）
   const gate = sharedModelGate(client);
+  // auto-switch 档忽略 hideStoppedModels：那一档靠「选中未启动的模型」触发自动启动，
+  // 把未启动的模型藏起来会让整档不可用。这里 warn 一次即可，不必每次 listModels 都喊。
+  const hideStoppedModels = config.hideStoppedModels === true && config.chatBehavior !== "auto-switch";
+  if (config.hideStoppedModels === true && config.chatBehavior === "auto-switch") {
+    console.warn(
+      "[llamapad-dsh-plugin] chatBehavior=auto-switch 时忽略 hideStoppedModels："
+      + "该档需要选中未启动的模型来触发自动启动，隐藏它们会让这一档无法使用。",
+    );
+  }
   ctx.llm.registerAdapter([config.provider], new LlamapadAdapter({
     client,
     gate,
@@ -103,6 +117,7 @@ export function apply(ctx: Context, config: Config) {
     drainOnSwitch: config.drainOnSwitch,
     ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
     ...(config.defaultContextWindow ? { defaultContextWindow: config.defaultContextWindow } : {}),
+    hideStoppedModels,
   }));
   startDirectoryRefresh({ ctx, client, intervalMs: config.statusRefreshMs });
 
