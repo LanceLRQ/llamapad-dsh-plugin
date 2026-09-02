@@ -93,7 +93,7 @@ export function apply(ctx: Context, config: Config) {
     token: "", mode: "proxy",
   };
   const gatewayOptions: PanelGatewayOptions = {
-    client: adapterOptions.client, gate: adapterOptions.gate, panelUrl: "",
+    client: adapterOptions.client, gate: adapterOptions.gate, panelUrl: "", token: "",
   };
 
   let live: ConnectionParams | null = null;
@@ -136,6 +136,9 @@ export function apply(ctx: Context, config: Config) {
     setOptional(adapterOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
     setOptional(adapterOptions, "defaultContextWindow", cfg.defaultContextWindow);
     gatewayOptions.panelUrl = params.panelUrl;
+    // 设置卡片只需要「配没配」（CardSnapshot.connection.tokenConfigured），不需要 token
+    // 本身参与任何请求——但缺了这行同步，tokenConfigured 会永远读到构造期的空字符串。
+    gatewayOptions.token = params.token;
     gatewayOptions.drainOnSwitch = cfg.drainOnSwitch;
     setOptional(gatewayOptions, "panelPublicUrl", cfg.panelPublicUrl);
     setOptional(gatewayOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
@@ -167,7 +170,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
-  new PanelGateway(ctx, gatewayOptions);
+  new PanelGateway(ctx, gatewayOptions, (patch) => writeSettings(ctx, patch));
 
   // 把三个方法的 strict 描述符注册进 typert 共享注册表。
   //
@@ -214,6 +217,24 @@ function setOptional<T extends object, K extends keyof T>(
 ): void {
   if (value === undefined || value === "") delete target[key];
   else target[key] = value;
+}
+
+/**
+ * 把补丁写进本插件的 settings 分节（$DSH_HOME/settings.yaml），供设置卡片的 saveConnection
+ * 调用。不传 expectedRevision——卡片拿到的是脱敏后的 CardSnapshot.connection，没有 revision
+ * 可带回来，乐观合并即可：并发写入本就是同一个人在同一张卡片上点，冲突概率可以忽略。
+ *
+ * ctx.inject(["settings"], …) 只在服务挂载后才回调；但这条路径只有卡片真被点了
+ * saveConnection 才会触达，而卡片能渲染出来就意味着 settings 服务已经挂了（见上面
+ * installSettingsSection 那段注释：Plugins 页签只派发「host 已服务的 namespace」的卡片），
+ * 不会真的悬空等不到回调。
+ */
+function writeSettings(ctx: Context, patch: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ctx.inject(["settings"], (sctx) => {
+      sctx.settings.update(settingsNamespace(SETTINGS_NAMESPACE), patch).then(resolve, reject);
+    });
+  });
 }
 
 export { LlamapadAdapter, createPanelClient, createModelGate };

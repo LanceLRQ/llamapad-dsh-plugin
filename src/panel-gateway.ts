@@ -1,14 +1,14 @@
 /**
- * 设置卡片的 host 半身：把 PanelClient / ModelGate 包成三个 RPC 方法
- * （snapshot / start / stop），交给 dsh 的 Typert Gateway 按 SRC 反射对外暴露。
+ * 设置卡片的 host 半身：把 PanelClient / ModelGate 包成四个 RPC 方法
+ * （snapshot / start / stop / saveConnection），交给 dsh 的 Typert Gateway 按 SRC 反射对外暴露。
  * 契约（命名空间/方法名/形参名）唯一出处在 rpc-contract.ts，本文件只管实现——
  * 改契约字段名要同步改这里的方法/形参名，两边脱节是运行期 400，编译期查不出来。
  *
- * 错误语义：三个方法都不因为"面板不可达/鉴权失败"这类运行期故障抛错——RPC 抛错在
+ * 错误语义：四个方法都不因为"面板不可达/鉴权失败/写入失败"这类运行期故障抛错——RPC 抛错在
  * 浏览器侧只剩 { ok:false, error } 一个壳，信息更少也更难渲染，卡片没法照着画状态。
  * 约定改为把中文说明塞进 CardSnapshot.panelError，其余字段尽最大努力填（拿不到就
  * models:[] / running:null / inferring:null），让卡片总能画出"面板连不上"并继续显示
- * 按钮。只有 model 为空串这类编程错误才允许抛。
+ * 按钮。只有 model 为空串 / 面板地址为空白这类"根本无法执行"的输入才允许抛。
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
@@ -32,14 +32,46 @@ export interface PanelGatewayOptions {
   /** 手动启停按钮沿用与 auto-switch 档相同的排空偏好（见 index.ts 的 Config.drainOnSwitch）。 */
   drainOnSwitch?: boolean;
   drainTimeoutMs?: number;
+  /** 当前 token，只用来判定 CardSnapshot.connection.tokenConfigured——绝不下发到浏览器。 */
+  token: string;
 }
 
+/** saveConnection 落盘走的口子：把补丁合并进本插件的 settings 分节，见 index.ts 的 writeSettings。 */
+export type SettingsWriter = (patch: Record<string, unknown>) => Promise<void>;
+
 export class PanelGateway extends TypertRemoteService {
-  constructor(ctx: Context, private readonly options: PanelGatewayOptions) {
+  constructor(
+    ctx: Context,
+    private readonly options: PanelGatewayOptions,
+    private readonly writeSettings: SettingsWriter,
+  ) {
     super(ctx, RPC_NAMESPACE);
   }
 
   async snapshot(): Promise<CardSnapshot> {
+    return this.buildSnapshot();
+  }
+
+  /**
+   * 保存连接配置。落到 $DSH_HOME/settings.yaml 的本插件分节，覆盖 cordis.yml 那层
+   * （优先级由宿主保证）。写入成功后 index.ts 的 onChange 会把 client 换掉，
+   * 所以这里直接返回新快照即可，不必自己重建什么。
+   *
+   * token 留空 = 不改动它（沿用官方 SecretField 的语义：草稿留空写入什么都不做，
+   * 保留已存的值）。因此"清空 token"这个手势故意不提供——真要清得去改 settings.yaml，
+   * 这与官方对 secret 字段的处理一致。
+   */
+  async saveConnection(panelUrl: string, token: string): Promise<CardSnapshot> {
+    const url = panelUrl.trim();
+    // 空地址会让插件彻底失联，而卡片本身正是唯一的补救入口——放行等于把梯子抽掉
+    if (url === "") throw new TypeError("llamapad 设置卡片: 面板地址不能为空");
+    const patch: Record<string, unknown> = { panelUrl: url };
+    if (token.trim() !== "") patch["token"] = token.trim();
+    try {
+      await this.writeSettings(patch);
+    } catch (error) {
+      return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
+    }
     return this.buildSnapshot();
   }
 
@@ -115,6 +147,11 @@ export class PanelGateway extends TypertRemoteService {
       inferring,
       openUrl: this.options.panelPublicUrl || this.options.panelUrl,
       panelError,
+      connection: {
+        panelUrl: this.options.panelUrl,
+        // 只报「配没配」，token 本身一个字符都不下发（浏览器侧也没有任何用它的地方）
+        tokenConfigured: this.options.token.trim() !== "",
+      },
     };
   }
 

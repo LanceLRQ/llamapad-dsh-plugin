@@ -36,10 +36,15 @@ export const RPC_METHOD = {
   snapshot: "snapshot",
   start: "start",
   stop: "stop",
+  saveConnection: "saveConnection",
 } as const;
 
 /** start / stop 的形参名——必须与 panel-gateway.ts 里方法签名的形参逐字一致。 */
 export const RPC_WIRE_MODEL = "model";
+
+/** saveConnection 的形参名——必须与 panel-gateway.ts 方法签名的形参逐字一致。 */
+export const RPC_WIRE_PANEL_URL = "panelUrl";
+export const RPC_WIRE_TOKEN = "token";
 
 /** 卡片列表里的一行模型。字段是 PanelModelView 的子集，只留卡片真会渲染的。 */
 export interface CardModel {
@@ -66,6 +71,12 @@ export interface CardModel {
  */
 export type RuntimePhase = "idle" | "starting" | "ready";
 
+/** 连接配置的展示态。token 永远不出现在这里——只说「配没配」，不说「配的是什么」。 */
+export interface CardConnection {
+  panelUrl: string;
+  tokenConfigured: boolean;
+}
+
 /** 卡片一次轮询拿到的全部内容：列表 + 运行状态 + 打开面板用的地址。 */
 export interface CardSnapshot {
   models: CardModel[];
@@ -89,6 +100,8 @@ export interface CardSnapshot {
    * 而 RPC 抛错在浏览器侧只会得到一个 { ok:false, error } 外壳，信息更少也更难渲染。
    */
   panelError: string | null;
+  /** 当前连接配置（面板地址 + token 是否已配），供设置卡片渲染连接区。 */
+  connection: CardConnection;
 }
 
 /* ------------------------------------------------------------------ *
@@ -139,6 +152,13 @@ function parseCardModel(value: unknown, field: string): CardModel {
   };
 }
 
+function parseCardConnection(value: unknown): CardConnection {
+  const row = asRecord(value, "snapshot.connection");
+  const tokenConfigured = row["tokenConfigured"];
+  if (typeof tokenConfigured !== "boolean") fail("snapshot.connection.tokenConfigured", "boolean");
+  return { panelUrl: asString(row["panelUrl"], "snapshot.connection.panelUrl"), tokenConfigured };
+}
+
 function parseCardSnapshot(value: unknown): CardSnapshot {
   const row = asRecord(value, "snapshot");
   const models = row["models"];
@@ -157,6 +177,7 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
     inferring,
     openUrl: asString(row["openUrl"], "snapshot.openUrl"),
     panelError: asNullableString(row["panelError"], "snapshot.panelError"),
+    connection: parseCardConnection(row["connection"]),
   };
 }
 
@@ -199,10 +220,24 @@ const MODEL_PARAM = {
   codec: MODEL_NAME_CODEC,
 } as const;
 
+const PANEL_URL_PARAM = {
+  name: RPC_WIRE_PANEL_URL,
+  wire: RPC_WIRE_PANEL_URL,
+  source: "json",
+  codec: strict<string>(`${RPC_PACKAGE}#PanelUrl`, (value) => asString(value, RPC_WIRE_PANEL_URL)),
+} as const;
+
+const TOKEN_PARAM = {
+  name: RPC_WIRE_TOKEN,
+  wire: RPC_WIRE_TOKEN,
+  source: "json",
+  codec: strict<string>(`${RPC_PACKAGE}#Token`, (value) => asString(value, RPC_WIRE_TOKEN)),
+} as const;
+
 /**
  * 浏览器侧 `ctx.remote.$mount()` 的入参。
  *
- * 三个方法都以 CardSnapshot 作为返回值——动作做完顺带回传最新状态，
+ * 四个方法都以 CardSnapshot 作为返回值——动作做完顺带回传最新状态，
  * 省掉「点完按钮再多打一次 snapshot」的往返，也避免中间态闪烁。
  */
 export const RPC_CONTRIBUTION = {
@@ -211,5 +246,6 @@ export const RPC_CONTRIBUTION = {
     descriptor(RPC_METHOD.snapshot, []),
     descriptor(RPC_METHOD.start, [MODEL_PARAM]),
     descriptor(RPC_METHOD.stop, [MODEL_PARAM]),
+    descriptor(RPC_METHOD.saveConnection, [PANEL_URL_PARAM, TOKEN_PARAM]),
   ],
 } as const;

@@ -39,10 +39,17 @@ function fakeGate(overrides: Partial<ModelGate> = {}): ModelGate {
   };
 }
 
-function makeGateway(overrides: Partial<PanelGatewayOptions> = {}) {
+function makeGateway(
+  overrides: Partial<PanelGatewayOptions> = {},
+  writeSettings: (patch: Record<string, unknown>) => Promise<void> = async () => {},
+) {
   const client = overrides.client ?? fakeClient();
   const gate = overrides.gate ?? fakeGate();
-  const gateway = new PanelGateway(fakeCtx(), { panelUrl: "http://panel:8080", ...overrides, client, gate });
+  const gateway = new PanelGateway(
+    fakeCtx(),
+    { panelUrl: "http://panel:8080", token: "", ...overrides, client, gate },
+    writeSettings,
+  );
   return { gateway, client, gate };
 }
 
@@ -72,6 +79,7 @@ describe("PanelGateway", () => {
         inferring: true,
         openUrl: "http://panel:8080",
         panelError: null,
+        connection: { panelUrl: "http://panel:8080", tokenConfigured: false },
       });
       expect(listModels).toHaveBeenCalledTimes(1);
       expect(runtimeStatus).toHaveBeenCalledTimes(1);
@@ -397,6 +405,57 @@ describe("PanelGateway", () => {
       });
       const snapshot = await gateway.snapshot();
       expect(snapshot.panelError).toBe("面板请求失败（PANEL_HTTP 500）：boom");
+    });
+  });
+
+  describe("PanelGateway：连接配置", () => {
+    it("snapshot 带出当前面板地址与「token 是否已配置」，但绝不带出 token 本身", async () => {
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "http://p:8080", token: "lp_secret" },
+        async () => {});
+      const snap = await gateway.snapshot();
+      expect(snap.connection).toEqual({ panelUrl: "http://p:8080", tokenConfigured: true });
+      expect(JSON.stringify(snap)).not.toContain("lp_secret");
+    });
+
+    it("未配置时 tokenConfigured 为 false", async () => {
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "", token: "" },
+        async () => {});
+      expect((await gateway.snapshot()).connection).toEqual({ panelUrl: "", tokenConfigured: false });
+    });
+
+    it("saveConnection 把非空字段写进 settings", async () => {
+      const writes: unknown[] = [];
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "", token: "" },
+        async (patch) => { writes.push(patch); });
+      await gateway.saveConnection("http://new:9090", "lp_new");
+      expect(writes).toEqual([{ panelUrl: "http://new:9090", token: "lp_new" }]);
+    });
+
+    it("token 传空串 = 不改动 token（沿用官方 SecretField 的语义：留空即保留原值）", async () => {
+      const writes: unknown[] = [];
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "http://p:1", token: "old" },
+        async (patch) => { writes.push(patch); });
+      await gateway.saveConnection("http://new:9090", "");
+      expect(writes).toEqual([{ panelUrl: "http://new:9090" }]);
+    });
+
+    it("面板地址空白 → 抛错，不写入（空地址会让插件彻底失联，且没有撤销入口）", async () => {
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "http://p:1", token: "t" },
+        async () => {});
+      await expect(gateway.saveConnection("   ", "")).rejects.toThrow();
+    });
+
+    it("写入失败时把原因带回快照的 panelError，不抛给浏览器", async () => {
+      const gateway = new PanelGateway(fakeCtx() as never,
+        { client: fakeClient(), gate: fakeGate(), panelUrl: "http://p:1", token: "t" },
+        async () => { throw new Error("磁盘只读"); });
+      const snap = await gateway.saveConnection("http://new:9090", "");
+      expect(snap.panelError).toContain("磁盘只读");
     });
   });
 });

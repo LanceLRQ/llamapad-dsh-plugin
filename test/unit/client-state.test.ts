@@ -28,6 +28,9 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     inferring: null,
     openUrl: "http://panel.local",
     panelError: null,
+    // 本文件测的是 buildCardView 等纯逻辑，不涉及连接配置区，占位即可
+    // （任务 6 给 CardSnapshot 加了必填的 connection 字段，这里只是同步 fixture）。
+    connection: { panelUrl: "http://panel.local", tokenConfigured: false },
     ...overrides,
   };
 }
