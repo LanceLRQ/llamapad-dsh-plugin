@@ -26,6 +26,11 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
 
 ## 关键约束
 
+- **`LlamapadAdapterOptions` / `PanelGatewayOptions` 会被 `index.ts` 在配置变更时原地改写**：
+  面板地址/token 改完即时生效，靠的是这两个 options 对象在运行期被直接换上新的
+  `client`/`gate`，不重建 adapter/gateway、不重新注册 provider。因此 adapter 与 gateway
+  的每个方法都必须现取 `this.options.*`，不得在构造期把字段拷进实例字段——拷了会静默
+  失效，配置改了也不生效，且没有任何报错
 - dsh 是 v0.1 技术预览：`@deepseek-ai/*` 依赖**钉精确版本**；类型契约以
   `node_modules/@deepseek-ai/dsh-llm/lib/types/*.d.ts` 为准（文档可能滞后）。
   **钉版必须与宿主 dsh 同代**——构建把 `@deepseek-ai/*` 全部 external，运行时由 pnpm 按本包钉版

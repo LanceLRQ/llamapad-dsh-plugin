@@ -11,7 +11,7 @@
 插件行，可以只挂一个也可以两个同挂；`./client` 不是插件行，随 A 形态自动加载，无需单独配置。
 
 **状态：A 形态 + 聊天路由解耦（阶段一）+ B 形态管理工具 + 设置卡片（阶段二）均已实现并通过
-全部测试（179 单测 + 12 假面板 E2E），并已在真实 dsh + GPU 环境完成端到端冒烟。**
+全部测试（300 单测 + 17 假面板 E2E），并已在真实 dsh + GPU 环境完成端到端冒烟。**
 计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
 聊天路由三档与设置卡片的设计与落地记录见
 [docs/design/chat-vs-lifecycle-decoupling.md](docs/design/chat-vs-lifecycle-decoupling.md)与
@@ -49,12 +49,16 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 - 插件内串行门 + 同目标合流避免并发抖动（仅 `auto-switch` 档会触发 start）
 - 切换等待期**静默**（不往对话注入提示文本——那会污染历史上下文，见
   [调研文档](docs/research/2026-08-24-dsh-plugin-research.md) §5）
-- **模型选择器上的运行状态标记**：运行中的模型名前会有 `●` 前缀；`missing-file`/
+- **模型选择器上的运行状态标记**：运行中的模型名前会有 `▶︎` 前缀（实心播放三角，带
+  U+FE0E 变体选择符强制取文本形态，避免在部分系统被渲染成彩色 emoji）；`missing-file`/
   `missing-mmproj`（配置了但文件缺失）的模型会在说明文字后追加提示——选中这类模型
   必然在启动时 422，提前标出来省一次踩坑。标记随 `statusRefreshMs` 轮询自动刷新：
   插件定期查询面板运行状态，只在"当前运行中的模型"发生变化时才通知 dsh 重拉模型
   目录（浏览器侧目录本身不轮询，只在收到通知时重拉），关掉轮询（`statusRefreshMs: 0`）
-  后标记会停在插件启动那一刻的旧值，不再跟随面板侧的启停更新
+  后标记会停在插件启动那一刻的旧值，不再跟随面板侧的启停更新。`hideStoppedModels`
+  开启后选择器只列出运行中的模型（默认关闭，没有模型在跑时选择器会是空的）；
+  `chatBehavior: auto-switch` 档下该开关被忽略并打一条 console 警告——那一档要靠选中
+  未启动的模型来触发自动启动，藏起来会让整档不可用
 
 ## B 形态：管理工具（`llamapad-dsh-plugin/tools`）
 
@@ -73,16 +77,24 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 
 ## 设置卡片
 
-配置好 A 形态（`panelUrl`/`token`）后，dsh 的**设置 → 插件 → 插件配置**页签里会自动出现一张
-llamapad 卡片（与官方的终端 / Agent 循环 / 网页搜索三张卡并列），内容：
+dsh 的**设置 → 插件 → 插件配置**页签里会有一张 llamapad 卡片（与官方的终端 / Agent 循环 /
+网页搜索三张卡并列）——**无论 A 形态是否已经配好 `panelUrl`/`token`，卡片都会出现**：未配置
+时显示未连接态，直接在卡片里填连接信息保存即可，不需要先去改 cordis.yml 再重启 dsh。内容：
 
+- 标题行整行是一个可点击的折叠按钮（默认展开），点击收起/展开，chevron 旋转指示状态；
+  收起时停止轮询面板
+- 内容区顶部「在浏览器中打开面板」按钮，跳转到完整的 llamapad 面板
 - 运行状态（有没有模型在跑、是否正在推理）
-- 模型列表（名称/命名空间/量化；文件缺失的模型会标出原因）
+- 模型列表：卡片式两列网格，超过约 4 行时列表内部定高（320px）滚动，卡片本身不被撑高；
+  dsh 窗口窄于 520px 时回落单列
 - 每行一个启动/停止按钮（单模型语义，点启动即切换）
-- 右上角「在浏览器中打开面板」，跳转到完整的 llamapad 面板
+- 底部「连接设置」区：面板地址与 API token 两个输入框 + 保存按钮
 
-卡片不需要单独配置——复用的正是 A 形态已经填好的 `panelUrl`/`token`；A 形态未配置这两项时
-（`apply()` 提前打警告并返回）卡片也不会出现。
+**卡片内可直接配置连接**：面板地址与 token 不必预先写进 cordis.yml——在「连接设置」区填好
+保存即可，写入 `$DSH_HOME/settings.yaml` 里本插件的独立分节（不碰 cordis.yml），优先级高于
+cordis.yml，**改完立即生效，不用重启 dsh**。token 输入框留空表示保持已配置的值不变（沿用
+官方 SecretField 的语义），因此没有单独的「清空 token」入口；面板地址留空会被拒绝保存——
+清空地址会让卡片本身失去唯一的补救入口。
 
 **token 与面板连接全程留在 dsh host 进程**：卡片经 host RPC（`ctx.remote.llamapadPanel.*`）
 向宿主要数据，宿主再用已有的 `PanelClient`/`token` 去调 llamapad；浏览器全程拿不到 token、
@@ -116,6 +128,7 @@ llamapad 卡片（与官方的终端 / Agent 循环 / 网页搜索三张卡并�
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
 | `statusRefreshMs` | `5000` | 轮询面板运行状态并刷新模型选择器的间隔（毫秒）；`0` 关闭。仅影响选择器上的运行中标记，不影响对话 |
+| `hideStoppedModels` | `false` | 开启后模型选择器只显示运行中的模型；`chatBehavior: auto-switch` 档下该开关被忽略（那一档要靠选中未启动的模型触发自动启动），忽略时会打一条 console 警告 |
 
 挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
@@ -203,7 +216,10 @@ bundle 层只注册插件行、不带配置。编辑 profile 目录的 `cordis.p
         token: !!js process.env.LLAMAPAD_TOKEN
 ```
 
-没配 `panelUrl`/`token` 就启动也不会拖垮 dsh：插件打一条警告后跳过注册，补好配置重启即可。
+没配 `panelUrl`/`token` 就启动不会拖垮 dsh，但 A、B 两个入口的行为不同：A 形态（LLM 适配器）
+照常注册，模型选择器与设置卡片都会出现，卡片显示未连接态，可以直接在卡片「连接设置」区填好
+保存，不需要重启 dsh；B 形态（管理工具）不受此影响，仍是打一条警告后跳过工具注册，补好配置
+需要重启 dsh 才生效。
 
 **验证**
 
