@@ -2,7 +2,8 @@ import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
 import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
-import { decideRoute, type ChatBehavior } from "./routing";
+import { decideRoute, type ChatBehavior, type RouteBlockReason } from "./routing";
+import { formatRouteBlock } from "./route-message";
 import { buildChatBody } from "./openai-wire";
 import { translateOpenAiSse } from "./translate";
 import { buildReasoningInfo } from "./reasoning";
@@ -82,6 +83,17 @@ export class LlamapadAdapter extends LlmAdapter {
     return buildReasoningInfo(await this.options.client.getReasoningInfo().catch(() => null));
   }
 
+  /**
+   * 把结构化事由译成给用户看的话。displayName 要另查一次面板——只在这条报错路径上
+   * 发生，正常对话不受影响；查失败就用配置 key 顶上，绝不因为「名字没查到」把一条
+   * 本该说清楚的错误变成异常。
+   */
+  private async blockMessage(reason: RouteBlockReason): Promise<string> {
+    const models = await this.options.client.listModels().catch(() => null);
+    const table = new Map((models ?? []).map((m) => [m.name, m.displayName || m.name]));
+    return formatRouteBlock(reason, (key) => table.get(key) ?? key);
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.reasoningEffort !== undefined && this.options.mode === "direct") {
       throw new LlmError(
@@ -102,7 +114,7 @@ export class LlamapadAdapter extends LlmAdapter {
       const status = await this.options.client.runtimeStatus(behavior === "auto-switch" ? undefined : { busy: true });
       const decision = decideRoute(behavior, options.model, status);
       if (decision.action === "error") {
-        throw new EnsureError(decision.message, decision.code);
+        throw new EnsureError(await this.blockMessage(decision.reason), decision.code);
       }
       if (decision.action === "start") {
         const drainOnSwitch = this.options.drainOnSwitch ?? true;

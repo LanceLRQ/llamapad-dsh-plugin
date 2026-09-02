@@ -15,10 +15,23 @@ import type { PanelRuntimeStatus } from "./panel-client";
  */
 export type ChatBehavior = "strict" | "passthrough" | "auto-switch";
 
+/**
+ * 被拦下的结构化事由。文案不在这里成文——见 route-message.ts 顶部注释。
+ */
+export interface RouteBlockReason {
+  kind: "no-model" | "mismatch" | "not-ready";
+  /** 运行中模型的配置 key；no-model 时为 null */
+  runningModel: string | null;
+  /** 本次请求的模型配置 key */
+  requestedModel: string;
+  /** 目标机器是否正在推理；null=不可知，不等于「不忙」 */
+  inferring: boolean | null;
+}
+
 export type RouteDecision =
   | { action: "proceed"; targetModel: string }
   | { action: "start"; model: string }
-  | { action: "error"; code: "MODEL_NOT_RUNNING" | "MODEL_NOT_READY"; message: string };
+  | { action: "error"; code: "MODEL_NOT_RUNNING" | "MODEL_NOT_READY"; reason: RouteBlockReason };
 
 export function decideRoute(
   behavior: ChatBehavior,
@@ -36,7 +49,11 @@ export function decideRoute(
   // 此时维持既有行为，绝不因为字段缺席就把所有请求拦下。
   // auto-switch 且运行的不是目标模型时不拦：要换掉的正是这个未就绪的容器。
   if (running?.ready === false && (behavior !== "auto-switch" || running.model === requestedModel)) {
-    return { action: "error", code: "MODEL_NOT_READY", message: notReadyMessage(running.model) };
+    return {
+      action: "error", code: "MODEL_NOT_READY",
+      reason: { kind: "not-ready", runningModel: running.model, requestedModel,
+                inferring: status.busy?.inferring ?? null },
+    };
   }
 
   if (behavior === "auto-switch") {
@@ -47,7 +64,11 @@ export function decideRoute(
   // strict / passthrough：无模型在跑一律报错，聊天路径不会替用户按下启动键
   // （用真值判定而非 === null：running 来自面板 HTTP 响应，缺键时不该炸成 TypeError）
   if (!running) {
-    return { action: "error", code: "MODEL_NOT_RUNNING", message: noModelRunningMessage(status.busy) };
+    return {
+      action: "error", code: "MODEL_NOT_RUNNING",
+      reason: { kind: "no-model", runningModel: null, requestedModel,
+                inferring: status.busy?.inferring ?? null },
+    };
   }
   if (running.model === requestedModel) {
     return { action: "proceed", targetModel: requestedModel };
@@ -57,28 +78,8 @@ export function decideRoute(
   }
   // strict + 运行中模型与请求不符
   return {
-    action: "error",
-    code: "MODEL_NOT_RUNNING",
-    message: mismatchMessage(running.model, requestedModel, status.busy),
+    action: "error", code: "MODEL_NOT_RUNNING",
+    reason: { kind: "mismatch", runningModel: running.model, requestedModel,
+              inferring: status.busy?.inferring ?? null },
   };
-}
-
-function busySuffix(busy: PanelRuntimeStatus["busy"]): string {
-  // busy 为 null 代表「不可知」而非「不忙」，此时不追加提示（宁可不说，也不误报）
-  return busy?.inferring === true ? "；目标机器正在推理中" : "";
-}
-
-function noModelRunningMessage(busy: PanelRuntimeStatus["busy"]): string {
-  return `当前没有模型在运行，请先到 llamapad 面板启动一个模型${busySuffix(busy)}；`
-    + "如需按请求自动启动，可把 chatBehavior 改为 auto-switch。";
-}
-
-function mismatchMessage(runningModel: string, requestedModel: string, busy: PanelRuntimeStatus["busy"]): string {
-  return `当前运行的是 ${runningModel}，请求的是 ${requestedModel}${busySuffix(busy)}；`
-    + "strict 档不会自动切换，请到 llamapad 面板启动目标模型，或把 chatBehavior 改为 auto-switch。";
-}
-
-function notReadyMessage(runningModel: string): string {
-  return `模型 ${runningModel} 的容器已启动，但 llama-server 还没开始监听`
-    + "（大模型冷启动需要数十秒加载权重）；请稍候重试。";
 }

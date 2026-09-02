@@ -336,7 +336,7 @@ describe("LlamapadAdapter", () => {
         () => { throw new Error("应当抛出错误"); },
         (e: unknown) => e as Error,
       );
-      expect(error.message).toContain("目标机器正在推理中");
+      expect(error.message).toContain("还有对话正在生成");
     });
 
     it("auto-switch × proxy：start 后不再为拼 URL 多查一次 runtimeStatus（反代不看 hostPort）", async () => {
@@ -404,6 +404,20 @@ describe("LlamapadAdapter", () => {
       expect(url).toBe("http://gpu:18099/v1/chat/completions");
       expect(callCount).toBe(2);
     });
+  });
+
+  it("strict 被拦时，报错文案用 displayName 而非配置 key", async () => {
+    const client = {
+      baseUrl: "http://panel:8080", listModels: async () => [
+        { name: "qwen3-4b", displayName: "Qwen3 4B", namespace: "main", quant: null,
+          sizeBytes: 0, hostPort: 18080, status: "running" },
+      ],
+      getModel: async () => null, getEffectiveConfig: async () => null,
+      runtimeStatus: async () => ({ running: { model: "qwen3-4b", ready: true } }),
+      startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const { adapter } = makeAdapter({ chatBehavior: "strict", client });
+    await expect(drain(adapter.stream(opts({ model: "other" })))).rejects.toThrow("「Qwen3 4B」");
   });
 
   it("gate 抛 RUNTIME_BUSY 时映射为同码 LlmError，文案不被替换成「面板不可达」", async () => {
