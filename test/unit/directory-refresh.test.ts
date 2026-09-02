@@ -58,7 +58,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, effect } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl } = fakeTimers();
     startDirectoryRefresh({
-      ctx, client: fakeClient(async () => runningStatus(null)), intervalMs: 0, setTimeoutImpl, clearTimeoutImpl,
+      ctx, client: () => fakeClient(async () => runningStatus(null)), intervalMs: 0, setTimeoutImpl, clearTimeoutImpl,
     });
     expect(setTimeoutImpl).not.toHaveBeenCalled();
     expect(effect).not.toHaveBeenCalled();
@@ -68,7 +68,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, effect } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl } = fakeTimers();
     startDirectoryRefresh({
-      ctx, client: fakeClient(async () => runningStatus(null)), intervalMs: -1000, setTimeoutImpl, clearTimeoutImpl,
+      ctx, client: () => fakeClient(async () => runningStatus(null)), intervalMs: -1000, setTimeoutImpl, clearTimeoutImpl,
     });
     expect(setTimeoutImpl).not.toHaveBeenCalled();
     expect(effect).not.toHaveBeenCalled();
@@ -78,7 +78,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, emit } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl, fire } = fakeTimers();
     const runtimeStatus = vi.fn(async () => runningStatus("a"));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     await fire();
     expect(runtimeStatus).toHaveBeenCalledTimes(1);
     expect(emit).not.toHaveBeenCalled();
@@ -89,7 +89,7 @@ describe("startDirectoryRefresh", () => {
     const { setTimeoutImpl, clearTimeoutImpl, fire } = fakeTimers();
     let model: string | null = "a";
     const runtimeStatus = vi.fn(async () => runningStatus(model));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     await fire(); // 首轮：基线 = a，不 emit
     model = "b";
     await fire(); // 第二轮：b != a → emit
@@ -101,7 +101,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, emit } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl, fire } = fakeTimers();
     const runtimeStatus = vi.fn(async () => runningStatus("a"));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     await fire();
     await fire();
     await fire();
@@ -113,7 +113,7 @@ describe("startDirectoryRefresh", () => {
     const { setTimeoutImpl, clearTimeoutImpl, fire } = fakeTimers();
     let model: string | null = "a";
     const runtimeStatus = vi.fn(async () => runningStatus(model));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     await fire(); // 基线 a
     model = null;
     await fire(); // a → null，变化
@@ -130,7 +130,7 @@ describe("startDirectoryRefresh", () => {
       if (call === 2) throw new PanelError("llamapad 面板不可达", "PANEL_UNREACHABLE");
       return runningStatus("b");
     });
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     await fire(); // 基线 a
     await expect(fire()).resolves.toBeUndefined(); // 第二轮报错：不抛出、循环不终止
     expect(emit).not.toHaveBeenCalled();
@@ -143,7 +143,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, effect } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl } = fakeTimers();
     startDirectoryRefresh({
-      ctx, client: fakeClient(async () => runningStatus(null)), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl,
+      ctx, client: () => fakeClient(async () => runningStatus(null)), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl,
     });
     expect(effect).toHaveBeenCalledTimes(1);
     expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
@@ -156,7 +156,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, effect } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl, pending } = fakeTimers();
     const runtimeStatus = vi.fn(async () => runningStatus("a"));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     const disposer = effect.mock.results[0]!.value as () => void;
     expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
 
@@ -176,7 +176,7 @@ describe("startDirectoryRefresh", () => {
     const { setTimeoutImpl, clearTimeoutImpl, pending } = fakeTimers();
     let answer: string | null = "a";
     const runtimeStatus = vi.fn(async () => runningStatus(answer));
-    startDirectoryRefresh({ ctx, client: fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
+    startDirectoryRefresh({ ctx, client: () => fakeClient(runtimeStatus), intervalMs: 1000, setTimeoutImpl, clearTimeoutImpl });
     const disposer = effect.mock.results[0]!.value as () => void;
 
     // 第一轮定基线 a
@@ -197,7 +197,7 @@ describe("startDirectoryRefresh", () => {
     const { ctx, effect } = fakeCtx();
     const { setTimeoutImpl, clearTimeoutImpl } = fakeTimers();
     startDirectoryRefresh({
-      ctx, client: fakeClient(async () => runningStatus(null)),
+      ctx, client: () => fakeClient(async () => runningStatus(null)),
       intervalMs: undefined as unknown as number, setTimeoutImpl, clearTimeoutImpl,
     });
     expect(effect).not.toHaveBeenCalled();

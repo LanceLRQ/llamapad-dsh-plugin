@@ -15,7 +15,13 @@ import type { PanelClient } from "./panel-client";
 
 export interface DirectoryRefreshOptions {
   ctx: Context;
-  client: PanelClient;
+  /**
+   * 惰性取当前 client，而非持有一份快照：本模块是常驻轮询，index.ts 在配置变更时
+   * 会原地改写 adapterOptions.client（见 adapter.ts 的 LlamapadAdapterOptions 契约
+   * 注释），如果这里抱着构造期传入的那份引用不放，面板地址热更新后轮询仍会打向
+   * 旧 client，client 换了也感知不到。
+   */
+  client: () => PanelClient;
   /** 轮询间隔（毫秒）；<=0 关闭刷新器，完全不启动定时器 */
   intervalMs: number;
   /** 可注入定时器实现，测试用假实现避免真的等待；默认全局 setTimeout/clearTimeout */
@@ -41,7 +47,7 @@ export function startDirectoryRefresh(options: DirectoryRefreshOptions): void {
 
     async function tick(): Promise<void> {
       try {
-        const status = await client.runtimeStatus();
+        const status = await client().runtimeStatus();
         const current = status.running?.model ?? null;
         if (baseline === undefined) {
           baseline = current;

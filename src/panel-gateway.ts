@@ -16,6 +16,12 @@ import { RPC_NAMESPACE, type CardModel, type CardSnapshot, type RuntimePhase } f
 import { PanelError, type PanelClient, type PanelModelView } from "./panel-client";
 import type { ModelGate } from "./switching";
 
+/**
+ * ⚠️ 这个对象会被 index.ts 在配置变更时**原地改写**（面板地址/token 改完即时生效，
+ * 不重建 gateway、不重新注册 provider）。因此 gateway 的每个方法都必须现取
+ * `this.options.xxx`，**不要**在构造期把字段拷进实例字段——那样配置改了也不生效，
+ * 而且是静默失效，没有任何报错。
+ */
 export interface PanelGatewayOptions {
   client: PanelClient;
   gate: ModelGate;

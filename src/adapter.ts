@@ -8,6 +8,12 @@ import { buildChatBody } from "./openai-wire";
 import { translateOpenAiSse } from "./translate";
 import { buildReasoningInfo } from "./reasoning";
 
+/**
+ * ⚠️ 这个对象会被 index.ts 在配置变更时**原地改写**（面板地址/token 改完即时生效，
+ * 不重建 adapter、不重新注册 provider）。因此 adapter 的每个方法都必须现取
+ * `this.options.xxx`，**不要**在构造期把字段拷进实例字段——那样配置改了也不生效，
+ * 而且是静默失效，没有任何报错。
+ */
 export interface LlamapadAdapterOptions {
   client: PanelClient;
   gate: ModelGate;

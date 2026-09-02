@@ -4,10 +4,14 @@ import Schema from "@deepseek-ai/schemastery";
 // 等方法，不引入这个模块 TS 就看不到 augmentation（运行时由宿主提供，不进产物）。
 import type {} from "@deepseek-ai/dsh-typert-registry";
 import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
-import { LlamapadAdapter } from "./adapter";
+import { LlamapadAdapter, type LlamapadAdapterOptions } from "./adapter";
+import {
+  connectionChanged, createUnconfiguredClient, isConnectionComplete, readConnection,
+  type ConnectionParams,
+} from "./connection";
 import { startDirectoryRefresh } from "./directory-refresh";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
-import { PanelGateway } from "./panel-gateway";
+import { PanelGateway, type PanelGatewayOptions } from "./panel-gateway";
 import { RPC_CONTRIBUTION, RPC_PACKAGE, SETTINGS_NAMESPACE } from "./rpc-contract";
 import { createModelGate, sharedModelGate } from "./switching";
 
@@ -72,78 +76,98 @@ export const name = "llamapad-dsh-plugin";
 export const inject = ["llm"];
 
 export function apply(ctx: Context, config: Config) {
-  if (!config.panelUrl || !config.token) {
-    console.warn(
-      "[llamapad-dsh-plugin] 尚未配置 panelUrl / token，已跳过适配器注册。" +
-      "请在 profile 的 cordis.patch.yml 里按 id 覆盖 llamapad 行（模板见包内 examples/profile-patch.example.yml），改完重启 dsh。",
-    );
-    return;
-  }
-  if (config.mode !== "proxy" && config.mode !== "direct") {
-    throw new Error(`mode 必须是 proxy 或 direct，当前: ${config.mode}`);
-  }
-  if (config.mode === "direct" && !config.llamaBaseUrl) {
-    throw new Error("direct 模式需要配置 llamaBaseUrl");
-  }
-  if (config.chatBehavior !== "strict" && config.chatBehavior !== "passthrough" && config.chatBehavior !== "auto-switch") {
-    throw new Error(`chatBehavior 必须是 strict / passthrough / auto-switch 之一，当前: ${config.chatBehavior}`);
-  }
-  const client = createPanelClient({
-    baseUrl: config.panelUrl,
-    token: config.token,
-    ...(config.requestTimeoutMs ? { requestTimeoutMs: config.requestTimeoutMs } : {}),
+  // 这三项是编程/配置错误（写错了值），不是「还没填」，照旧直接抛——它们与连接是否
+  // 配齐无关，settings 层也改不出合法值来，越早暴露越好。
+  assertStaticConfig(config);
+
+  // current 是「当前生效配置」的取值 thunk。初值指向 entry（cordis.yml 那层）；
+  // settings 服务挂载后 setSource 会把它换成 () => scope.get()，从此读到的是
+  // 「schema 默认 < cordis.yml < settings.yaml」三层合并后的值。
+  let current: () => Config = () => config;
+
+  // adapter 与 gateway 全程只有一个实例，配置变了改写它们的 options（见 adapter.ts /
+  // panel-gateway.ts 两个 options 接口上的契约注释），不重建、不重新注册。
+  const adapterOptions: LlamapadAdapterOptions = {
+    client: createUnconfiguredClient(),
+    gate: sharedModelGate(createUnconfiguredClient()),
+    token: "", mode: "proxy",
+  };
+  const gatewayOptions: PanelGatewayOptions = {
+    client: adapterOptions.client, gate: adapterOptions.gate, panelUrl: "",
+  };
+
+  let live: ConnectionParams | null = null;
+
+  /** 幂等：连接参数没变就什么都不做。onChange 每次写入都会触发，包括我们自己写的那次。 */
+  const syncConnection = () => {
+    const cfg = current();
+    const params = readConnection(cfg);
+    const complete = isConnectionComplete(params);
+
+    if (connectionChanged(live, params)) {
+      const client = complete
+        ? createPanelClient({
+            baseUrl: params.panelUrl, token: params.token,
+            ...(params.requestTimeoutMs ? { requestTimeoutMs: params.requestTimeoutMs } : {}),
+          })
+        : createUnconfiguredClient();
+      // 共享门：与 B 形态（tools.ts）的 start 工具共用同一把锁，避免同一面板出现两把锁
+      // 各自判断"要不要起/停"而互相插队（见 switching.ts 的 sharedModelGate 注释）
+      const gate = sharedModelGate(client);
+      adapterOptions.client = client;
+      adapterOptions.gate = gate;
+      gatewayOptions.client = client;
+      gatewayOptions.gate = gate;
+      live = params;
+    }
+
+    // 非连接类字段每次都同步：它们改了不需要换 client，但同样要立刻生效
+    adapterOptions.token = params.token;
+    adapterOptions.mode = params.mode === "direct" ? "direct" : "proxy";
+    adapterOptions.chatBehavior = cfg.chatBehavior as never;
+    // auto-switch 档忽略 hideStoppedModels：那一档靠「选中未启动的模型」触发自动启动，
+    // 把未启动的模型藏起来会让整档不可用（见 filterModelsForSelector 注释）。
+    adapterOptions.hideStoppedModels =
+      cfg.hideStoppedModels === true && cfg.chatBehavior !== "auto-switch";
+    adapterOptions.drainOnSwitch = cfg.drainOnSwitch;
+    setOptional(adapterOptions, "llamaBaseUrl", params.llamaBaseUrl);
+    setOptional(adapterOptions, "startTimeoutMs", cfg.startTimeoutMs);
+    setOptional(adapterOptions, "pollIntervalMs", cfg.pollIntervalMs);
+    setOptional(adapterOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
+    setOptional(adapterOptions, "defaultContextWindow", cfg.defaultContextWindow);
+    gatewayOptions.panelUrl = params.panelUrl;
+    gatewayOptions.drainOnSwitch = cfg.drainOnSwitch;
+    setOptional(gatewayOptions, "panelPublicUrl", cfg.panelPublicUrl);
+    setOptional(gatewayOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
+  };
+
+  // 先接 settings：installSettingsSection 在挂载时会同步调一次 setSource + onChange，
+  // 于是第一次 syncConnection 用的就已经是三层合并后的值。settings 服务没挂载时这两个
+  // 回调都不会触发，靠下面那次手动调用兜底（syncConnection 幂等，两条路径都安全）。
+  //
+  // settings 命名空间必须是 SETTINGS_NAMESPACE（kebab-case）而非 RPC_NAMESPACE（驼峰）——
+  // 两者是不同的东西，见 rpc-contract.ts 顶部注释。它同时是卡片在 Plugins 页签的 slot key：
+  // 该页签只渲染「host 已服务的 settings namespace ∩ 已注册到 settings.plugin.item 的卡片」
+  // 的交集，两边对不上卡片就不会出现——这正是缺配置也必须无条件走到这一步的原因。
+  installSettingsSection(ctx, settingsNamespace(SETTINGS_NAMESPACE), Config, config, {
+    setSource: (source) => { current = source; },
+    onChange: syncConnection,
   });
-  // 共享门：与 B 形态（tools.ts）的 start 工具共用同一把锁，避免同一面板出现两把锁
-  // 各自判断"要不要起/停"而互相插队（见 switching.ts 的 sharedModelGate 注释）
-  const gate = sharedModelGate(client);
-  // auto-switch 档忽略 hideStoppedModels：那一档靠「选中未启动的模型」触发自动启动，
-  // 把未启动的模型藏起来会让整档不可用。这里 warn 一次即可，不必每次 listModels 都喊。
-  const hideStoppedModels = config.hideStoppedModels === true && config.chatBehavior !== "auto-switch";
+  syncConnection();
+
   if (config.hideStoppedModels === true && config.chatBehavior === "auto-switch") {
     console.warn(
       "[llamapad-dsh-plugin] chatBehavior=auto-switch 时忽略 hideStoppedModels："
       + "该档需要选中未启动的模型来触发自动启动，隐藏它们会让这一档无法使用。",
     );
   }
-  ctx.llm.registerAdapter([config.provider], new LlamapadAdapter({
-    client,
-    gate,
-    token: config.token,
-    mode: config.mode,
-    chatBehavior: config.chatBehavior,
-    ...(config.llamaBaseUrl ? { llamaBaseUrl: config.llamaBaseUrl } : {}),
-    ...(config.startTimeoutMs ? { startTimeoutMs: config.startTimeoutMs } : {}),
-    ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
-    drainOnSwitch: config.drainOnSwitch,
-    ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
-    ...(config.defaultContextWindow ? { defaultContextWindow: config.defaultContextWindow } : {}),
-    hideStoppedModels,
-  }));
-  startDirectoryRefresh({ ctx, client, intervalMs: config.statusRefreshMs });
+
+  ctx.llm.registerAdapter([config.provider], new LlamapadAdapter(adapterOptions));
+  startDirectoryRefresh({ ctx, client: () => adapterOptions.client, intervalMs: config.statusRefreshMs });
 
   // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
-  new PanelGateway(ctx, {
-    client,
-    gate,
-    panelUrl: config.panelUrl,
-    ...(config.panelPublicUrl ? { panelPublicUrl: config.panelPublicUrl } : {}),
-    drainOnSwitch: config.drainOnSwitch,
-    ...(config.drainTimeoutMs ? { drainTimeoutMs: config.drainTimeoutMs } : {}),
-  });
-
-  // settings 命名空间必须是 SETTINGS_NAMESPACE（kebab-case）而非 RPC_NAMESPACE（驼峰）——
-  // 两者是不同的东西，见 rpc-contract.ts 顶部注释。它同时是卡片在 Plugins 页签的 slot key：
-  // 该页签只渲染「host 已服务的 settings namespace ∩ 已注册到 settings.plugin.item 的卡片」
-  // 的交集，两边对不上卡片就不会出现。
-  //
-  // 本轮不做配置表单：不接受这个 namespace 的写入，真源仍只有 cordis.patch.yml。setSource /
-  // onChange 如实接住 dsh-settings 的回调即可，不读取、不据此改变上面已经用 config（entry 层）
-  // 构造完毕的 client / gate / adapter / 网关——现有配置读取路径必须与今天完全一致。
-  installSettingsSection(ctx, settingsNamespace(SETTINGS_NAMESPACE), Config, config, {
-    setSource: () => {},
-    onChange: () => {},
-  });
+  new PanelGateway(ctx, gatewayOptions);
 
   // 把三个方法的 strict 描述符注册进 typert 共享注册表。
   //
@@ -164,6 +188,32 @@ export function apply(ctx: Context, config: Config) {
       invocations: RPC_CONTRIBUTION.descriptors,
     });
   });
+}
+
+/** mode / chatBehavior / direct 缺 llamaBaseUrl 三项静态校验，与连接是否配齐无关。 */
+function assertStaticConfig(config: Config): void {
+  if (config.mode !== "proxy" && config.mode !== "direct") {
+    throw new Error(`mode 必须是 proxy 或 direct，当前: ${config.mode}`);
+  }
+  if (config.mode === "direct" && !config.llamaBaseUrl) {
+    throw new Error("direct 模式需要配置 llamaBaseUrl");
+  }
+  if (config.chatBehavior !== "strict" && config.chatBehavior !== "passthrough"
+      && config.chatBehavior !== "auto-switch") {
+    throw new Error(`chatBehavior 必须是 strict / passthrough / auto-switch 之一，当前: ${config.chatBehavior}`);
+  }
+}
+
+/**
+ * 可选字段的写入：值为空时**删掉这个键**而不是写 undefined。
+ * 两个 options 接口的可选字段都是「有这个键就当配了」的语义（构造处用的是
+ * `...(x ? { k: x } : {})` 这种展开写法），留一个 undefined 值会让判断走岔。
+ */
+function setOptional<T extends object, K extends keyof T>(
+  target: T, key: K, value: T[K] | undefined,
+): void {
+  if (value === undefined || value === "") delete target[key];
+  else target[key] = value;
 }
 
 export { LlamapadAdapter, createPanelClient, createModelGate };
