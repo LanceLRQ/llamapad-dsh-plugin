@@ -131,6 +131,10 @@ export class PanelGateway extends TypertRemoteService {
     // "面板 proxy 端口未就绪的 502"与"加载中透传的 503"——两者都非 200。真挂了的
     // 模型会一直卡在 starting，配合卡片上的已耗时用户能自行判断，不必为此改
     // llamaHealth() 的签名（它还被 src/tools.ts 复用）。
+    // 与 switching.ts 的就绪判定同口径：优先用 runtime/status 的 ready（省一次往返），
+    // 老面板缺这个字段时才回退 /health 探测
+    const status = await this.options.client.runtimeStatus();
+    if (status.running?.ready !== undefined) return status.running.ready ? "ready" : "starting";
     return (await this.options.client.llamaHealth()) ? "ready" : "starting";
   }
 }
@@ -156,7 +160,13 @@ function toCardModel(model: PanelModelView): CardModel {
 function describePanelError(error: unknown): string {
   if (error instanceof PanelError) {
     if (error.code === "AUTH") return "llamapad token 无效或未授权，请检查插件配置里的 token";
-    if (error.code === "PANEL_UNREACHABLE") return error.message;
+    // 这三个码的 message 本身就是完整的中文说明（面板不可达的地址、"运行时忙：正在启动
+    // 模型 X，请等待…"、面板对拒绝启动的解释），套上"面板请求失败"的壳只会自相矛盾——
+    // RUNTIME_BUSY 时面板并没有失败，只是忙。其余码仍需兜一层：listModels/runtimeStatus
+    // 的 401 透传的是面板返回的裸 "unauthorized"，摆到卡片里等于什么都没说（见函数头注释）
+    if (error.code === "PANEL_UNREACHABLE" || error.code === "RUNTIME_BUSY" || error.code === "START_REJECTED") {
+      return error.message;
+    }
     return `面板请求失败（${error.code}${error.status === undefined ? "" : ` ${String(error.status)}`}）：${error.message}`;
   }
   return error instanceof Error ? error.message : "面板请求失败：未知错误";

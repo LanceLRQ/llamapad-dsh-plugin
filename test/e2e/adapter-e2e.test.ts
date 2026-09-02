@@ -87,4 +87,40 @@ describe("LlamapadAdapter E2E（假面板）", () => {
     // 本次改造的核心保证：strict 档聊天路径完全不触发 start，在途流不会被杀
     expect(state.starts).toHaveLength(startsBefore);
   });
+
+  it("就绪闸门：容器在跑但未就绪时，strict 档报 MODEL_NOT_READY 且不发推理请求", async () => {
+    const chatsBefore = state.chatRequests.length;
+    // 直接构造「已 start、仍在加载」的窗口：这正是真机上 27B 冷启动的那 35 秒
+    state.running = "qwen-small";
+    state.readyAt = Date.now() + 10_000;
+    const client = createPanelClient({ baseUrl, token: "lp_e2e", requestTimeoutMs: 2_000 });
+    const strictAdapter = new LlamapadAdapter({
+      client, gate: createModelGate(client), token: "lp_e2e", mode: "proxy", chatBehavior: "strict",
+    });
+    await expect(drain(strictAdapter, "qwen-small")).rejects.toMatchObject({ code: "MODEL_NOT_READY" });
+    expect(state.chatRequests).toHaveLength(chatsBefore);
+    state.readyAt = 0;  // 复原，后续用例（及本文件的 state 跨用例累积约定）不受影响
+  });
+
+  it("思考强度：proxy 模式把 reasoning_effort 原样发给面板中转", async () => {
+    const adapter = makeAdapter();
+    for await (const _ of adapter.stream({
+      provider: "llamapad", model: "qwen-small", reasoningEffort: "xhigh",
+      messages: [{ id: "m1", role: "user", content: [{ type: "text", text: "北京天气" }], source: {} }],
+    } as any)) { /* 拉完即可，本例只断言请求体 */ }
+    expect(state.chatRequests.at(-1)!.reasoning_effort).toBe("xhigh");
+  });
+
+  it("resolveModel 对运行中模型上报面板给的真实档位", async () => {
+    await drain(makeAdapter(), "qwen-small");  // 确保 qwen-small 是运行中的那个
+    const resolved = await makeAdapter().resolveModel("llamapad", "qwen-small");
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(["xhigh", "medium", "low"]);
+  });
+
+  it("resolveModel 对未运行模型退回完整枚举（面板的声明只对运行中模型有效）", async () => {
+    await drain(makeAdapter(), "qwen-small");
+    const resolved = await makeAdapter().resolveModel("llamapad", "qwen-big");
+    expect(resolved.reasoning?.efforts.map((e) => e.id))
+      .toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
 });

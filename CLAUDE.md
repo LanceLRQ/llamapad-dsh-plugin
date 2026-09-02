@@ -33,7 +33,15 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   **无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有这个方法，
   每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护测试；
   升级 dsh 后先跑它
-- llamapad API 只读参照：`/mnt/data/github/llamapad/src/app/api/v1/`（跨仓库，不改它）
+- llamapad API 只读参照：`/mnt/data/github/llamapad/`（跨仓库，不改它）。**接口契约以面板正式文档
+  `docs/guide/zh/api.md` 为准**，源码 `src/app/api/v1/` 作为细节佐证。文档里两条与本插件直接相关的
+  约定：start 返回 200 不代表模型可用（要轮询 `runtime/status` 的 `ready`）、对已在运行的模型再次
+  调用 start 会重建容器而非空操作
+- **思考强度由面板中转层负责改写，插件不复刻**：面板在 `/v1/chat/completions` 上按该模型 chat
+  template 的真实值域改写 `reasoning_effort`（别名 → 值域内透传 → 就近取整 → 丢弃字段），兜底策略
+  保证请求一定不失败；`/v1/models` 的响应带 `x_llamapad.reasoning_effort.{supported,levels}` 声明。
+  插件只读声明、只透传取值（`src/reasoning.ts`）。**direct 模式绕过这一层**，值域外的取值会被 jinja
+  打成 HTTP 500，因此 direct 下 `resolveModel` 不上报 `reasoning`、`stream` 明确拒绝
 - 单模型运行时：切换 = start 自带停旧起新，**但是否触发切换由 `chatBehavior` 三档决定**
   （`strict` 默认/`passthrough`/`auto-switch`，见 `docs/design/chat-vs-lifecycle-decoupling.md`）；
   只有 `auto-switch` 档会调用 start，插件侧用串行门 + 同目标合流防并发抖动
@@ -96,6 +104,9 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 - 阶段二：生命周期控制的显式入口。**「零成本外链」那一步已被核实推翻**——host 侧单独注册在
   设置界面里什么都不显示，露出任何内容都要自行复刻浏览器端 client module 的产物格式（官方
   tsdown preset 未发布）。订正后的门槛结构见设计文档第 3 节；下一步是产物格式的专项调研 spike
-- **关注 llamapad M5**：其挂账②计划改造 llama webui 反代，而本插件依赖同一路由的 API 路径
-  （`/api/v1/proxy/llama/v1/chat/completions` 与 `/health`），改造时须确认未打断
+- **面板接口对齐已完成一轮**（2026-09-02，审查见 `docs/audit/2026-09-02-面板接口对齐审查.md`，
+  施工图见 `docs/plans/2026-09-02-面板接口对齐.md`）。原「关注 llamapad M5 反代改造」一条已结案：
+  M5 的结果是面板 Chat 页弃用 iframe 改自建 Playground，`/api/v1/proxy/llama/*` 不但保留还成了面板
+  自己的主要消费者，并新增短地址别名 `/llama-proxy/*`（经 Next rewrite，行为完全一致）。真正需要跟进
+  的是同一路由上新长出来的思考强度改写层，已在本轮接入
 - 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）

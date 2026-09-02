@@ -119,6 +119,22 @@ llamapad 卡片（与官方的终端 / Agent 循环 / 网页搜索三张卡并�
 
 挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
+### 思考强度（reasoning_effort）
+
+`proxy` 模式（默认）支持思考强度：档位由面板按模型 chat template 的真实值域声明，dsh 的选择器
+直接列出可选档。取值改写与兜底全部由面板中转层负责——选到模板不认的档位不会失败，面板会就近
+改写或丢弃该字段。
+
+面板的档位声明只对**当前运行中**的模型有效（中转层用运行中容器的模型组装响应），因此未运行的
+模型会列出完整枚举 `minimal / low / medium / high / xhigh / max`，切换过去之后再看到的才是该模型
+的真实值域。
+
+`direct` 模式**不支持**：该模式直连 llama.cpp，绕过面板中转层，值域外的取值会被模型 chat
+template 的 jinja 校验打成 HTTP 500。此模式下插件不上报档位，传入思考强度会明确报错。
+
+> 面板的推理中转前缀 `/api/v1/proxy/llama/*` 另有短地址别名 `/llama-proxy/*`，两者行为完全一致。
+> 插件配置里只填面板根地址（`panelUrl`），路径由插件自行拼接，无需关心用哪种写法。
+
 ## 安装到 dsh
 
 本包是标准 [dsh bundle](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)

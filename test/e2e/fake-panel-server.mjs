@@ -24,7 +24,13 @@ export function createFakePanel({ loadMs = 100 } = {}) {
       return json(200, { defaults: {}, merged: { docker: {}, server: { ctx_size: 131072 } }, params: {}, overriddenKeys: [] });
     }
     if (req.method === "GET" && url.pathname === "/api/v1/runtime/status") {
-      const body = { running: state.running ? { model: state.running, hostPort: 18080 } : null };
+      // ready 与下面 /health 的判定同源（都看 readyAt），这样 loadMs 这一个参数就同时
+      // 控制两条路径，不会出现「health 说没好、status 说好了」的自相矛盾
+      const body = {
+        running: state.running
+          ? { model: state.running, hostPort: 18080, ready: Date.now() >= state.readyAt }
+          : null,
+      };
       if (url.searchParams.get("busy") === "1") body.busy = state.busy;
       return json(200, body);
     }
@@ -72,6 +78,22 @@ export function createFakePanel({ loadMs = 100 } = {}) {
         return json(200, resBody);
       });
       return;
+    }
+    // 面板中转层给 /v1/models 注入的思考强度声明（llamapad lib/proxy-rewrite.ts 的
+    // enhanceModelsResponse）。无模型在跑时面板回 503，这里照做
+    if (req.method === "GET" && url.pathname === "/api/v1/proxy/llama/v1/models") {
+      if (!state.running) return json(503, { error: "没有运行中的模型", hint: "/models" });
+      return json(200, {
+        object: "list",
+        data: [{
+          id: state.running,
+          object: "model",
+          supported_parameters: ["reasoning_effort"],
+          x_llamapad: {
+            reasoning_effort: { supported: true, levels: ["xhigh", "medium", "low"], aliases: {}, rounding: "down" },
+          },
+        }],
+      });
     }
     if (req.method === "GET" && url.pathname === "/api/v1/proxy/llama/health") {
       return Date.now() >= state.readyAt && state.running ? json(200, { status: "ok" }) : json(503, { status: "loading" });

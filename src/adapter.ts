@@ -1,10 +1,11 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
+import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
 import { decideRoute, type ChatBehavior } from "./routing";
 import { buildChatBody } from "./openai-wire";
 import { translateOpenAiSse } from "./translate";
+import { buildReasoningInfo } from "./reasoning";
 
 export interface LlamapadAdapterOptions {
   client: PanelClient;
@@ -40,9 +41,14 @@ export class LlamapadAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    const [detail, effective] = await Promise.all([
+    // direct 模式绕过面板中转，面板的思考强度改写与兜底都不生效——值域外的取值会被模型
+    // chat template 的 jinja raise_exception 打成 HTTP 500。既然用不了，就连问都不问，
+    // 省掉两次往返（stream 里也会明确拒绝，见该方法开头）。
+    const wantsReasoning = this.options.mode === "proxy";
+    const [detail, effective, status] = await Promise.all([
       this.options.client.getModel(model).catch(() => null),
       this.options.client.getEffectiveConfig(model).catch(() => null),
+      wantsReasoning ? this.options.client.runtimeStatus().catch(() => null) : Promise.resolve(null),
     ]);
     // /effective 是权威来源（合并了全局默认与模型覆盖）：只要它可用就完全以它为准，
     // 包括「读不出来」这个结论本身——不能再回落去读模型级 ctx_size，否则 args_override
@@ -50,18 +56,36 @@ export class LlamapadAdapter extends LlmAdapter {
     // 请求失败）才退回旧的模型级 overrides 路径。
     const source = effective !== null ? effective.merged : detail?.overrides;
     const contextWindow = readCtxSize(source) ?? this.options.defaultContextWindow;
+    const reasoning = wantsReasoning ? await this.resolveReasoning(model, status) : undefined;
     return {
       provider,
       id: model,
       name: detail?.displayName || model,
       ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
-      // reasoning 刻意省略：llama.cpp 无 reasoning-effort 控制（契约：省略 = 无此能力）
+      ...(reasoning !== undefined ? { reasoning } : {}),
     };
   }
 
+  /**
+   * 思考强度档位。面板的档位声明由中转层用**当前运行中容器的模型**组装，因此只有
+   * 「请求的就是运行中那个模型」时问才有意义——问别的模型拿回来的是运行中模型的值域，
+   * 比不问更糟。未运行时直接交给 buildReasoningInfo(null) 走完整枚举兜底。
+   */
+  private async resolveReasoning(
+    model: string,
+    status: PanelRuntimeStatus | null,
+  ): Promise<LlmModelReasoningInfo | undefined> {
+    if (status?.running?.model !== model) return buildReasoningInfo(null);
+    return buildReasoningInfo(await this.options.client.getReasoningInfo().catch(() => null));
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (options.reasoningEffort !== undefined) {
-      throw new LlmError("llamapad/llama.cpp 不支持 reasoning effort 控制", "UNSUPPORTED");
+    if (options.reasoningEffort !== undefined && this.options.mode === "direct") {
+      throw new LlmError(
+        "direct 模式不支持思考强度：该模式直连 llama.cpp，绕过了面板中转层的取值改写与兜底，"
+        + "值域外的取值会被模型 chat template 的 jinja 校验打成 HTTP 500。改用 proxy 模式即可使用。",
+        "UNSUPPORTED",
+      );
     }
     const behavior = this.options.chatBehavior ?? "strict";
     let targetModel: string;
@@ -129,7 +153,8 @@ function mapEnsureError(error: unknown, signalAborted: boolean): Error {
   const code = (error as { code?: string }).code;
   if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
     || code === "PANEL_UNREACHABLE" || code === "START_TIMEOUT" || code === "ABORTED"
-    || code === "MODEL_NOT_RUNNING") {
+    || code === "MODEL_NOT_RUNNING" || code === "MODEL_NOT_READY"
+    || code === "RUNTIME_BUSY" || code === "START_REJECTED") {
     return new LlmError((error as Error).message, code);
   }
   return error instanceof Error ? error : new Error(String(error));
@@ -163,14 +188,18 @@ function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["runni
  * - running：name 前加 ● 前缀（不用空格占位对齐，选择器变宽字体对不齐更乱）
  * - missing-file / missing-mmproj：description 末尾按既有的 " · " 分隔追加提示——
  *   选中这类模型必然在启动时 422，提前标出来省一次踩坑
+ * - configStale：运行中且启动后配置又被保存过——容器参数不热更新，description 末尾提示需重启
  * - ready：不加任何标记
  */
 export function describeModel(m: PanelModelView): { name: string; description: string } {
   const baseName = m.displayName || m.name;
   const name = m.status === "running" ? `● ${baseName}` : baseName;
   const baseDescription = `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`;
+  // 三种提示互斥且有优先级：缺件是"起都起不来"，最要紧；configStale 只在 running 时
+  // 由面板置真，与缺件天然不同时出现，放末位不会被吃掉
   const suffix = m.status === "missing-file" ? " · 文件缺失（面板文件页可自动寻找）"
     : m.status === "missing-mmproj" ? " · mmproj 缺失（面板文件页可自动寻找）"
+    : m.configStale === true ? " · 配置已改，重启后生效"
     : "";
   return { name, description: `${baseDescription}${suffix}` };
 }

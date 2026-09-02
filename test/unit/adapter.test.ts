@@ -62,6 +62,17 @@ describe("describeModel", () => {
     expect(describeModel({ ...base, displayName: "", status: "running" })).toEqual({ name: "● a", description: "main · Q4_K_M" });
   });
 
+  it("running + configStale → ● 前缀之外追加「配置已改，重启后生效」", () => {
+    expect(describeModel({ ...base, status: "running", configStale: true })).toEqual({
+      name: "● 模型A", description: "main · Q4_K_M · 配置已改，重启后生效",
+    });
+  });
+
+  it("configStale 缺席（老面板）或为 false → 不追加", () => {
+    expect(describeModel({ ...base, status: "running" }).description).toBe("main · Q4_K_M");
+    expect(describeModel({ ...base, status: "running", configStale: false }).description).toBe("main · Q4_K_M");
+  });
+
   it("quant 为 null 时 description 不带量化分段", () => {
     expect(describeModel({ ...base, quant: null, status: "ready" })).toEqual({ name: "模型A", description: "main" });
   });
@@ -158,9 +169,38 @@ describe("LlamapadAdapter", () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it("reasoningEffort → UNSUPPORTED（先于任何 IO）", async () => {
-    const { adapter, ensure, fetchImpl } = makeAdapter();
-    await expect(drain(adapter.stream(opts({ reasoningEffort: "high" })))).rejects.toMatchObject({ code: "UNSUPPORTED" });
+  it("proxy 模式：reasoningEffort 原样进请求体，交给面板中转层改写", async () => {
+    // makeAdapter 的 over 在 client 之后展开，可整体替换掉它默认的空 client
+    const { adapter, fetchImpl } = makeAdapter({
+      chatBehavior: "passthrough",
+      client: {
+        baseUrl: "http://panel:8080", listModels: async () => [], getModel: async () => null,
+        getEffectiveConfig: async () => null, getReasoningInfo: async () => null,
+        runtimeStatus: async () => ({ running: { model: "a", ready: true } }),
+        startModel: async () => {}, llamaHealth: async () => true,
+      },
+    });
+    await drain(adapter.stream(opts({ reasoningEffort: "max" })));
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    expect(sent.reasoning_effort).toBe("max");
+  });
+
+  it("direct 模式：reasoningEffort 仍拒绝，且先于任何 IO", async () => {
+    const { adapter, ensure, fetchImpl } = makeAdapter({
+      mode: "direct", llamaBaseUrl: "http://llama:18080", chatBehavior: "passthrough",
+      client: {
+        baseUrl: "http://panel:8080", listModels: async () => [], getModel: async () => null,
+        getEffectiveConfig: async () => null, getReasoningInfo: async () => null,
+        runtimeStatus: async () => ({ running: { model: "a", ready: true } }),
+        startModel: async () => {}, llamaHealth: async () => true,
+      },
+    });
+    await expect(drain(adapter.stream(opts({ reasoningEffort: "max" })))).rejects.toMatchObject({
+      code: "UNSUPPORTED",
+    });
+    // 拒绝必须先于任何 IO：既不该触发启停，也不该发出推理请求。proxy 改为透传后，
+    // 原「reasoningEffort → UNSUPPORTED（先于任何 IO）」那条旧用例的这层语义只剩
+    // direct 模式还需要，不能随那条用例一起丢掉
     expect(ensure).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -368,5 +408,85 @@ describe("LlamapadAdapter", () => {
       expect(url).toBe("http://gpu:18099/v1/chat/completions");
       expect(callCount).toBe(2);
     });
+  });
+
+  it("gate 抛 RUNTIME_BUSY 时映射为同码 LlmError，文案不被替换成「面板不可达」", async () => {
+    const client = {
+      baseUrl: "http://panel:8080", listModels: async () => [], getModel: async () => null,
+      getEffectiveConfig: async () => null,
+      runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true,
+    };
+    const ensure = vi.fn(async () => {
+      throw Object.assign(new Error("运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试"), { code: "RUNTIME_BUSY" });
+    });
+    const adapter = new LlamapadAdapter({
+      client, gate: { ensure, lastStarted: () => null }, token: "t", mode: "proxy",
+      chatBehavior: "auto-switch", fetchImpl: async () => null as any,
+    } as any);
+    await expect(drain(adapter.stream(opts()))).rejects.toMatchObject({
+      code: "RUNTIME_BUSY",
+      message: "运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试",
+    });
+  });
+});
+
+describe("resolveModel：思考强度上报", () => {
+  function clientWith(over: Record<string, unknown> = {}) {
+    return {
+      baseUrl: "http://panel:8080",
+      listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "模型A", namespace: "main" }),
+      getEffectiveConfig: async () => ({ merged: { server: { ctx_size: 4096 } } }),
+      runtimeStatus: async () => ({ running: { model: "a", ready: true } }),
+      getReasoningInfo: async () => ({ supported: true, levels: ["xhigh", "low"] }),
+      startModel: async () => {},
+      llamaHealth: async () => true,
+      ...over,
+    };
+  }
+  const build = (client: unknown, over: Record<string, unknown> = {}) => new LlamapadAdapter({
+    client, gate: { ensure: async () => {}, lastStarted: () => null },
+    token: "t", mode: "proxy", fetchImpl: async () => null as any, ...over,
+  } as any);
+
+  it("proxy + 请求的就是运行中模型 → 上报面板给的真实档位", async () => {
+    const resolved = await build(clientWith()).resolveModel("llamapad", "a");
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(["xhigh", "low"]);
+    expect(resolved.context).toEqual({ contextWindow: 4096 });
+  });
+
+  it("proxy + 模型未运行 → 不去问面板（问了也是别人的档位），退回完整枚举", async () => {
+    const getReasoningInfo = vi.fn(async () => ({ supported: true, levels: ["xhigh"] }));
+    const client = clientWith({ runtimeStatus: async () => ({ running: { model: "b", ready: true } }), getReasoningInfo });
+    const resolved = await build(client).resolveModel("llamapad", "a");
+    expect(getReasoningInfo).not.toHaveBeenCalled();
+    expect(resolved.reasoning?.efforts.map((e) => e.id))
+      .toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("proxy + 面板明说不支持 → 不上报 reasoning", async () => {
+    const client = clientWith({ getReasoningInfo: async () => ({ supported: false, levels: null }) });
+    expect((await build(client).resolveModel("llamapad", "a")).reasoning).toBeUndefined();
+  });
+
+  it("direct 模式 → 一律不上报 reasoning，也不打这两条查询", async () => {
+    const getReasoningInfo = vi.fn(async () => ({ supported: true, levels: ["low"] }));
+    const runtimeStatus = vi.fn(async () => ({ running: { model: "a", ready: true } }));
+    const client = clientWith({ getReasoningInfo, runtimeStatus });
+    const resolved = await build(client, { mode: "direct", llamaBaseUrl: "http://llama:18080" })
+      .resolveModel("llamapad", "a");
+    expect(resolved.reasoning).toBeUndefined();
+    expect(getReasoningInfo).not.toHaveBeenCalled();
+    expect(runtimeStatus).not.toHaveBeenCalled();
+  });
+
+  it("面板查询失败不拖垮 resolveModel：仍返回身份与上下文，档位退回完整枚举", async () => {
+    const client = clientWith({
+      runtimeStatus: async () => { throw new Error("boom"); },
+      getReasoningInfo: async () => { throw new Error("boom"); },
+    });
+    const resolved = await build(client).resolveModel("llamapad", "a");
+    expect(resolved.name).toBe("模型A");
+    expect(resolved.reasoning?.efforts).toHaveLength(6);
   });
 });

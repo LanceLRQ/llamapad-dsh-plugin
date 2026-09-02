@@ -23,13 +23,17 @@ function fakeExec(signal: AbortSignal = new AbortController().signal): any {
 }
 
 function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient {
+  // start / stop 与 runtimeStatus 之间保持状态联动：切换门的就绪轮询判定的是「**目标模型**
+  // 是否已就绪」（switching.ts 的 probeReady），替身若永远报 running:null，轮询会一直等不到
+  // 自己而空转到超时。联动后这份替身才对得上真实面板的语义。
+  let running: string | null = null;
   return {
     baseUrl: "http://panel",
     listModels: async () => [],
     getModel: async () => null,
-    runtimeStatus: async () => ({ running: null }),
-    startModel: async () => {},
-    stopModel: async () => ({ ok: true }),
+    runtimeStatus: async () => ({ running: running === null ? null : { model: running, ready: true } }),
+    startModel: async (name: string) => { running = name; },
+    stopModel: async () => { running = null; return { ok: true }; },
     llamaHealth: async () => true,
     ...overrides,
   } as PanelClient;

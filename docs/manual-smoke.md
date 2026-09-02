@@ -144,10 +144,12 @@ dsh 监听 `http://127.0.0.1:3080`。
 |---|---|
 | `GET /api/v1/models` | 200，字段与 `PanelModelView` 一致（name/displayName/namespace/quant/sizeBytes/hostPort/status） |
 | `GET /api/v1/models/:name` | 200 |
-| `GET /api/v1/runtime/status` | 200，`{running:{model,displayName,hostPort}}` 与 `PanelRuntimeStatus` 一致 |
+| `GET /api/v1/runtime/status` | 200，`{running:{model,displayName,container,startedAt,hostPort,ready,configStale}}` 与 `PanelRuntimeStatus` 一致；`ready` 为 llama-server 是否已监听 |
 | `POST /api/v1/models/:name/start` | 200；不存在的模型 → **404**（与 `codeFor` 的 MODEL_NOT_FOUND 映射一致） |
 | `GET /api/v1/proxy/llama/health` | 见下「就绪探测」 |
 | 无 token 访问 | **401**（与 AUTH 映射一致） |
+| `POST /api/v1/models/:name/start` 并发 | 第二个请求 → **409**（面板启停互斥），映射为 `RUNTIME_BUSY` 而非「面板不可达」 |
+| `GET /api/v1/proxy/llama/v1/models` | 200，`data[].x_llamapad.reasoning_effort.{supported,levels}` 存在（无模型在跑时 503 → 插件归 null） |
 
 **就绪探测语义（关键，此前未验证）**：模型加载中 `/api/v1/proxy/llama/health` 返回 **503** 而非 200，
 `llamaHealth()` 的 `res.ok` 为 false → 正确继续轮询；就绪后转 200，且**此时立即发推理请求即成功**

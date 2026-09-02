@@ -308,6 +308,20 @@ describe("PanelGateway", () => {
       const { gateway } = makeGateway();
       await expect(gateway.stop("")).rejects.toThrow();
     });
+
+    it("stopModel 抛 RUNTIME_BUSY：panelError 直出面板原文，不套「面板请求失败」的壳", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          stopModel: async () => {
+            throw new PanelError("运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试", "RUNTIME_BUSY", 409);
+          },
+        }),
+      });
+
+      const snapshot = await gateway.stop("a");
+
+      expect(snapshot.panelError).toBe("运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试");
+    });
   });
 
   // @Remote 装饰器已从 panel-gateway.ts 删掉（真机验证过：SRC 反射把标记写进

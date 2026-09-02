@@ -11,7 +11,14 @@ import type { PanelClient } from "./panel-client";
 export type EnsureErrorCode =
   | "MODEL_NOT_FOUND" | "MODEL_FILES_MISSING" | "AUTH" | "PANEL_UNREACHABLE" | "START_TIMEOUT" | "ABORTED"
   // 聊天路由（routing.ts）判定为"无可用运行中模型"时抛出，走本文件既有的 EnsureError → LlmError 映射链
-  | "MODEL_NOT_RUNNING";
+  | "MODEL_NOT_RUNNING"
+  // 同上，routing.ts 判定为"容器在跑但 llama-server 还没监听"时抛出
+  | "MODEL_NOT_READY"
+  // 面板启停互斥（409）：上一个启停请求尚未结束。是可重试的瞬态冲突，不是网络故障，
+  // 因此绝不能并进 PANEL_UNREACHABLE——那会把"稍等再试"说成"面板连不上"
+  | "RUNTIME_BUSY"
+  // 面板拒绝启动（422 中非文件缺失的成因，当前为思考强度取值不被模板接受）
+  | "START_REJECTED";
 
 export class EnsureError extends Error {
   constructor(message: string, readonly code: EnsureErrorCode) { super(message); this.name = "EnsureError"; }
@@ -33,6 +40,20 @@ export interface ModelGate {
   lastStarted(): string | null;
 }
 
+/**
+ * 一轮就绪判定：优先读 runtime/status 的 ready（面板 12cfd84 起返回，面板侧带 2s 缓存
+ * 与防惊群，比插件自己打一次 /health 更省），字段缺席（老面板）才回退 llamaHealth()。
+ *
+ * 判定的是「目标模型是否已就绪」而不只是「有没有东西就绪」：运行的不是目标模型时一律
+ * 未就绪——这时候就绪的是别人，继续等自己的。
+ */
+async function probeReady(client: PanelClient, model: string): Promise<boolean> {
+  const running = (await client.runtimeStatus()).running;
+  if (running?.model !== model) return false;
+  if (running.ready === undefined) return client.llamaHealth();
+  return running.ready;
+}
+
 export function createModelGate(client: PanelClient): ModelGate {
   let tail: Promise<void> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
@@ -51,7 +72,8 @@ export function createModelGate(client: PanelClient): ModelGate {
       await client.startModel(model, drainOptions);
     } catch (error) {
       const code = (error as { code?: string }).code;
-      if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH") {
+      if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
+        || code === "RUNTIME_BUSY" || code === "START_REJECTED") {
         throw new EnsureError((error as Error).message, code);
       }
       if (code === "PANEL_UNREACHABLE" || code === "PANEL_HTTP") {
@@ -69,7 +91,7 @@ export function createModelGate(client: PanelClient): ModelGate {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (options.signal?.aborted) throw new EnsureError(`等待 ${model} 就绪时被取消`, "ABORTED");
-      if (await client.llamaHealth()) return;
+      if (await probeReady(client, model)) return;
       if (Date.now() + pollMs > deadline) throw new EnsureError(`等待 ${model} 就绪超时（${timeoutMs}ms）`, "START_TIMEOUT");
       await sleep(pollMs, options.signal);
     }

@@ -30,8 +30,8 @@ describe("createPanelClient", () => {
     expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
   });
 
-  it("startModel 状态码映射：404→MODEL_NOT_FOUND、422→MODEL_FILES_MISSING、401→AUTH", async () => {
-    for (const [status, code] of [[404, "MODEL_NOT_FOUND"], [422, "MODEL_FILES_MISSING"], [401, "AUTH"]] as const) {
+  it("startModel 状态码映射：404→MODEL_NOT_FOUND、401→AUTH", async () => {
+    for (const [status, code] of [[404, "MODEL_NOT_FOUND"], [401, "AUTH"]] as const) {
       const { fn } = fakeFetch([{ status, body: { error: "x" } }]);
       const client = createPanelClient({ ...base, fetch: fn as any });
       await expect(client.startModel("a")).rejects.toMatchObject({ code });
@@ -196,5 +196,62 @@ describe("createPanelClient", () => {
       const client = createPanelClient({ ...base, fetch: fn as any });
       await expect(client.stopModel("a")).rejects.toMatchObject({ code: "PANEL_HTTP" });
     });
+  });
+
+  it("startModel 409 → RUNTIME_BUSY，透传面板 message", async () => {
+    const { fn } = fakeFetch([{
+      status: 409,
+      body: { error: "运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试" },
+    }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await expect(client.startModel("a")).rejects.toMatchObject({
+      code: "RUNTIME_BUSY",
+      status: 409,
+      message: "运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试",
+    });
+  });
+
+  it("stopModel 409 → RUNTIME_BUSY", async () => {
+    const { fn } = fakeFetch([{ status: 409, body: { error: "运行时忙：正在停止模型 qwen3，请等待当前操作完成后再试" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await expect(client.stopModel("a")).rejects.toMatchObject({ code: "RUNTIME_BUSY", status: 409 });
+  });
+
+  it("startModel 422 且 message 含「模型文件缺失」→ MODEL_FILES_MISSING", async () => {
+    const { fn } = fakeFetch([{ status: 422, body: { error: "模型文件缺失: main/qwen3-Q4_K_M.gguf" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await expect(client.startModel("a")).rejects.toMatchObject({
+      code: "MODEL_FILES_MISSING",
+      message: "模型文件缺失: main/qwen3-Q4_K_M.gguf",
+    });
+  });
+
+  it("startModel 422 其余成因（思考强度非法）→ START_REJECTED，原文照传", async () => {
+    const { fn } = fakeFetch([{
+      status: 422,
+      body: { error: '思考强度 "max" 不被该模型的 chat template 接受（允许值：xhigh、medium、low）' },
+    }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await expect(client.startModel("a")).rejects.toMatchObject({
+      code: "START_REJECTED",
+      message: '思考强度 "max" 不被该模型的 chat template 接受（允许值：xhigh、medium、low）',
+    });
+  });
+
+  it("getReasoningInfo 打中转 /v1/models 并解析 x_llamapad", async () => {
+    const { fn, calls } = fakeFetch([{
+      body: { object: "list", data: [{ id: "qwen3", x_llamapad: { reasoning_effort: { supported: true, levels: ["xhigh", "low"] } } }] },
+    }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await expect(client.getReasoningInfo()).resolves.toEqual({ supported: true, levels: ["xhigh", "low"] });
+    expect(calls[0]!.url).toBe("http://panel:8080/api/v1/proxy/llama/v1/models");
+    expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
+  });
+
+  it("getReasoningInfo：503（无模型在跑）与网络失败都归 null，不抛错", async () => {
+    const { fn: fn503 } = fakeFetch([{ status: 503, body: { error: "没有运行中的模型" } }]);
+    await expect(createPanelClient({ ...base, fetch: fn503 as any }).getReasoningInfo()).resolves.toBeNull();
+    const { fn: fnErr } = fakeFetch([{ reject: new Error("ECONNREFUSED") }]);
+    await expect(createPanelClient({ ...base, fetch: fnErr as any }).getReasoningInfo()).resolves.toBeNull();
   });
 });

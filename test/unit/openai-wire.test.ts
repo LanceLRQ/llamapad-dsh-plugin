@@ -71,4 +71,20 @@ describe("buildChatBody", () => {
     expect(body).not.toHaveProperty("tools");
     expect(body).not.toHaveProperty("stop");
   });
+
+  it("reasoningEffort 落成请求体的 reasoning_effort 字段", () => {
+    const body = buildChatBody({
+      provider: "llamapad", model: "a", reasoningEffort: "xhigh",
+      messages: [{ id: "m1", role: "user", content: [{ type: "text", text: "hi" }], source: {} }],
+    } as any);
+    expect(body.reasoning_effort).toBe("xhigh");
+  });
+
+  it("未指定 reasoningEffort 时请求体里没有这个键（不发空值污染上游判定）", () => {
+    const body = buildChatBody({
+      provider: "llamapad", model: "a",
+      messages: [{ id: "m1", role: "user", content: [{ type: "text", text: "hi" }], source: {} }],
+    } as any);
+    expect("reasoning_effort" in body).toBe(false);
+  });
 });

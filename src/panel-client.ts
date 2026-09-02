@@ -2,8 +2,10 @@
  * llamapad 面板控制面 REST 客户端（列模型 / 启停 / 状态 / 生效配置 / 就绪探测）。
  * 推理数据面不走这里（见 adapter.ts 的 proxy/direct 双模式）。
  * 失败一律抛 PanelError，code 为稳定机器码：
- * AUTH | MODEL_NOT_FOUND | MODEL_FILES_MISSING | PANEL_HTTP | PANEL_UNREACHABLE
+ * AUTH | MODEL_NOT_FOUND | MODEL_FILES_MISSING | START_REJECTED | RUNTIME_BUSY | PANEL_HTTP | PANEL_UNREACHABLE
  */
+
+import { parseReasoningInfo, type PanelReasoningInfo } from "./reasoning";
 
 export interface PanelClientOptions {
   baseUrl: string;
@@ -23,6 +25,9 @@ export class PanelError extends Error {
 export interface PanelModelView {
   name: string; displayName: string; namespace: string;
   quant: string | null; sizeBytes: number; hostPort: number; status: string;
+  /** 运行中且启动后配置又被保存过——容器参数不热更新，需重启才生效。
+   *  面板 modelsView.ts 一直在返回，老面板缺席时为 undefined（不可知，不等于 false） */
+  configStale?: boolean;
 }
 
 export interface PanelModelDetail {
@@ -37,8 +42,23 @@ export interface PanelEffectiveConfig {
 }
 
 export interface PanelRuntimeStatus {
-  /** startedAt 是运行中容器的启动时刻（ISO 8601），面板一直有返回，这里只是补齐类型 */
-  running: { model: string; displayName?: string; hostPort?: number | null; startedAt?: string | null } | null;
+  running: {
+    model: string;
+    displayName?: string;
+    /** 容器名 */
+    container?: string;
+    hostPort?: number | null;
+    /** startedAt 是运行中容器的启动时刻（ISO 8601），面板一直有返回 */
+    startedAt?: string | null;
+    /**
+     * llama-server 是否已开始监听。**容器在跑 ≠ 模型可用**：面板 readiness.ts 实测
+     * 27B 冷启动有 35 秒「容器已起、端口未监听」的窗口。面板 12cfd84 起返回；
+     * 老面板缺席时为 undefined，一律按「不可知」处理，绝不当作 false（见 routing.ts）
+     */
+    ready?: boolean;
+    /** 启动后模型行又被保存过 */
+    configStale?: boolean;
+  } | null;
   /** 仅 runtimeStatus({ busy: true }) 时返回；null 代表"不可知"，不代表"不忙" */
   busy?: { inferring: boolean; slotsRunning: number } | null;
 }
@@ -74,6 +94,8 @@ export interface PanelClient {
   runtimeStatus(options?: { busy?: boolean }): Promise<PanelRuntimeStatus>;
   startModel(name: string, options?: StartModelOptions): Promise<void>;
   stopModel(name: string, options?: StopModelOptions): Promise<StopModelResult>;
+  /** 读当前运行模型的思考强度声明；端点不可用 / 无模型在跑 / 老面板一律 null（不可知） */
+  getReasoningInfo(): Promise<PanelReasoningInfo | null>;
   llamaHealth(): Promise<boolean>;
 }
 
@@ -141,6 +163,29 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
     return res.status === 401 ? "AUTH" : "PANEL_HTTP";
   }
 
+  /**
+   * start / stop 共用的失败映射。两条路径的状态码语义完全同构（面板 start/stop 两个
+   * route 是逐行同款处理），只有 500 兜底的动词不同，故传 action 拼文案。
+   *
+   * 422 有两种成因（面板 api.md:60）：模型文件缺失、思考强度取值不被该模型 chat
+   * template 接受。按 message 前缀区分——这与面板 start route 自己的判定同源口径
+   * （它也是 message.includes("模型文件缺失")），不猜第二种的具体文案，只认第一种的
+   * 既有契约，其余一律 START_REJECTED 并原文透传面板 message（面板的错误 message 是
+   * 中文且自解释，比插件另造一句更有用）。
+   */
+  async function startStopError(res: Response, name: string, action: "启动" | "停止"): Promise<PanelError> {
+    const message = await readError(res);
+    if (res.status === 404) return new PanelError(`模型不存在: ${name}`, "MODEL_NOT_FOUND", 404);
+    if (res.status === 409) return new PanelError(message, "RUNTIME_BUSY", 409);
+    if (res.status === 422) {
+      return message.includes("模型文件缺失")
+        ? new PanelError(message, "MODEL_FILES_MISSING", 422)
+        : new PanelError(message, "START_REJECTED", 422);
+    }
+    if (res.status === 401) return new PanelError("llamapad token 无效或未授权", "AUTH", 401);
+    return new PanelError(`${action}失败: ${message}`, "PANEL_HTTP", res.status);
+  }
+
   return {
     baseUrl: base,
     async listModels() {
@@ -174,10 +219,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         timeoutOverride,
       );
       if (res.ok) return;
-      if (res.status === 404) throw new PanelError(`模型不存在: ${name}`, "MODEL_NOT_FOUND", 404);
-      if (res.status === 422) throw new PanelError(await readError(res), "MODEL_FILES_MISSING", 422);
-      if (res.status === 401) throw new PanelError("llamapad token 无效或未授权", "AUTH", 401);
-      throw new PanelError(`启动失败: ${await readError(res)}`, "PANEL_HTTP", res.status);
+      throw await startStopError(res, name, "启动");
     },
     async stopModel(name, stopOptions) {
       const { body, timeoutOverride } = buildDrainRequest(stopOptions, timeoutMs);
@@ -187,9 +229,23 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         timeoutOverride,
       );
       if (res.ok) return (await res.json()) as StopModelResult;
-      if (res.status === 404) throw new PanelError(`模型不存在: ${name}`, "MODEL_NOT_FOUND", 404);
-      if (res.status === 401) throw new PanelError("llamapad token 无效或未授权", "AUTH", 401);
-      throw new PanelError(`停止失败: ${await readError(res)}`, "PANEL_HTTP", res.status);
+      throw await startStopError(res, name, "停止");
+    },
+    async getReasoningInfo() {
+      // 走中转层：面板在这条路径上给 /v1/models 的响应注入了 x_llamapad 声明。
+      // 无模型在跑时面板回 503、老面板没有注入逻辑——两种情况都归 null（不可知），
+      // 不抛错：这是一次锦上添花的能力探测，失败不该让 resolveModel 整个失败。
+      let res: Response;
+      try {
+        res = await doFetch(`${base}/api/v1/proxy/llama/v1/models`, {
+          headers: { authorization: `Bearer ${options.token}` },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch {
+        return null;
+      }
+      if (!res.ok) return null;
+      return parseReasoningInfo(await res.json().catch(() => null));
     },
     async llamaHealth() {
       try {
@@ -204,3 +260,5 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
     },
   };
 }
+
+export type { PanelReasoningInfo } from "./reasoning";

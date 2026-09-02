@@ -2,7 +2,8 @@ import type { ContentBlock, GenerateOptions } from "@deepseek-ai/dsh-llm";
 
 /**
  * dsh GenerateOptions → llama.cpp（OpenAI 兼容）chat/completions 请求体。
- * 决策记录：assistant 历史里的 reasoning 块不回传（llama.cpp 推理内容不进后续请求）。
+ * 决策记录：assistant 历史里的 reasoning 块不回传（llama.cpp 推理内容不进后续请求）；
+ * reasoning_effort 原样透传，取值改写由面板中转层负责。
  */
 
 interface OpenAiMessage {
@@ -31,6 +32,10 @@ export function buildChatBody(options: GenerateOptions): Record<string, unknown>
   if (options.temperature !== undefined) body.temperature = options.temperature;
   if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
   if (options.stop && options.stop.length > 0) body.stop = options.stop;
+  // 思考强度：原样透传给面板中转层。面板会按该模型 chat template 的真实值域改写
+  // （别名 → 值域内透传 → 就近取整 → 丢弃字段），插件不做二次判断——复刻那套算法
+  // 只会与面板漂移。direct 模式没有这层保护，故在 adapter.stream 入口就拒绝了。
+  if (options.reasoningEffort !== undefined) body.reasoning_effort = options.reasoningEffort;
   return body;
 }
 
