@@ -159,8 +159,8 @@ export function apply(ctx: Context, config: Config) {
   syncConnection();
 
   if (config.hideStoppedModels === true && config.chatBehavior === "auto-switch") {
-    console.warn(
-      "[llamapad-dsh-plugin] chatBehavior=auto-switch 时忽略 hideStoppedModels："
+    ctx.logger(name).warn(
+      "chatBehavior=auto-switch 时忽略 hideStoppedModels："
       + "该档需要选中未启动的模型来触发自动启动，隐藏它们会让这一档无法使用。",
     );
   }
