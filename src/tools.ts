@@ -22,6 +22,7 @@ export interface Config {
   requestTimeoutMs: number;
   startTimeoutMs: number;
   pollIntervalMs: number;
+  toolApproval: string;
 }
 
 export const Config: Schema<Partial<Config>, Config> = Schema.object({
@@ -35,6 +36,10 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
     "llamapad_start_model 等待模型就绪的超时（毫秒）默认值；工具调用参数 timeoutMs 可逐次覆盖",
   ),
   pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒）"),
+  toolApproval: Schema.string().default("allow").description(
+    "启停工具审批档位：allow（默认）=Agent 调用 llamapad_start_model / llamapad_stop_model 直接执行；"
+    + "ask=执行前需用户确认（宿主无审批通道时会拒绝执行）。共享 GPU 场景建议 ask——启停影响别的会话",
+  ),
 });
 
 export const name = "llamapad-dsh-plugin/tools";
@@ -44,8 +49,16 @@ export const inject = ["tools"];
 export const LIST_MODELS_LIMIT = 100;
 
 export function apply(ctx: Context, config: Config) {
+  // 静态校验（对齐 index.ts 的 assertStaticConfig 模式）：写错的档位名是编程/配置错误，
+  // 不是「还没填」——静默回落 allow 会把用户要的确认门悄悄变成直通，越早抛越好。
+  if (config.toolApproval !== "allow" && config.toolApproval !== "ask") {
+    throw new Error(`toolApproval 必须是 allow 或 ask，当前: ${config.toolApproval}`);
+  }
+
   if (!config.panelUrl || !config.token) {
-    console.warn(
+    // 命名 logger 而非裸 console.warn：日志进入宿主的日志体系（可过滤/可定级），
+    // 比绕过框架直接写 stdout 的 console 更可观测
+    ctx.logger("llamapad-dsh-plugin/tools").warn(
       "[llamapad-dsh-plugin/tools] 尚未配置 panelUrl / token，已跳过工具注册。" +
       "请在 profile 的 cordis.patch.yml 里补 llamapad-dsh-plugin/tools 的配置（模板见包内 " +
       "examples/profile-patch.example.yml），改完重启 dsh。",
@@ -65,6 +78,24 @@ export function apply(ctx: Context, config: Config) {
   ctx.tools.register(buildListModelsTool(client));
   ctx.tools.register(buildStartModelTool(client, gate, config));
   ctx.tools.register(buildStopModelTool(client));
+
+  // 审批门（toolApproval: ask）：共享 GPU 场景下启停模型会影响其他会话，Agent 的
+  // 自主调用值得过一道用户确认。只升 allow 不动 deny——先 await next() 再升级是洋葱
+  // 外层的包装语义：下游（含更内层监听器）已经 deny 的调用保持拒绝（原因原样透传，
+  // 不覆盖成我们自己的文案），只有下游放行的启停调用才升级为 ask，交由框架的
+  // approval 服务转成用户确认（宿主无 approval 通道时框架会把 ask 折算为 deny）。
+  // allow 档不注册监听：waterfall 上少一跳，零开销也零干扰。监听器不依赖 this
+  // （事件类型标 this: Scoped<ToolRuntime>，普通箭头函数即可）。
+  if (config.toolApproval === "ask") {
+    ctx.on("tools/pre-execute", async (exec, next) => {
+      const decision = await next();
+      if (decision.kind === "allow"
+          && (exec.name === "llamapad_start_model" || exec.name === "llamapad_stop_model")) {
+        return { kind: "ask", reason: "llamapad 模型启停需要用户确认（toolApproval: ask）" };
+      }
+      return decision;
+    });
+  }
 }
 
 // ---- llamapad_status ----

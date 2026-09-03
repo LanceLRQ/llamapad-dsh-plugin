@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  apply,
   buildListModelsTool,
   buildStartModelTool,
   buildStatusTool,
   buildStopModelTool,
+  Config,
   LIST_MODELS_LIMIT,
 } from "../../src/tools";
 import { PanelError, type PanelClient, type PanelModelView } from "../../src/panel-client";
@@ -348,5 +350,115 @@ describe("并发安全声明（isConcurrencySafe）", () => {
     expect(buildListModelsTool(client).isConcurrencySafe?.({})).toBe(true);
     expect(start.isConcurrencySafe?.({ model: "a" })).toBe(true);
     expect(buildStopModelTool(client).isConcurrencySafe?.({})).toBe(true);
+  });
+});
+
+// ---- B 形态 apply：toolApproval 审批门与 logger 规范化 ----
+
+/**
+ * B 形态 apply 的最小 ctx 替身：只覆盖 apply 实际触碰的三件事——
+ * tools.register（工具注册）、on（审批门监听注册）、logger（命名 logger 工厂，
+ * cordis 语义是 ctx.logger(name) 返回带 warn 等方法的对象）。on 用 vi.fn 记录
+ * 调用，审批门用例从 mock.calls 里捕获 waterfall 监听器直接驱动。
+ */
+function fakeToolsCtx() {
+  const loggerWarn = vi.fn();
+  const ctx: any = {
+    tools: { register: vi.fn() },
+    on: vi.fn(),
+    logger: vi.fn(() => ({ warn: loggerWarn })),
+  };
+  return Object.assign(ctx, { __loggerWarn: loggerWarn });
+}
+
+const toolsValid = {
+  panelUrl: "http://panel:8080",
+  token: "lp_t",
+};
+
+describe("B 形态 apply：toolApproval 配置", () => {
+  it("Config 默认 toolApproval=allow", () => {
+    expect((Config(toolsValid) as any).toolApproval).toBe("allow");
+  });
+
+  it("toolApproval 非法值 → apply 抛错（编程/配置错误尽早暴露）", () => {
+    expect(() =>
+      apply(fakeToolsCtx(), Config({ ...toolsValid, toolApproval: "bogus" }) as any),
+    ).toThrow(/toolApproval/);
+  });
+
+  it("allow 档（默认）：不注册 tools/pre-execute 监听（零开销零干扰），工具照常注册", () => {
+    const ctx = fakeToolsCtx();
+    apply(ctx, Config(toolsValid) as any);
+    expect(ctx.on).not.toHaveBeenCalled();
+    expect(ctx.tools.register).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("B 形态 apply：ask 档审批门（tools/pre-execute waterfall）", () => {
+  /** 跑一遍 ask 档 apply，捕获注册到的 waterfall 监听器。 */
+  function captureListener() {
+    const ctx = fakeToolsCtx();
+    apply(ctx, Config({ ...toolsValid, toolApproval: "ask" }) as any);
+    const call = ctx.on.mock.calls.find((c: any[]) => c[0] === "tools/pre-execute");
+    expect(call).toBeTruthy();
+    return { ctx, listener: call![1] as any };
+  }
+
+  it("注册恰好一个 tools/pre-execute 监听器；工具照常注册", () => {
+    const { ctx, listener } = captureListener();
+    expect(ctx.on).toHaveBeenCalledTimes(1);
+    expect(typeof listener).toBe("function");
+    expect(ctx.tools.register).toHaveBeenCalledTimes(4);
+  });
+
+  it("start 工具 + 下游 allow → 升级为 ask（带原因文案）", async () => {
+    const { listener } = captureListener();
+    const decision = await listener(
+      { name: "llamapad_start_model" },
+      () => Promise.resolve({ kind: "allow" }),
+    );
+    expect(decision).toEqual({
+      kind: "ask",
+      reason: "llamapad 模型启停需要用户确认（toolApproval: ask）",
+    });
+  });
+
+  it("stop 工具 + 下游 allow → 同样升级为 ask", async () => {
+    const { listener } = captureListener();
+    const decision = await listener(
+      { name: "llamapad_stop_model" },
+      () => Promise.resolve({ kind: "allow" }),
+    );
+    expect(decision).toMatchObject({ kind: "ask" });
+  });
+
+  it("非启停工具（llamapad_status）+ 下游 allow → 原样放行，不升级", async () => {
+    const { listener } = captureListener();
+    const decision = await listener(
+      { name: "llamapad_status" },
+      () => Promise.resolve({ kind: "allow" }),
+    );
+    expect(decision).toEqual({ kind: "allow" });
+  });
+
+  it("下游 deny → 原样透传，不被升级覆盖（洋葱外层只升 allow 不动 deny）", async () => {
+    const { listener } = captureListener();
+    const decision = await listener(
+      { name: "llamapad_start_model" },
+      () => Promise.resolve({ kind: "deny", reason: "下游拒绝" }),
+    );
+    expect(decision).toEqual({ kind: "deny", reason: "下游拒绝" });
+  });
+});
+
+describe("B 形态 apply：未配置分支走命名 logger", () => {
+  it("缺 panelUrl/token → ctx.logger(name).warn 提示，不注册工具", () => {
+    const ctx = fakeToolsCtx();
+    apply(ctx, Config({}) as any);
+    expect(ctx.logger).toHaveBeenCalledWith("llamapad-dsh-plugin/tools");
+    expect(ctx.__loggerWarn).toHaveBeenCalledTimes(1);
+    expect(String(ctx.__loggerWarn.mock.calls[0]![0])).toContain("尚未配置 panelUrl / token");
+    expect(ctx.tools.register).not.toHaveBeenCalled();
   });
 });
