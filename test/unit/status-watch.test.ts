@@ -102,6 +102,9 @@ function fakePanel() {
     getReasoningInfo: async () => null,
     llamaHealth: async () => true,
     getEvents,
+    // 监控读路径与 status-watch 无关，给个永不成功的占位即可满足 PanelClient 接口
+    getMetricsWindow: async () => { throw unreachable(); },
+    getGpuStats: async () => { throw unreachable(); },
     streamEvents,
   };
   return {

@@ -76,6 +76,10 @@ export function createUnconfiguredClient(): PanelClient {
     getReasoningInfo: async () => null,
     llamaHealth: async () => false,
     getEvents: async () => unconfigured(),
+    // 监控两条读路径与 listModels 同类：是硬读取而非「不可知也算合法答案」的探测，
+    // 未配置时抛指路错误，让监控页画出「未配置」而不是一片假空数据
+    getMetricsWindow: async () => unconfigured(),
+    getGpuStats: async () => unconfigured(),
     // streamEvents 是尽力而为的长连接（断流都不抛），未配置态给「立即静默的空流」
     // 比抛错更贴契约：调用方（status-watch）本来就按「没有事件」处理静默
     streamEvents: () => () => {},

@@ -12,7 +12,13 @@
  */
 // 只引类型不引运行时：本文件同时进浏览器产物（client bundle），panel-client.ts 是
 // Node 侧的 HTTP 客户端，类型引用在编译期擦除、不会把它打进浏览器
-import type { PanelEvent } from "./panel-client";
+import type {
+  MetricsRange,
+  MetricPoint,
+  MonitorMetricId,
+  PanelEvent,
+  PanelGpuStats,
+} from "./panel-client";
 
 /** npm 包名，作为 TypertRemoteContribution.package 与描述符 id 前缀。 */
 export const RPC_PACKAGE = "llamapad-dsh-plugin";
@@ -40,6 +46,7 @@ export const RPC_METHOD = {
   start: "start",
   stop: "stop",
   saveConnection: "saveConnection",
+  monitor: "monitor",
 } as const;
 
 /** start / stop 的形参名——必须与 panel-gateway.ts 里方法签名的形参逐字一致。 */
@@ -48,6 +55,11 @@ export const RPC_WIRE_MODEL = "model";
 /** saveConnection 的形参名——必须与 panel-gateway.ts 方法签名的形参逐字一致。 */
 export const RPC_WIRE_PANEL_URL = "panelUrl";
 export const RPC_WIRE_TOKEN = "token";
+
+/** monitor 的形参名——保持与 panel-gateway.ts 方法签名形参逐字一致的习惯
+ *  （wire 名实际由描述符的 parameters[].wire 写死，见 panel-gateway.ts 方法注释）。 */
+export const RPC_WIRE_RANGE = "range";
+export const RPC_WIRE_SINCE = "since";
 
 /** 卡片列表里的一行模型。字段是 PanelModelView 的子集，只留卡片真会渲染的。 */
 export interface CardModel {
@@ -130,6 +142,31 @@ export interface CardSnapshot {
    * 卡片在底部渲染「最近事件」列表，并对轮询间新到的 model./download. 事件弹 Toast。
    */
   events: CardEvent[];
+}
+
+/**
+ * 监控页一次轮询拿到的全部内容：六个指标的时序 + GPU 当前快照。
+ *
+ * series 的键集就是面板侧投影的六个监控键（MonitorMetricId），Partial 语义与
+ * panel-client 侧一致：**缺席容忍**（面板下线某指标只是不再出键），**坏点不容忍**
+ * （见下方 MONITOR_CODEC——在场就必须是好形状）。
+ *
+ * mode 透传面板的增量协议判别：full = 整窗替换，delta = 只含 ts > since 的新点。
+ * 增量拼接的水位（since）由浏览器从自己上次收到的最大 ts 取——浏览器与 host
+ * 之间没有可信的双方共同时钟，任何「以 host 时钟为基准的水位」都会在两机时钟
+ * 偏移时丢点或重放；而面板返回的点 ts 全是面板时钟，浏览器拿同一来源的 ts 做
+ * 水位才是自洽的。serverTs 只是 host 组装这份快照的时刻，**仅供展示**（如
+ * 「N 秒前更新」），绝不参与增量拼接。
+ */
+export interface MonitorSnapshot {
+  series: Partial<Record<MonitorMetricId, MetricPoint[]>>;
+  /** gpu/stats 的投影；该半边拉取失败时为 null（series 半边照常下发） */
+  gpu: PanelGpuStats | null;
+  mode: "full" | "delta";
+  /** host 组装时刻（毫秒时间戳），仅展示用——见类型注释里关于时钟的说明 */
+  serverTs: number;
+  /** 两条拉取任一失败的中文说明；成功为 null。语义同 CardSnapshot.panelError */
+  panelError: string | null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -230,6 +267,128 @@ const SNAPSHOT_CODEC = strict<CardSnapshot>(`${RPC_PACKAGE}#CardSnapshot`, parse
 const MODEL_NAME_CODEC = strict<string>(`${RPC_PACKAGE}#ModelName`, (value) =>
   asString(value, RPC_WIRE_MODEL));
 
+function asNullableNumber(value: unknown, field: string): number | null {
+  if (value === null) return null;
+  return asNumber(value, field);
+}
+
+/**
+ * MONITOR_CODEC 的 series 键清单。与 panel-client.ts 的 MONITOR_METRIC_IDS 是
+ * 同六个字符串的两份运行时清单——不是疏忽：本文件进浏览器产物，**不能**从
+ * panel-client 运行时 import（会把 Node 侧 HTTP 客户端打进 bundle），只能像
+ * parseCardSnapshot 逐字段重写字符串那样重述一遍；类型上锚定共享的
+ * MonitorMetricId，多写/少写一个键都过不了编译。
+ */
+const MONITOR_SERIES_KEYS: readonly MonitorMetricId[] = [
+  "infer.tokens_per_sec",
+  "infer.kv_cache_tokens",
+  "gpu.mem_used_mib",
+  "gpu.util_percent",
+  "container.cpu_percent",
+  "container.mem_percent",
+];
+
+function parseMetricPoint(value: unknown, field: string): MetricPoint {
+  const row = asRecord(value, field);
+  return {
+    ts: asNumber(row["ts"], `${field}.ts`),
+    value: asNumber(row["value"], `${field}.value`),
+  };
+}
+
+/**
+ * monitor.series 的逐键校验：缺席键容忍（面板下线指标只是不出键），在场键必须
+ * 是数组且逐点形状合法——「容忍缺席、不容忍坏点」，坏点在浏览器侧抛 TypeError
+ * 比静默丢点安全：曲线缺一段还能看出来，错一段是看不出来的。
+ */
+function parseMonitorSeries(value: unknown): MonitorSnapshot["series"] {
+  const row = asRecord(value, "monitor.series");
+  const series: Partial<Record<MonitorMetricId, MetricPoint[]>> = {};
+  for (const id of MONITOR_SERIES_KEYS) {
+    const points = row[id];
+    if (points === undefined) continue; // 缺席容忍
+    if (!Array.isArray(points)) fail(`monitor.series.${id}`, "array");
+    series[id] = points.map((point, index) => parseMetricPoint(point, `monitor.series.${id}[${index}]`));
+  }
+  return series;
+}
+
+function parseGpuDevice(value: unknown, field: string): PanelGpuStats["devices"][number] {
+  const row = asRecord(value, field);
+  return {
+    index: asNumber(row["index"], `${field}.index`),
+    memUsedMib: asNumber(row["memUsedMib"], `${field}.memUsedMib`),
+    memTotalMib: asNumber(row["memTotalMib"], `${field}.memTotalMib`),
+    utilPercent: asNumber(row["utilPercent"], `${field}.utilPercent`),
+    tempC: asNullableNumber(row["tempC"], `${field}.tempC`),
+    powerW: asNullableNumber(row["powerW"], `${field}.powerW`),
+  };
+}
+
+function parseGpuStats(value: unknown): PanelGpuStats {
+  const row = asRecord(value, "monitor.gpu");
+  const status = row["status"];
+  if (status !== "probing" && status !== "unavailable" && status !== "available") {
+    fail("monitor.gpu.status", '"probing" | "unavailable" | "available"');
+  }
+  const available = row["available"];
+  if (typeof available !== "boolean") fail("monitor.gpu.available", "boolean");
+  const devices = row["devices"];
+  if (!Array.isArray(devices)) fail("monitor.gpu.devices", "array");
+  const totalsRow = row["totals"];
+  return {
+    available,
+    status,
+    devices: devices.map((device, index) => parseGpuDevice(device, `monitor.gpu.devices[${index}]`)),
+    totals: totalsRow === null ? null : {
+      memUsedMib: asNumber(asRecord(totalsRow, "monitor.gpu.totals")["memUsedMib"], "monitor.gpu.totals.memUsedMib"),
+      memTotalMib: asNumber(asRecord(totalsRow, "monitor.gpu.totals")["memTotalMib"], "monitor.gpu.totals.memTotalMib"),
+    },
+  };
+}
+
+function parseMonitorSnapshot(value: unknown): MonitorSnapshot {
+  const row = asRecord(value, "monitor");
+  const mode = row["mode"];
+  if (mode !== "full" && mode !== "delta") fail("monitor.mode", '"full" | "delta"');
+  const gpuRow = row["gpu"];
+  return {
+    series: parseMonitorSeries(row["series"]),
+    gpu: gpuRow === null ? null : parseGpuStats(gpuRow),
+    mode,
+    serverTs: asNumber(row["serverTs"], "monitor.serverTs"),
+    panelError: asNullableString(row["panelError"], "monitor.panelError"),
+  };
+}
+
+/** monitor 的四档 range 枚举校验（照抄面板 RANGE_KEYS，非法值在这里拦成 input-invalid） */
+const RANGE_CODEC = strict<MetricsRange>(`${RPC_PACKAGE}#MetricsRange`, (value) => {
+  if (value !== "30m" && value !== "2h" && value !== "24h" && value !== "7d") {
+    fail(RPC_WIRE_RANGE, '"30m" | "2h" | "24h" | "7d"');
+  }
+  return value;
+});
+
+/**
+ * since 的可选参数 codec：undefined 原样放行。浏览器侧生成方法对 undefined 实参
+ * 会**省略 wire 键**（client 的 invoke 是 parse 后 value !== void 0 才带上），所以
+ * parse(undefined) 必须安静地返回 undefined，不能按「期望 number」拒掉。
+ *
+ * NaN 拒掉：typeof NaN === "number" 能躲过 asNumber，但它是完全无意义的水位
+ * （String(NaN) 拼进 query 面板解析不了只会静默退化全量，把上游 bug 藏起来）。
+ * 浏览器侧的 since 取自「上次收到的最大 ts」，恒为有限数——NaN 只可能来自
+ * 调用方的程序错误，在 wire 层拦成 input-invalid 比放过去更响。
+ */
+const SINCE_CODEC = strict<number | undefined>(`${RPC_PACKAGE}#Since`, (value) => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    fail(RPC_WIRE_SINCE, "finite number");
+  }
+  return value;
+});
+
+const MONITOR_CODEC = strict<MonitorSnapshot>(`${RPC_PACKAGE}#MonitorSnapshot`, parseMonitorSnapshot);
+
 /**
  * 一条 InvocationDescriptor 的最小形状（dsh 的类型更宽，这里只用到这些字段）。
  *
@@ -248,6 +407,14 @@ interface Descriptor {
     readonly name: string;
     readonly wire: string;
     readonly source: "json";
+    /**
+     * 可选 json 参数的标记：浏览器侧对 undefined 实参会**省略 wire 键**，而网关的
+     * assertExactArguments 只对带这个标记的参数放行缺席（否则按 missing 拒掉）。
+     * 可选参数必须同时满足「codec 容忍 undefined」与「声明 acceptsUndefined」。
+     * 类型收窄为字面量 true（对齐注册表的 InvocationParameterDescriptor）：
+     * 「可缺席」是一个开关，没有声明为 false 的意义。
+     */
+    readonly acceptsUndefined?: true;
     readonly codec: StrictCodec<unknown>;
   }[];
   readonly cancellation?: { readonly parameter: "signal" };
@@ -258,6 +425,7 @@ function descriptor(
   method: string,
   parameters: Descriptor["parameters"],
   cancellation?: Descriptor["cancellation"],
+  result: Descriptor["result"] = SNAPSHOT_CODEC,
 ): Descriptor {
   return {
     id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/${method}`,
@@ -268,7 +436,7 @@ function descriptor(
     parameters,
     // 不声明取消通道的方法不带这个字段（而不是传 undefined 撑开对象）
     ...(cancellation !== undefined ? { cancellation } : {}),
-    result: SNAPSHOT_CODEC,
+    result,
   };
 }
 
@@ -293,16 +461,37 @@ const TOKEN_PARAM = {
   codec: strict<string>(`${RPC_PACKAGE}#Token`, (value) => asString(value, RPC_WIRE_TOKEN)),
 } as const;
 
-/** start/stop 共用的取消通道声明（见 Descriptor.cancellation 注释）。 */
+/** start/stop 共用的取消通道声明（见 Descriptor.cancellation）。 */
 const SIGNAL_CANCELLATION = { parameter: "signal" } as const;
+
+const RANGE_PARAM = {
+  name: RPC_WIRE_RANGE,
+  wire: RPC_WIRE_RANGE,
+  source: "json",
+  codec: RANGE_CODEC,
+} as const;
+
+const SINCE_PARAM = {
+  name: RPC_WIRE_SINCE,
+  wire: RPC_WIRE_SINCE,
+  source: "json",
+  // 可选即省略：浏览器侧 since 为 undefined 时不发这个 wire 键，网关靠本标记放行
+  // 缺席（host 方法相应收到 undefined 形参）。见 Descriptor.parameters[].acceptsUndefined
+  acceptsUndefined: true,
+  codec: SINCE_CODEC,
+} as const;
 
 /**
  * 浏览器侧 `ctx.remote.$mount()` 的入参。
  *
- * 四个方法都以 CardSnapshot 作为返回值——动作做完顺带回传最新状态，
- * 省掉「点完按钮再多打一次 snapshot」的往返，也避免中间态闪烁。
+ * snapshot/start/stop/saveConnection 四个方法以 CardSnapshot 作为返回值——动作做完
+ * 顺带回传最新状态，省掉「点完按钮再多打一次 snapshot」的往返，也避免中间态闪烁。
  * start/stop 额外声明 cancellation：生成方法暴露为 `start(model, signal?)`，
  * 供卡片把「取消等待」手势传到 host（见 Descriptor.cancellation 注释）。
+ *
+ * monitor 是监控页的轮询方法，返回 MonitorSnapshot、同样声明 cancellation：
+ * 生成方法暴露为 `monitor(range, since?, signal?)`——切页/切 range 时浏览器取消
+ * 在途（24h/7d 窗口的响应大，不取消会白白占着连接），since 可选（首次全量不带）。
  */
 export const RPC_CONTRIBUTION = {
   package: RPC_PACKAGE,
@@ -311,5 +500,6 @@ export const RPC_CONTRIBUTION = {
     descriptor(RPC_METHOD.start, [MODEL_PARAM], SIGNAL_CANCELLATION),
     descriptor(RPC_METHOD.stop, [MODEL_PARAM], SIGNAL_CANCELLATION),
     descriptor(RPC_METHOD.saveConnection, [PANEL_URL_PARAM, TOKEN_PARAM]),
+    descriptor(RPC_METHOD.monitor, [RANGE_PARAM, SINCE_PARAM], SIGNAL_CANCELLATION, MONITOR_CODEC),
   ],
 } as const;

@@ -1,19 +1,20 @@
 /**
- * 设置卡片的 host 半身：把 PanelClient / ModelGate 包成四个 RPC 方法
- * （snapshot / start / stop / saveConnection），交给 dsh 的 Typert Gateway 按 SRC 反射对外暴露。
+ * 设置卡片的 host 半身：把 PanelClient / ModelGate 包成五个 RPC 方法
+ * （snapshot / start / stop / saveConnection / monitor），交给 dsh 的 Typert Gateway
+ * 按 SRC 反射对外暴露。
  * 契约（命名空间/方法名/形参名）唯一出处在 rpc-contract.ts，本文件只管实现——
  * 改契约字段名要同步改这里的方法/形参名，两边脱节是运行期 400，编译期查不出来。
  *
- * 错误语义：四个方法都不因为"面板不可达/鉴权失败/写入失败"这类运行期故障抛错——RPC 抛错在
+ * 错误语义：五个方法都不因为"面板不可达/鉴权失败/写入失败"这类运行期故障抛错——RPC 抛错在
  * 浏览器侧只剩 { ok:false, error } 一个壳，信息更少也更难渲染，卡片没法照着画状态。
- * 约定改为把中文说明塞进 CardSnapshot.panelError，其余字段尽最大努力填（拿不到就
- * models:[] / running:null / inferring:null），让卡片总能画出"面板连不上"并继续显示
- * 按钮。只有 model 为空串 / 面板地址为空白这类"根本无法执行"的输入才允许抛。
+ * 约定改为把中文说明塞进 CardSnapshot.panelError（monitor 塞进 MonitorSnapshot.panelError），
+ * 其余字段尽最大努力填（拿不到就 models:[] / running:null / inferring:null），让卡片总能画出"面板连不上"并继续显示
+ * 按钮。只有 model 为空串 / 面板地址为空白 / range 非法这类"根本无法执行"的输入才允许抛。
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardSnapshot, type RuntimePhase } from "./rpc-contract";
-import { PanelError, type PanelClient, type PanelModelView, type PanelEvent } from "./panel-client";
+import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardSnapshot, type MonitorSnapshot, type RuntimePhase } from "./rpc-contract";
+import { PanelError, type MetricsRange, type PanelClient, type PanelModelView, type PanelEvent } from "./panel-client";
 import type { ModelGate } from "./switching";
 
 /**
@@ -125,6 +126,40 @@ export class PanelGateway extends TypertRemoteService {
       return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
     }
     return this.buildSnapshot();
+  }
+
+  /** 方法名须与描述符的 method 一致，理由同 start()；末位 signal 语义亦同。 */
+  async monitor(range: string, since: number | undefined, signal?: AbortSignal): Promise<MonitorSnapshot> {
+    // range 非法属于「根本无法执行」的输入，对齐 model 为空串直接抛的先例——描述符
+    // 的 RANGE_CODEC 在 wire 层已拦一道，这里是直调路径（单测/未来复用）的兜底
+    if (range !== "30m" && range !== "2h" && range !== "24h" && range !== "7d") {
+      throw new TypeError(`llamapad 监控: range 必须是 30m/2h/24h/7d 之一，当前: ${JSON.stringify(range)}`);
+    }
+    // metrics 窗口与 gpu/stats 并发拉取，allSettled 而不是 all：监控页要能画
+    // 「指标连不上」并继续显示 GPU 半边（反之亦然），任一半失败都不拖累另一半
+    const [windowResult, gpuResult] = await Promise.allSettled([
+      this.options.client.getMetricsWindow(range as MetricsRange, {
+        ...(since !== undefined ? { since } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      }),
+      this.options.client.getGpuStats(signal !== undefined ? { signal } : undefined),
+    ]);
+    const series = windowResult.status === "fulfilled" ? windowResult.value.series : {};
+    // metrics 半边失败时 mode 只能给 full：delta 的语义是「追加到已有曲线」，没有
+    // 基础数据时浏览器必须走整窗替换（full）才不会把空缺当成「无新点」静默吞掉
+    const mode = windowResult.status === "fulfilled" ? windowResult.value.mode : "full";
+    const gpu = gpuResult.status === "fulfilled" ? gpuResult.value : null;
+    // 取消不是故障（切页/切档的常规手势）：panel-client 已把 abort 折成
+    // PANEL_UNREACHABLE、与真挂了分不开，与 start/stop 同一条取消语义——看
+    // signal 自身而非错误类型，aborted 时不塞 panelError（不画红色横幅）
+    const cancelled = signal?.aborted === true;
+    const panelError = cancelled ? null
+      : windowResult.status === "rejected"
+        ? describePanelError(windowResult.reason)
+        : gpuResult.status === "rejected"
+          ? describePanelError(gpuResult.reason)
+          : null;
+    return { series, gpu, mode, serverTs: Date.now(), panelError };
   }
 
   /** start/stop 共用的排空参数组装，只在配置了对应字段时才带上（panel-client.ts 的可选字段语义）。 */

@@ -21,6 +21,25 @@ export interface FakePanelState {
   eventStreams: Set<unknown>;
   /** /api/v1/events/stream 的累计连接数（含已断开的） */
   eventConnections: number;
+  /** /api/v1/metrics/window 的请求留痕（since 为原始字符串，缺参 null），断言 query 拼装用 */
+  metricsRequests: Array<{ range: string; since: string | null }>;
+  /** 时序数据（键为指标 id）：full 整窗返回、delta 过滤 ts > since；测试可改写 */
+  metricsSeries: Record<string, Array<{ ts: number; value: number }>>;
+  /** 故障注入：true 时 /api/v1/metrics/window 回 500 */
+  failMetrics: boolean;
+  /** 故障注入：true 时 /api/v1/gpu/stats 回 500 */
+  failGpu: boolean;
+  /** gpu/stats 三态（真实面板透传 nvidia-smi 探测结论），默认 "available" */
+  gpuStatus: "probing" | "unavailable" | "available";
+  /** 分卡明细（gpuStatus 为 "available" 时下发）；温度/功耗可 null */
+  gpuDevices: Array<{
+    index: number;
+    memUsedMib: number;
+    memTotalMib: number;
+    utilPercent: number;
+    tempC: number | null;
+    powerW: number | null;
+  }>;
 }
 
 export interface FakePanel {

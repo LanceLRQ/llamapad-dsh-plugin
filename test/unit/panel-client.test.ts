@@ -413,6 +413,181 @@ describe("createPanelClient", () => {
     });
   });
 
+  describe("getMetricsWindow", () => {
+    /** 面板真实响应的最小同构：16 个指标键全给是面板契约，这里给三个监控键 +
+     *  一个插件不消费的键（host.*），验证「只挑六个、多余的丢掉」 */
+    const windowBody = {
+      range: "30m",
+      from: 1_700_000_000_000,
+      resolution: "5s",
+      mode: "full",
+      series: {
+        "infer.tokens_per_sec": [{ ts: 1_700_000_000_000, value: 12.5 }, { ts: 1_700_000_005_000, value: 13 }],
+        "gpu.mem_used_mib": [],
+        "container.cpu_percent": [{ ts: 1_700_000_000_000, value: 42 }],
+        // 插件不画的指标（面板有、监控页不用）：投影必须丢弃，不能顺带下发
+        "host.cpu_percent": [{ ts: 1_700_000_000_000, value: 3 }],
+      },
+    };
+
+    it("query 拼 range、不带 since；series 裁剪到监控键、多余键丢弃、空数组语义保留", async () => {
+      const { fn, calls } = fakeFetch([{ body: windowBody }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const window = await client.getMetricsWindow("30m");
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/metrics/window?range=30m");
+      expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
+      expect(window).toEqual({
+        range: "30m",
+        from: 1_700_000_000_000,
+        resolution: "5s",
+        series: {
+          "infer.tokens_per_sec": [
+            { ts: 1_700_000_000_000, value: 12.5 },
+            { ts: 1_700_000_005_000, value: 13 },
+          ],
+          "gpu.mem_used_mib": [],
+          "container.cpu_percent": [{ ts: 1_700_000_000_000, value: 42 }],
+        },
+        mode: "full",
+      });
+      // 多余键确实不在投影结果里（空数组=未采集的面板语义只对在场的监控键保留）
+      expect(window.series).not.toHaveProperty("host.cpu_percent");
+    });
+
+    it("带 since 时拼进 query（增量水位）；mode/resolution 透传 delta 契约", async () => {
+      const { fn, calls } = fakeFetch([{ body: { ...windowBody, range: "2h", mode: "delta", resolution: "5s" } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const window = await client.getMetricsWindow("2h", { since: 1_700_000_004_000 });
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/metrics/window?range=2h&since=1700000004000");
+      expect(window.mode).toBe("delta");
+      expect(window.range).toBe("2h");
+    });
+
+    it("series 缺席键容忍：六个监控键一个都不给也不炸，结果就是空 series", async () => {
+      const { fn } = fakeFetch([{ body: { range: "7d", from: 0, resolution: "15m", mode: "full", series: {} } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.getMetricsWindow("7d")).resolves.toEqual({
+        range: "7d", from: 0, resolution: "15m", series: {}, mode: "full",
+      });
+      // series 键整个缺席（老面板空壳响应）同样容忍
+      const bare = fakeFetch([{ body: { range: "7d", from: 0, resolution: "15m", mode: "full" } }]);
+      await expect(createPanelClient({ ...base, fetch: bare.fn as any }).getMetricsWindow("7d"))
+        .resolves.toMatchObject({ series: {} });
+    });
+
+    it("坏形状：series 不是对象 / 在场键不是数组 → PANEL_HTTP", async () => {
+      const notObject = fakeFetch([{ body: { range: "30m", from: 0, resolution: "5s", mode: "full", series: [1, 2] } }]);
+      await expect(createPanelClient({ ...base, fetch: notObject.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+      const notArray = fakeFetch([{ body: { range: "30m", from: 0, resolution: "5s", mode: "full", series: { "gpu.util_percent": "12,13" } } }]);
+      await expect(createPanelClient({ ...base, fetch: notArray.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+    });
+
+    it("坏点：ts/value 非数字（或缺字段）→ PANEL_HTTP，不把坏点透传出去", async () => {
+      const badTs = fakeFetch([{ body: { range: "30m", from: 0, resolution: "5s", mode: "full", series: { "infer.kv_cache_tokens": [{ ts: "1", value: 2 }] } } }]);
+      await expect(createPanelClient({ ...base, fetch: badTs.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+      const missingValue = fakeFetch([{ body: { range: "30m", from: 0, resolution: "5s", mode: "full", series: { "container.mem_percent": [{ ts: 1 }] } } }]);
+      await expect(createPanelClient({ ...base, fetch: missingValue.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+    });
+
+    it("mode 非法 → PANEL_HTTP（mode 进 MonitorSnapshot 的 wire，坏值必须在客户端拦下）", async () => {
+      const { fn } = fakeFetch([{ body: { range: "30m", from: 0, resolution: "5s", mode: "partial", series: {} } }]);
+      await expect(createPanelClient({ ...base, fetch: fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+    });
+
+    it("非 ok → PanelError（400 range 非法→PANEL_HTTP、401→AUTH），与既有读路径同一套映射", async () => {
+      const badRange = fakeFetch([{ status: 400, body: { error: "invalid range" } }]);
+      await expect(createPanelClient({ ...base, fetch: badRange.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "PANEL_HTTP", status: 400 });
+      const unauth = fakeFetch([{ status: 401, body: { error: "unauthorized" } }]);
+      await expect(createPanelClient({ ...base, fetch: unauth.fn as any }).getMetricsWindow("30m"))
+        .rejects.toMatchObject({ code: "AUTH", status: 401 });
+    });
+
+    it("带 signal：fetch 收到合并 signal 且跟随外部 abort（与 start/stop 同一套合并策略）", async () => {
+      const controller = new AbortController();
+      const { fn, calls } = fakeFetch([{ body: windowBody }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await client.getMetricsWindow("30m", { signal: controller.signal });
+      const signal = calls[0]!.init.signal as AbortSignal;
+      expect(signal).not.toBe(controller.signal);
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+    });
+  });
+
+  describe("getGpuStats", () => {
+    const gpuBody = {
+      available: true,
+      status: "available",
+      // samples 是面板响应的一部分但插件投影不消费——给上以验证「不声明即丢弃」
+      samples: { "gpu.mem_used_mib": { value: 1024, ts: 1 } },
+      devices: [
+        { index: 0, memUsedMib: 1024, memTotalMib: 24564, utilPercent: 42, tempC: 61, powerW: 250.5 },
+        { index: 1, memUsedMib: 512, memTotalMib: 24564, utilPercent: 7, tempC: null, powerW: null },
+      ],
+      totals: { memUsedMib: 1536, memTotalMib: 49128 },
+    };
+
+    it("available 路径投影：devices/totals 逐字段透传，samples 不下发", async () => {
+      const { fn, calls } = fakeFetch([{ body: gpuBody }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const stats = await client.getGpuStats();
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/gpu/stats");
+      expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
+      expect(stats).toEqual({
+        available: true,
+        status: "available",
+        devices: [
+          { index: 0, memUsedMib: 1024, memTotalMib: 24564, utilPercent: 42, tempC: 61, powerW: 250.5 },
+          { index: 1, memUsedMib: 512, memTotalMib: 24564, utilPercent: 7, tempC: null, powerW: null },
+        ],
+        totals: { memUsedMib: 1536, memTotalMib: 49128 },
+      });
+    });
+
+    it("纯 CPU 机器是合法状态不抛错：unavailable 时 devices 空、totals 为 null（不是 0/0）", async () => {
+      const { fn } = fakeFetch([{ body: { available: false, status: "unavailable", samples: null, devices: [], totals: null } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.getGpuStats()).resolves.toEqual({
+        available: false, status: "unavailable", devices: [], totals: null,
+      });
+      const probing = fakeFetch([{ body: { available: false, status: "probing", samples: null, devices: [], totals: null } }]);
+      await expect(createPanelClient({ ...base, fetch: probing.fn as any }).getGpuStats())
+        .resolves.toMatchObject({ status: "probing" });
+    });
+
+    it("坏形状：status 非三态 / devices 非数组 / 分卡字段非数字 / totals 坏 → PANEL_HTTP", async () => {
+      const badStatus = fakeFetch([{ body: { available: true, status: "maybe", devices: [], totals: null } }]);
+      await expect(createPanelClient({ ...base, fetch: badStatus.fn as any }).getGpuStats())
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+      const badDevices = fakeFetch([{ body: { available: true, status: "available", devices: {}, totals: null } }]);
+      await expect(createPanelClient({ ...base, fetch: badDevices.fn as any }).getGpuStats())
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+      const badDeviceField = fakeFetch([{ body: { available: true, status: "available", devices: [{ index: 0, memUsedMib: "1024", memTotalMib: 24564, utilPercent: 42, tempC: null, powerW: null }], totals: null } }]);
+      await expect(createPanelClient({ ...base, fetch: badDeviceField.fn as any }).getGpuStats())
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+      const badTotals = fakeFetch([{ body: { available: true, status: "available", devices: [], totals: { memUsedMib: 1 } } }]);
+      await expect(createPanelClient({ ...base, fetch: badTotals.fn as any }).getGpuStats())
+        .rejects.toMatchObject({ code: "PANEL_HTTP" });
+    });
+
+    it("带 signal：合并进 fetch 的取消通道", async () => {
+      const controller = new AbortController();
+      const { fn, calls } = fakeFetch([{ body: gpuBody }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await client.getGpuStats({ signal: controller.signal });
+      const signal = calls[0]!.init.signal as AbortSignal;
+      expect(signal).not.toBe(controller.signal);
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+    });
+  });
+
   describe("streamEvents", () => {
     it("snapshot 帧的 events 逐条回调、event 帧单条回调（顺序保持），打 /api/v1/events/stream 且带 Bearer 头", async () => {
       const { fn, push, calls } = sseFetch();

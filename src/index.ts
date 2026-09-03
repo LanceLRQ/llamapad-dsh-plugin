@@ -196,7 +196,7 @@ export function apply(ctx: Context, config: Config) {
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
   new PanelGateway(ctx, gatewayOptions, (patch) => writeSettings(ctx, patch));
 
-  // 把三个方法的 strict 描述符注册进 typert 共享注册表。
+  // 把全部 RPC 方法的 strict 描述符注册进 typert 共享注册表。
   //
   // 这一步不是可选优化，是唯一可行的通路：网关默认的 SRC 反射（@Remote 装饰器）把标记
   // 记在 dsh-typert-protocol 的**模块级 WeakMap** 里，而第三方插件从自己的 node_modules

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@deepseek-ai/cordis";
 import { PanelGateway, type PanelGatewayOptions } from "../../src/panel-gateway";
-import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_WIRE_MODEL } from "../../src/rpc-contract";
+import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_WIRE_MODEL, RPC_WIRE_RANGE, RPC_WIRE_SINCE, type MonitorSnapshot } from "../../src/rpc-contract";
 import { PanelError, type PanelClient, type PanelModelView, type PanelEvent } from "../../src/panel-client";
 import { EnsureError, type ModelGate } from "../../src/switching";
 
@@ -27,6 +27,8 @@ function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient {
     startModel: async () => {},
     stopModel: async () => ({ ok: true }),
     llamaHealth: async () => true,
+    getMetricsWindow: async () => ({ range: "30m", from: 0, resolution: "5s", series: {}, mode: "full" }),
+    getGpuStats: async () => ({ available: false, status: "unavailable", devices: [], totals: null }),
     ...overrides,
   } as PanelClient;
 }
@@ -400,6 +402,124 @@ describe("PanelGateway", () => {
     });
   });
 
+  describe("monitor", () => {
+    const windowFixture = {
+      range: "30m" as const,
+      from: 1_700_000_000_000,
+      resolution: "5s" as const,
+      series: {
+        "infer.tokens_per_sec": [{ ts: 1_700_000_000_000, value: 12.5 }],
+        "container.cpu_percent": [{ ts: 1_700_000_000_000, value: 42 }],
+      },
+      mode: "full" as const,
+    };
+    const gpuFixture = {
+      available: true,
+      status: "available" as const,
+      devices: [{ index: 0, memUsedMib: 1024, memTotalMib: 24564, utilPercent: 42, tempC: 61, powerW: 250.5 }],
+      totals: { memUsedMib: 1024, memTotalMib: 24564 },
+    };
+
+    it("正常路径：metrics 窗口与 gpu/stats 并发合并成 MonitorSnapshot，serverTs 是组装时刻", async () => {
+      const getMetricsWindow = vi.fn(async () => windowFixture);
+      const getGpuStats = vi.fn(async () => gpuFixture);
+      const before = Date.now();
+      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow, getGpuStats }) });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      expect(Date.now()).toBeGreaterThanOrEqual(before);
+      expect(snapshot).toEqual({
+        series: windowFixture.series,
+        gpu: gpuFixture,
+        mode: "full",
+        serverTs: expect.any(Number),
+        panelError: null,
+      });
+      expect(snapshot.serverTs).toBeGreaterThanOrEqual(before);
+      expect(getMetricsWindow).toHaveBeenCalledTimes(1);
+      expect(getGpuStats).toHaveBeenCalledTimes(1);
+    });
+
+    it("range/since 透传：since 缺省不带键（可选即省略），在场则原样带进 options", async () => {
+      const getMetricsWindow = vi.fn(async () => windowFixture);
+      const getGpuStats = vi.fn(async () => gpuFixture);
+      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow, getGpuStats }) });
+
+      await gateway.monitor("2h", undefined);
+      expect(getMetricsWindow).toHaveBeenCalledWith("2h", {});
+
+      await gateway.monitor("2h", 1_700_000_004_000);
+      expect(getMetricsWindow).toHaveBeenLastCalledWith("2h", { since: 1_700_000_004_000 });
+    });
+
+    it("metrics 半边失败：series 兜底空对象、mode 兜底 full、panelError 非空，gpu 半边照常下发", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          getMetricsWindow: async () => { throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE"); },
+          getGpuStats: async () => gpuFixture,
+        }),
+      });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      expect(snapshot.series).toEqual({});
+      // mode 兜底必须是 full：delta 语义是「追加到已有曲线」，没有基础数据时
+      // 浏览器必须走整窗替换，才不会把空缺当成「无新点」静默吞掉
+      expect(snapshot.mode).toBe("full");
+      expect(snapshot.gpu).toEqual(gpuFixture);
+      expect(snapshot.panelError).toContain("面板不可达");
+    });
+
+    it("gpu 半边失败：gpu 兜底 null、panelError 非空，series 照常下发（反向半边失败）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          getMetricsWindow: async () => ({ ...windowFixture, mode: "delta" }),
+          getGpuStats: async () => { throw new PanelError("面板请求失败", "PANEL_HTTP", 500); },
+        }),
+      });
+
+      const snapshot = await gateway.monitor("30m", 1);
+
+      expect(snapshot.series).toEqual(windowFixture.series);
+      expect(snapshot.mode).toBe("delta"); // metrics 半边成功时 mode 原样透传
+      expect(snapshot.gpu).toBeNull();
+      expect(snapshot.panelError).toContain("PANEL_HTTP");
+    });
+
+    it("signal 透传给两条拉取的 options（RPC 取消通道 → 两条在途请求）", async () => {
+      const getMetricsWindow = vi.fn(async () => windowFixture);
+      const getGpuStats = vi.fn(async () => gpuFixture);
+      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow, getGpuStats }) });
+      const controller = new AbortController();
+
+      await gateway.monitor("30m", undefined, controller.signal);
+
+      expect(getMetricsWindow).toHaveBeenCalledWith("30m", { signal: controller.signal });
+      expect(getGpuStats).toHaveBeenCalledWith({ signal: controller.signal });
+    });
+
+    it("用户取消（signal.aborted）：不塞 panelError——取消不是故障，不画红色横幅", async () => {
+      const controller = new AbortController();
+      const getMetricsWindow = vi.fn(async () => {
+        controller.abort(); // 模拟在途拉取被取消后 panel-client 折出的 PANEL_UNREACHABLE
+        throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE");
+      });
+      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow }) });
+
+      const snapshot = await gateway.monitor("30m", undefined, controller.signal);
+
+      expect(snapshot.panelError).toBeNull();
+      expect(snapshot.series).toEqual({});
+    });
+
+    it("range 非法：属于无法执行的输入，直接抛 TypeError（对齐 model 为空串的先例）", async () => {
+      const { gateway } = makeGateway();
+      await expect(gateway.monitor("1h", undefined)).rejects.toThrow(TypeError);
+      await expect(gateway.monitor("", undefined)).rejects.toThrow(TypeError);
+    });
+  });
+
   // @Remote 装饰器已从 panel-gateway.ts 删掉（真机验证过：SRC 反射把标记写进
   // dsh-typert-protocol 的模块级 WeakMap，第三方插件与宿主分别从各自 node_modules
   // 解析该包，运行时是两份模块实例、两张 WeakMap，网关读不到标记，端点 404）。
@@ -439,6 +559,104 @@ describe("PanelGateway", () => {
       expect(byMethod.get(RPC_METHOD.stop)?.cancellation).toEqual({ parameter: "signal" });
       expect(byMethod.get(RPC_METHOD.snapshot)?.cancellation).toBeUndefined();
       expect(byMethod.get(RPC_METHOD.saveConnection)?.cancellation).toBeUndefined();
+    });
+
+    it("monitor 描述符：range 必填、since 可选（acceptsUndefined）、带取消通道，result 换成 MonitorSnapshot codec", () => {
+      const monitor = RPC_CONTRIBUTION.descriptors.find((d) => d.method === RPC_METHOD.monitor);
+      expect(monitor).toBeDefined();
+      // wire 名由描述符写死（浏览器侧生成方法按 wire 名传参）
+      expect(monitor!.parameters.map((p) => p.wire)).toEqual([RPC_WIRE_RANGE, RPC_WIRE_SINCE]);
+      // since 可选即省略：浏览器侧 undefined 实参不发 wire 键，网关靠 acceptsUndefined 放行缺席
+      expect(monitor!.parameters[0]!.acceptsUndefined).toBeUndefined();
+      expect(monitor!.parameters[1]!.acceptsUndefined).toBe(true);
+      // 24h/7d 窗口响应大，切页/切 range 要能取消在途
+      expect(monitor!.cancellation).toEqual({ parameter: "signal" });
+      // 与其余四个方法不同：monitor 的返回值是 MonitorSnapshot，不是 CardSnapshot
+      expect(monitor!.result.typeSymbol).toBe("llamapad-dsh-plugin#MonitorSnapshot");
+    });
+  });
+
+  describe("monitor codec（经描述符暴露的 strict 校验，浏览器产物用同一份）", () => {
+    const monitorDescriptor = RPC_CONTRIBUTION.descriptors.find((d) => d.method === RPC_METHOD.monitor)!;
+    const rangeCodec = monitorDescriptor.parameters[0]!.codec.schema;
+    const sinceCodec = monitorDescriptor.parameters[1]!.codec.schema;
+    const resultCodec = monitorDescriptor.result.schema;
+
+    it("RANGE_CODEC：四档放行，其余（含大小写漂移、空串）拒成 TypeError", () => {
+      for (const ok of ["30m", "2h", "24h", "7d"] as const) {
+        expect(rangeCodec.parse(ok)).toBe(ok);
+      }
+      for (const bad of ["1h", "30M", "", "7d ", 30]) {
+        expect(() => rangeCodec.parse(bad)).toThrow(TypeError);
+      }
+    });
+
+    it("SINCE_CODEC：undefined 放行（可选即省略的另一半），数字放行，其余拒", () => {
+      expect(sinceCodec.parse(undefined)).toBeUndefined();
+      expect(sinceCodec.parse(1_700_000_000_000)).toBe(1_700_000_000_000);
+      for (const bad of ["1700", null, Number.NaN]) {
+        expect(() => sinceCodec.parse(bad)).toThrow(TypeError);
+      }
+    });
+
+    it("MONITOR_CODEC：完整快照逐字段收窄通过（series/gpu/mode/serverTs/panelError）", () => {
+      const snapshot = {
+        series: { "gpu.util_percent": [{ ts: 1, value: 2 }], "infer.kv_cache_tokens": [] },
+        gpu: {
+          available: true,
+          status: "available",
+          devices: [{ index: 0, memUsedMib: 1, memTotalMib: 2, utilPercent: 3, tempC: null, powerW: 44.5 }],
+          totals: { memUsedMib: 1, memTotalMib: 2 },
+        },
+        mode: "delta",
+        serverTs: 1,
+        panelError: null,
+      };
+      expect(resultCodec.parse(snapshot)).toEqual(snapshot);
+    });
+
+    it("MONITOR_CODEC：series 缺席键容忍、坏点不容忍（在场就必须是好形状）", () => {
+      // 六个键一个不给：合法（面板下线指标 = 不出键）。描述符的 codec 按
+      // StrictCodec<unknown> 存放，parse 结果显式收窄回 MonitorSnapshot 再断言
+      const empty = resultCodec.parse({ series: {}, gpu: null, mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot;
+      expect(empty.series).toEqual({});
+      // 在场键逐点校验：ts 非数字 / value 缺席 / 点不是对象，都拒
+      for (const badPoints of [
+        [{ ts: "1", value: 2 }],
+        [{ ts: 1 }],
+        ["not-a-point"],
+      ]) {
+        expect(() => resultCodec.parse({
+          series: { "gpu.mem_used_mib": badPoints },
+          gpu: null, mode: "full", serverTs: 1, panelError: null,
+        })).toThrow(TypeError);
+      }
+      // 在场键不是数组也拒
+      expect(() => resultCodec.parse({
+        series: { "gpu.mem_used_mib": "12,13" },
+        gpu: null, mode: "full", serverTs: 1, panelError: null,
+      })).toThrow(TypeError);
+    });
+
+    it("MONITOR_CODEC：gpu 为 null（半边失败）或三态 unavailable 都放行，坏 status 拒", () => {
+      expect((resultCodec.parse({ series: {}, gpu: null, mode: "full", serverTs: 1, panelError: "面板请求失败" }) as MonitorSnapshot).gpu).toBeNull();
+      const unavailable = { available: false, status: "unavailable", devices: [], totals: null };
+      expect((resultCodec.parse({ series: {}, gpu: unavailable, mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot).gpu)
+        .toEqual(unavailable);
+      expect(() => resultCodec.parse({
+        series: {}, gpu: { available: false, status: "maybe", devices: [], totals: null },
+        mode: "full", serverTs: 1, panelError: null,
+      })).toThrow(TypeError);
+    });
+
+    it("MONITOR_CODEC：mode/serverTs/panelError 收窄（mode 两态、serverTs 数字、panelError 字符串或 null）", () => {
+      for (const bad of [
+        { series: {}, gpu: null, mode: "partial", serverTs: 1, panelError: null },
+        { series: {}, gpu: null, mode: "full", serverTs: "1", panelError: null },
+        { series: {}, gpu: null, mode: "full", serverTs: 1, panelError: 42 },
+      ]) {
+        expect(() => resultCodec.parse(bad)).toThrow(TypeError);
+      }
     });
   });
 

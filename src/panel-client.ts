@@ -1,5 +1,5 @@
 /**
- * llamapad 面板控制面 REST 客户端（列模型 / 启停 / 状态 / 生效配置 / 就绪探测）。
+ * llamapad 面板控制面 REST 客户端（列模型 / 启停 / 状态 / 生效配置 / 就绪探测 / 监控）。
  * 推理数据面不走这里（见 adapter.ts 的 proxy/direct 双模式）。
  * 失败一律抛 PanelError，code 为稳定机器码：
  * AUTH | MODEL_NOT_FOUND | MODEL_FILES_MISSING | START_REJECTED | RUNTIME_BUSY | PANEL_HTTP | PANEL_UNREACHABLE
@@ -81,6 +81,113 @@ export interface PanelEvent {
   message: string;
 }
 
+/* ------------------------------------------------------------------ *
+ * 监控端点（GET /api/v1/metrics/window 与 GET /api/v1/gpu/stats）。
+ * 面板一共采集 16 个指标，监控页只消费其中 6 个——键集收敛在下面的
+ * MonitorMetricId / MONITOR_METRIC_IDS，面板将来增删指标都不会波及插件
+ * （缺席键容忍；多出来的键在投影时直接丢弃，不下发不报错）。
+ * ------------------------------------------------------------------ */
+
+/** metrics 窗口的时间档位（面板 RANGE_KEYS 的四值枚举，非法值面板回 400） */
+export type MetricsRange = "30m" | "2h" | "24h" | "7d";
+
+/** 时序点：面板 WindowPoint 的同形投影（ts 毫秒时间戳 + 采样值） */
+export interface MetricPoint {
+  ts: number;
+  value: number;
+}
+
+/**
+ * 监控页消费的六个时序指标键。面板侧的 metric id 是点分命名空间字符串
+ * （METRIC_IDS），这里只挑图表真会画的六个；类型是插件侧投影的唯一出处，
+ * rpc-contract.ts 的 MonitorSnapshot.series 复用它（type-only 引用，不会把
+ * 本文件拖进浏览器产物）。
+ */
+export type MonitorMetricId =
+  | "infer.tokens_per_sec"
+  | "infer.kv_cache_tokens"
+  | "gpu.mem_used_mib"
+  | "gpu.util_percent"
+  | "container.cpu_percent"
+  | "container.mem_percent";
+
+/** 上面六个键的运行时清单：getMetricsWindow 的 series 裁剪按它遍历 */
+export const MONITOR_METRIC_IDS: readonly MonitorMetricId[] = [
+  "infer.tokens_per_sec",
+  "infer.kv_cache_tokens",
+  "gpu.mem_used_mib",
+  "gpu.util_percent",
+  "container.cpu_percent",
+  "container.mem_percent",
+];
+
+/**
+ * GET /api/v1/metrics/window 的插件侧投影。
+ *
+ * series 刻意声明为 Partial：面板的响应恒含全部 16 个指标键（buildWindowPayload
+ * 补空数组），投影只保留六个监控键，且**缺席容忍**——面板将来下线某个指标、或老
+ * 面板还没实现它时，键就是不出现在结果里，调用方按「未采集」处理即可，绝不为
+ * 「面板少给了一个键」抛错。但**在场就必须是好形状**：某个键的值不是数组、或
+ * 数组里混进 ts/value 非数字的坏点，本层直接抛 PanelError——坏数据折进
+ * panelError 通道让监控页画出「指标拉取失败」，比把坏点透传到浏览器侧 strict
+ * codec 再炸成 RPC 错误壳，信息多得多。
+ */
+export interface PanelMetricsWindow {
+  range: MetricsRange;
+  /** 窗口起点（毫秒时间戳），= now - RANGE_DEFS[range] */
+  from: number;
+  /** 窗口分辨率标称值（面板按档位报：≤2h 是 5s 采样 ring，更长是 15min 聚合桶） */
+  resolution: "5s" | "15m";
+  series: Partial<Record<MonitorMetricId, MetricPoint[]>>;
+  /** 增量协议判别字段：delta 只含 ts > since 的新点，full 是整窗替换 */
+  mode: "full" | "delta";
+}
+
+/** 单卡当前快照（gpu/stats 的分卡明细；温度/功耗 nvidia-smi 解析不到时为 null） */
+export interface PanelGpuDevice {
+  index: number;
+  memUsedMib: number;
+  memTotalMib: number;
+  utilPercent: number;
+  tempC: number | null;
+  powerW: number | null;
+}
+
+/**
+ * GET /api/v1/gpu/stats 的插件侧投影：当前值快照 + 分卡明细，不进时序。
+ * status 三态透传 nvidia-smi 探测结论：probing（面板刚重启尚无结论，前端保持
+ * 中立）/ unavailable（纯 CPU 机器，探测确认不可用）/ available。面板响应里还有
+ * 一个 samples（各指标最近一拍）字段，监控页用窗口时序 + devices 已经覆盖同样
+ * 的信息，投影里不声明、不下发。
+ */
+export interface PanelGpuStats {
+  available: boolean;
+  status: "probing" | "unavailable" | "available";
+  devices: PanelGpuDevice[];
+  /** 显存合计；无卡（devices 为空，含非 available 态）时为 null，不是 0/0 */
+  totals: { memUsedMib: number; memTotalMib: number } | null;
+}
+
+/** getMetricsWindow 的可选参数 */
+export interface MetricsWindowOptions {
+  /**
+   * 增量水位（毫秒 ts）：带上后服务端**可能**回 mode:"delta" 只含新点（24h/7d
+   * 档、水位滑出窗口等情况服务端会否决回 full）。缺省即首次全量拉取。
+   */
+  since?: number;
+  /**
+   * 调用方取消手势（浏览器侧切页/切档时取消在途请求——24h/7d 窗口大，不取消
+   * 会白白占着连接）。与单请求超时合并后交给 fetch，不进 query。语义与
+   * StartModelOptions.signal 一致。
+   */
+  signal?: AbortSignal;
+}
+
+/** getGpuStats 的可选参数（只有取消手势，没有增量水位——它本来就是即时快照） */
+export interface GpuStatsOptions {
+  signal?: AbortSignal;
+}
+
 /** 排空等待的默认上限（毫秒），与服务端 runtime.ts 的 DEFAULT_DRAIN_TIMEOUT_MS 对齐。
  *  放在本文件（最底层、无同级依赖）供 adapter 与 index 的 schema 默认值共用，
  *  不让同一个数字散落三处各写一遍。 */
@@ -140,6 +247,16 @@ export interface PanelClient {
   llamaHealth(): Promise<boolean>;
   /** 查询最近事件（ts 毫秒倒序）；limit/kind 缺省时不发参数，服务端默认 20 条 */
   getEvents(options?: { limit?: number; kind?: string }): Promise<PanelEvent[]>;
+  /**
+   * 监控时序窗口（GET /api/v1/metrics/window）：series 已裁剪到六个监控键，
+   * 缺席键容忍、坏点抛 PanelError（形状语义见 PanelMetricsWindow 注释）。
+   */
+  getMetricsWindow(range: MetricsRange, options?: MetricsWindowOptions): Promise<PanelMetricsWindow>;
+  /**
+   * GPU 当前值快照（GET /api/v1/gpu/stats）。纯 CPU 机器不抛错——那是一个完全
+   * 合法的响应（status:"unavailable"），抛错留给「面板连不上/鉴权失败」。
+   */
+  getGpuStats(options?: GpuStatsOptions): Promise<PanelGpuStats>;
   /**
    * 订阅面板事件 SSE 流（GET /api/v1/events/stream，连接即发 snapshot、此后增量
    * event 帧、15s 心跳注释行）。尽力而为的长连接：断流不抛错（重连由调用方负责），
@@ -222,6 +339,113 @@ function isPanelEvent(v: unknown): v is PanelEvent {
   const e = v as Record<string, unknown>;
   return typeof e.id === "number" && typeof e.ts === "number"
     && typeof e.kind === "string" && typeof e.message === "string";
+}
+
+/**
+ * metrics 窗口响应的投影与校验（纯函数，模块私有）：
+ * 只挑六个监控键、逐点收窄形状。容忍与不容忍的边界见 PanelMetricsWindow 注释——
+ * 缺席键直接跳过；在场但坏形状（不是数组/点缺字段/字段非数字）抛 PanelError，
+ * 让失败在 gateway 折进 panelError，而不是把坏数据带去浏览器侧的 strict codec。
+ */
+function projectMetricsWindow(body: unknown): PanelMetricsWindow {
+  const row = body as Record<string, unknown>;
+  const series: Partial<Record<MonitorMetricId, MetricPoint[]>> = {};
+  const rawSeries = row["series"];
+  // series 键整体缺席也容忍（老面板没有 metrics 端点时调用方拿到的是 404 抛错，
+  // 走不到这里；能走到这的都是 200，但形状仍可能是空壳——按「全部缺席」处理）
+  if (rawSeries !== undefined && rawSeries !== null) {
+    if (typeof rawSeries !== "object" || Array.isArray(rawSeries)) {
+      throw new PanelError("面板返回的指标序列形状非法（series 不是对象）", "PANEL_HTTP");
+    }
+    const source = rawSeries as Record<string, unknown>;
+    for (const id of MONITOR_METRIC_IDS) {
+      const points = source[id];
+      if (points === undefined) continue; // 缺席容忍：面板下线/尚未实现该指标
+      if (!Array.isArray(points)) {
+        throw new PanelError(`面板返回的指标序列 ${id} 形状非法（不是数组）`, "PANEL_HTTP");
+      }
+      series[id] = points.map((point, index) => {
+        if (typeof point !== "object" || point === null
+          || typeof (point as Record<string, unknown>)["ts"] !== "number"
+          || typeof (point as Record<string, unknown>)["value"] !== "number") {
+          throw new PanelError(`面板返回的指标序列 ${id}[${index}] 形状非法（ts/value 不是数字）`, "PANEL_HTTP");
+        }
+        const p = point as { ts: number; value: number };
+        // 投影成新对象：点多余的字段（将来面板加点）不顺着泄漏进插件侧类型
+        return { ts: p.ts, value: p.value };
+      });
+    }
+  }
+  const mode = row["mode"];
+  if (mode !== "full" && mode !== "delta") {
+    throw new PanelError(`面板返回的 metrics 窗口形状非法（mode: ${String(mode)}）`, "PANEL_HTTP");
+  }
+  // range/from/resolution 只透传不校验：它们不进 MonitorSnapshot 的 wire（浏览器
+  // 知道自己要的档位），坏值最多是展示层的无关紧要小错，不值得为它炸掉整个窗口
+  return {
+    range: row["range"] as MetricsRange,
+    from: typeof row["from"] === "number" ? row["from"] : 0,
+    resolution: row["resolution"] === "15m" ? "15m" : "5s",
+    series,
+    mode,
+  };
+}
+
+/**
+ * gpu/stats 响应的投影与校验（纯函数，模块私有）。与 metrics 同一条边界纪律：
+ * 字段在场就必须是好形状（抛 PanelError 折进 panelError），samples 键不声明、
+ * 不下发（见 PanelGpuStats 注释）。
+ */
+function projectGpuStats(body: unknown): PanelGpuStats {
+  const row = body as Record<string, unknown>;
+  const status = row["status"];
+  if (status !== "probing" && status !== "unavailable" && status !== "available") {
+    throw new PanelError(`面板返回的 GPU 状态形状非法（status: ${String(status)}）`, "PANEL_HTTP");
+  }
+  const available = row["available"];
+  if (typeof available !== "boolean") {
+    throw new PanelError("面板返回的 GPU 状态形状非法（available 不是布尔）", "PANEL_HTTP");
+  }
+  const rawDevices = row["devices"];
+  if (!Array.isArray(rawDevices)) {
+    throw new PanelError("面板返回的 GPU 状态形状非法（devices 不是数组）", "PANEL_HTTP");
+  }
+  const devices = rawDevices.map((device, index) => {
+    if (typeof device !== "object" || device === null) {
+      throw new PanelError(`面板返回的 GPU 分卡明细形状非法（devices[${index}]）`, "PANEL_HTTP");
+    }
+    const d = device as Record<string, unknown>;
+    const num = (key: string): number => {
+      const v = d[key];
+      if (typeof v !== "number") {
+        throw new PanelError(`面板返回的 GPU 分卡明细形状非法（devices[${index}].${key} 不是数字）`, "PANEL_HTTP");
+      }
+      return v;
+    };
+    const nullableNum = (key: string): number | null =>
+      d[key] === null || d[key] === undefined ? null : num(key);
+    return {
+      index: num("index"),
+      memUsedMib: num("memUsedMib"),
+      memTotalMib: num("memTotalMib"),
+      utilPercent: num("utilPercent"),
+      tempC: nullableNum("tempC"),
+      powerW: nullableNum("powerW"),
+    };
+  });
+  const rawTotals = row["totals"];
+  let totals: PanelGpuStats["totals"] = null;
+  if (rawTotals !== null && rawTotals !== undefined) {
+    if (typeof rawTotals !== "object") {
+      throw new PanelError("面板返回的 GPU 状态形状非法（totals 不是对象）", "PANEL_HTTP");
+    }
+    const t = rawTotals as Record<string, unknown>;
+    if (typeof t["memUsedMib"] !== "number" || typeof t["memTotalMib"] !== "number") {
+      throw new PanelError("面板返回的 GPU 状态形状非法（totals.memUsedMib/memTotalMib 不是数字）", "PANEL_HTTP");
+    }
+    totals = { memUsedMib: t["memUsedMib"], memTotalMib: t["memTotalMib"] };
+  }
+  return { available, status, devices, totals };
 }
 
 export function createPanelClient(options: PanelClientOptions): PanelClient {
@@ -402,6 +626,20 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
       const body = (await res.json()) as { events: PanelEvent[] };
       return body.events;
+    },
+    async getMetricsWindow(range, metricsOptions) {
+      // since 缺省不发参数（同 getEvents 的理由：让服务端自己定「无水位=全量」，
+      // 不在客户端焊死）。range 必发——缺省它服务端只会回 400
+      const params = new URLSearchParams({ range });
+      if (metricsOptions?.since !== undefined) params.set("since", String(metricsOptions.since));
+      const res = await request(`/api/v1/metrics/window?${params.toString()}`, {}, undefined, metricsOptions?.signal);
+      if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
+      return projectMetricsWindow(await res.json());
+    },
+    async getGpuStats(gpuOptions) {
+      const res = await request("/api/v1/gpu/stats", {}, undefined, gpuOptions?.signal);
+      if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
+      return projectGpuStats(await res.json());
     },
     streamEvents(handler) {
       // 停止语义三件套：stopped 标志（一切回调静默的判据）+ 内部 AbortController
