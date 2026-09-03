@@ -23,6 +23,12 @@ export const CARD_STYLE_TAG_ID = "llamapad-dsh-plugin/card.css";
 // chevronOpen 旋转），primitives 没有 Grid/ScrollArea，滚动条样式只能自己写。
 // 导出 CARD_CSS 是让 client-styles.test.ts 能断言这几条关键规则不被误删——组件本身
 // 在本仓库测不了（node 环境无 jsdom），网格列数/定高/溢出滚动是这次改动能自动化守住的全部。
+//
+// 事件流小节（__events 族）同样沿用本文件既有体系：tone 着色只用已验证过的状态色
+// token——error 与 __actionError 同一个 --dsw-alias-state-error-primary，success 与
+// 运行行描边（__row[data-running]）同一个 --dsw-alias-state-success-primary（StateDot
+// 的 done 色也取自它），neutral 落 __rowMeta 的 --dsw-alias-label-tertiary 灰；不引入
+// 新色彩变量。时间是等宽数字（tabular-nums），分钟跳动时行宽不抖。
 export const CARD_CSS = `
 .llamapad-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;transition:border-color .16s,background .16s}
 .llamapad-card:hover{border-color:var(--dsw-alias-label-dimmed)}
@@ -54,6 +60,14 @@ export const CARD_CSS = `
 .llamapad-card__connField{display:flex;flex-direction:column;gap:4px}
 .llamapad-card__connLabel{color:var(--dsw-alias-label-secondary);font-size:12px}
 .llamapad-card__connActions{display:flex;justify-content:flex-end;align-items:center;gap:8px}
+.llamapad-card__events{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:12px}
+.llamapad-card__eventsTitle{color:var(--dsw-alias-label-secondary);font-size:12px}
+.llamapad-card__eventsList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.llamapad-card__event{display:flex;align-items:baseline;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5}
+.llamapad-card__eventTime{flex:none;font-variant-numeric:tabular-nums}
+.llamapad-card__eventText{min-width:0}
+.llamapad-card__event--error{color:var(--dsw-alias-state-error-primary)}
+.llamapad-card__event--success{color:var(--dsw-alias-state-success-primary)}
 @media (max-width:520px){.llamapad-card__list{grid-template-columns:1fr}}
 `;
 

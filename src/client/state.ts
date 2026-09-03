@@ -1,7 +1,7 @@
 // 卡片的纯逻辑：把一份 CardSnapshot（+ 本地的「动作在途」态）折算成渲染要用的
 // 展示值。刻意不掺 React——状态推导本身没有理由依赖运行环境，纯函数才好单测，
 // 也让 Card 组件本身只剩"照着 view 摆控件"这一件事。
-import type { CardConnection, CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
+import type { CardConnection, CardEvent, CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
 
 /** 一次启动/停止动作的进行中态：哪个模型、哪种动作。 */
 export interface PendingAction {
@@ -163,4 +163,71 @@ export function connectionFormState(
   if (url === "") return { canSave: false, blockedReason: "urlRequired", tokenHint };
   const changed = url !== current.panelUrl.trim() || token !== "";
   return { canSave: changed, blockedReason: null, tokenHint };
+}
+
+/* ------------------------------------------------------------------ *
+ * 事件流：卡片底部「最近事件」列表 + 新事件 Toast 的推导
+ * ------------------------------------------------------------------ */
+
+/**
+ * 事件行/Toast 的三档着色语义。
+ *
+ * 这是「值得用户注意的信号」分级，**不是**面板事件语义的完整复刻：只点名那些
+ * 用户会想知道结局的 kind（模型挂了/起好了/下载完/下载卡死），其余一律 neutral。
+ * 好处是面板将来加新事件种类时卡片不需要同步改——未知 kind 落到 neutral 照常
+ * 展示在列表里，只是不争抢注意力，而不是因认不得而失色或误标红。
+ */
+export type EventTone = "error" | "success" | "neutral";
+
+const ERROR_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "model.exit",
+  "model.start_failed",
+  "download.failed",
+  "download.queue_stalled",
+]);
+
+const SUCCESS_EVENT_KINDS: ReadonlySet<string> = new Set(["model.start", "download.complete"]);
+
+/** 事件 kind → 着色档位，语义见 EventTone 的注释。 */
+export function describeEventTone(kind: string): EventTone {
+  if (ERROR_EVENT_KINDS.has(kind)) return "error";
+  if (SUCCESS_EVENT_KINDS.has(kind)) return "success";
+  return "neutral";
+}
+
+/**
+ * 从新快照里挑出「值得打断用户」的事件：id 不在 prevIds（没见过）**且** kind 以
+ * `model.` / `download.` 开头，按 ts 升序返回。
+ *
+ * 为什么按前缀过滤：Toast 是打断性 UI，弹一次就抢一次注意力。model.* / download.*
+ * 是用户主动发起的两条主线（起停模型、拉权重），它们的结束性节点（起好/挂掉/
+ * 下载完成/下载卡住）正是用户切去别的页面时也想被告知的事；而 auth.* / config.*
+ * 这类运维噪音（token 校验失败、配置热更新……）用户既无力干预也不关心，让它们
+ * 躺在底部事件列表里即可，不为它们弹窗。
+ */
+export function selectNotifiableEvents(
+  prevIds: ReadonlySet<number>,
+  snapshot: CardSnapshot,
+): CardEvent[] {
+  return snapshot.events
+    .filter((event) => !prevIds.has(event.id))
+    .filter((event) => event.kind.startsWith("model.") || event.kind.startsWith("download."))
+    .sort((a, b) => a.ts - b.ts);
+}
+
+/**
+ * 事件时间的展示格式：「HH:mm」本地时间、两位补零。
+ *
+ * 只显示时分（不显示日期）：事件环容量只有 8 条、来的都是近期事件，为极小概率的
+ * 跨天场景引入「昨天 HH:mm」之类的第二套文案不值得；真跨天了顶多是第一条事件的
+ * 时间少了上下文，列表标题「最近事件」已经给了语义。now 仍按本文件的约定由调用方
+ * 注入（与 describeLoadingElapsed 一致，测试不挂真实时钟）——将来真要支持跨天
+ * 措辞也不用改调用点，只是眼下它不参与计算。
+ */
+export function formatEventTime(ts: number, now: number): string {
+  void now; // 见上：保留注入式时钟签名，跨天简化后暂不使用
+  const date = new Date(ts);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
 }

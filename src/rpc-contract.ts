@@ -127,7 +127,7 @@ export interface CardSnapshot {
   connection: CardConnection;
   /**
    * 最近的面板事件（时间升序，最多 eventRing 容量条），来自 status-watch 的事件环。
-   * 浏览器卡片本任务暂未消费（事件流 UI 是后续任务的活），先随快照下发养数据。
+   * 卡片在底部渲染「最近事件」列表，并对轮询间新到的 model./download. 事件弹 Toast。
    */
   events: CardEvent[];
 }

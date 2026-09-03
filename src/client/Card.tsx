@@ -1,8 +1,10 @@
 // 设置卡片的 React 组件本身：只负责「照着 state.ts 折算出的 view 摆控件」与轮询/
 // 点击这两件跟运行环境绑定、没法纯函数化的事，推导逻辑一律委托给 state.ts。
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import {
   Button,
+  IconCheckOutline16,
   IconChevronDownOutline14,
   IconLinkOutline16,
   IconPlayOutline16,
@@ -11,15 +13,20 @@ import {
   Input,
   Pill,
   StateDot,
+  Toast,
 } from "@deepseek-ai/dsh-client-ui-primitives";
-import type { CardSnapshot } from "../rpc-contract";
+import type { CardEvent, CardSnapshot } from "../rpc-contract";
 import type { PanelApi } from "./rpc";
 import {
   buildCardView,
   connectionFormState,
+  describeEventTone,
   describeLoadingElapsed,
+  formatEventTime,
   inferringDotState,
+  selectNotifiableEvents,
   type ConnectionDraft,
+  type EventTone,
   type InferringBadge,
   type LoadingElapsed,
   type PendingAction,
@@ -103,6 +110,49 @@ export function Card({ api, t }: CardProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
 
+  // ── 事件流：已见 id 去重 + Toast 队列 ──
+  // 已见事件 id 集合，初始为空。注意初始为空意味着首轮快照经 selectNotifiableEvents
+  // 会「全是新事件」，所以首轮必须静默吸收（不弹 Toast）：插件刚起时事件环里躺着的
+  // 是更早发生的历史，不是新闻，重放一遍只会白白打断用户。是否首轮由下面的 ref
+  // 标记，而不是拿集合是否为空判断——首轮快照恰好没事件时，之后到来的事件是真新闻，
+  // 不该被「空集首轮」的假设吞掉。
+  const seenEventIdsRef = useRef<Set<number>>(new Set());
+  const absorbedFirstSnapshotRef = useRef(false);
+  // Toast 队列：队首即当前正在展示的那条。Toast 是组件级原语——一次只能挂一个，
+  // hold+fade 结束后回调 onDone 由 owner 卸载；同一轮快照到来多条新事件时，多出的
+  // 在这里排队逐条消费。seq 是单调递增的「每次展示」序号：Toast 重显必须按 per-show
+  // sequence 重新挂载（见 primitives 的 Toast.d.ts），React 靠 key 变化才会卸旧挂新、
+  // 重启动画与它内部的 4s 计时器。
+  const toastSeqRef = useRef(0);
+  const [toastQueue, setToastQueue] = useState<readonly { seq: number; event: CardEvent }[]>([]);
+
+  /**
+   * 快照的唯一入口：轮询、start/stop 回传、saveConnection 回传三条到达路径都走这里，
+   * 事件去重与 Toast 入队也只在这一处做——哪条路径绕开它，哪轮的 id 就进不了已见
+   * 集合，下一轮会把旧事件当新闻重弹一遍。
+   */
+  const applySnapshot = (next: CardSnapshot) => {
+    setSnapshot(next);
+    setLoadError(null);
+    const notifiable = absorbedFirstSnapshotRef.current
+      ? selectNotifiableEvents(seenEventIdsRef.current, next)
+      : []; // 首轮：只吸收不弹，理由见 seenEventIdsRef 的注释
+    absorbedFirstSnapshotRef.current = true;
+    for (const item of next.events) seenEventIdsRef.current.add(item.id);
+    if (notifiable.length > 0) {
+      const tagged = notifiable.map((item) => ({ seq: ++toastSeqRef.current, event: item }));
+      setToastQueue((queue) => [...queue, ...tagged]);
+    }
+  };
+
+  // Toast 消费完一条就弹出下一条（或清空）。onDone 必须是稳定引用：Toast 内部把它
+  // 放进 useEffect 的依赖数组，若每次渲染都换新函数，2s 轮询带来的重渲染会不断
+  // 重置它 hold 3s + fade 1s 的计时器，Toast 永远等不到 onDone。空依赖 + 函数式
+  // setState 保证身份跨渲染不变。
+  const dismissToast = useCallback(() => {
+    setToastQueue((queue) => queue.slice(1));
+  }, []);
+
   // 默认展开：这张卡是实时状态而非配置表单，进设置页第一眼就该看到「现在跑的是谁」。
   // 折叠态不持久化——官方 PluginCard 同样是每次挂载都从头开始，跨会话记住反而意外。
   const [open, setOpen] = useState(true);
@@ -140,8 +190,7 @@ export function Card({ api, t }: CardProps) {
       try {
         const next = await apiRef.current.snapshot();
         if (cancelled) return;
-        setSnapshot(next);
-        setLoadError(null);
+        applySnapshot(next);
       } catch (error) {
         if (!cancelled) setLoadError(describeError(error));
       }
@@ -178,8 +227,7 @@ export function Card({ api, t }: CardProps) {
       : apiRef.current.stop(model, controller.signal);
     call
       .then((next) => {
-        setSnapshot(next);
-        setLoadError(null);
+        applySnapshot(next);
       })
       .catch((error: unknown) => {
         // 用户主动取消不是故障：不画红色横幅。host 侧对取消会回一份不带
@@ -220,6 +268,9 @@ export function Card({ api, t }: CardProps) {
 
   const view = buildCardView(snapshot, pending);
   const connForm = connectionFormState(snapshot.connection, draft);
+  // 队首即当前展示的 Toast；空队列 → null 卸载（早退分支不可能有 Toast：首轮
+  // 快照被静默吸收，队列只会在第一次 applySnapshot 之后才可能非空）。
+  const currentToast = toastQueue[0] ?? null;
 
   return (
     <div className={`llamapad-card${open ? " llamapad-cardOpen" : ""}`}>
@@ -354,7 +405,7 @@ export function Card({ api, t }: CardProps) {
                   setSavingConn(true);
                   apiRef.current.saveConnection(draft.panelUrl, draft.token)
                     .then((next) => {
-                      setSnapshot(next);
+                      applySnapshot(next);
                       setDraft((d) => ({ ...d, token: "" }));   // 存完就把密文草稿清掉
                       setConnSaved(true);
                     })
@@ -366,7 +417,38 @@ export function Card({ api, t }: CardProps) {
               </Button>
             </div>
           </div>
+
+          {/* 最近事件：事件环还是空数组时整节不渲染——不为一块永远空着的区域
+              留标题和分隔线。行按 tone 着色（describeEventTone），时间用方括号
+              短格式，排序信快照的升序契约。 */}
+          {snapshot.events.length > 0 ? (
+            <div className="llamapad-card__events">
+              <span className="llamapad-card__eventsTitle">{t("eventsTitle")}</span>
+              <ul className="llamapad-card__eventsList">
+                {snapshot.events.map((item) => (
+                  <li
+                    key={item.id}
+                    className={`llamapad-card__event${eventToneModifier(describeEventTone(item.kind))}`}
+                  >
+                    <span className="llamapad-card__eventTime">[{formatEventTime(item.ts, now)}]</span>
+                    <span className="llamapad-card__eventText">{item.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
+      ) : null}
+      {/* Toast 挂在卡片根节点内：组件级原语由 owner 自己挂/卸（它渲染时走 body
+          portal，视觉位置不受卡片折叠与层级影响）。文案直接用事件 message，
+          不经词典翻译（理由见 locale.ts zh.eventsTitle 的注释）。 */}
+      {currentToast !== null ? (
+        <Toast
+          key={currentToast.seq}
+          text={currentToast.event.message}
+          icon={toastIcon(currentToast.event.kind)}
+          onDone={dismissToast}
+        />
       ) : null}
     </div>
   );
@@ -391,6 +473,24 @@ function missingReasonKey(reason: "missing-file" | "missing-mmproj"): LocaleKey 
 
 function tokenHintKey(hint: TokenHint): LocaleKey {
   return hint === "keep" ? "connTokenKeep" : hint === "replace" ? "connTokenReplace" : "connTokenUnset";
+}
+
+/** tone → 事件行的 BEM 修饰类；neutral 落基类的 rowMeta 灰，不加修饰。 */
+function eventToneModifier(tone: EventTone): string {
+  if (tone === "error") return " llamapad-card__event--error";
+  if (tone === "success") return " llamapad-card__event--success";
+  return "";
+}
+
+/**
+ * Toast 的前缀图标：error 配警示三角、success 配对钩，neutral 不配——图标只在
+ * 「值得多看一眼」的信号上才有信息量，中性事件（如 model.stop）配图标只是噪音。
+ */
+function toastIcon(kind: string): ReactNode {
+  const tone = describeEventTone(kind);
+  if (tone === "error") return <IconWarningOutline16 />;
+  if (tone === "success") return <IconCheckOutline16 />;
+  return undefined;
 }
 
 function describeError(error: unknown): string {

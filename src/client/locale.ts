@@ -40,6 +40,10 @@ export const zh = {
   connSave: "保存",
   connSaving: "保存中…",
   connSaved: "已保存，正在用新配置重连",
+  // 事件流小节的标题。Toast 的文案**不走词典**：直接用事件自带的 message——
+  // 面板侧事件 message 本身就是中文人类可读文本（「模型 xxx 已启动」），逐 kind
+  // 翻译会随面板事件表无界膨胀，en 环境下宁可原样显示也不维护一份必然滞后的映射。
+  eventsTitle: "最近事件",
 } as const;
 
 export const en = {
@@ -77,4 +81,6 @@ export const en = {
   connSave: "Save",
   connSaving: "Saving…",
   connSaved: "Saved. Reconnecting with the new settings.",
+  // Toast text intentionally bypasses this dictionary; see the zh entry's comment.
+  eventsTitle: "Recent activity",
 } satisfies Record<LocaleKey, string>;

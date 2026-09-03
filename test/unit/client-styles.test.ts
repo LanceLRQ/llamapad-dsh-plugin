@@ -94,3 +94,23 @@ describe("CARD_CSS：折叠态与网格布局的关键规则", () => {
     expect(CARD_CSS).toContain(".llamapad-card__conn{");
   });
 });
+
+describe("CARD_CSS：事件流小节", () => {
+  it("事件小节有独立分隔线与纵向排布", () => {
+    expect(CARD_CSS).toContain(".llamapad-card__events{");
+    expect(CARD_CSS).toContain(".llamapad-card__eventsList{");
+  });
+
+  it("tone 着色复用既有状态色 token（error 同 actionError、success 同运行行描边）", () => {
+    expect(CARD_CSS).toContain(
+      ".llamapad-card__event--error{color:var(--dsw-alias-state-error-primary)}",
+    );
+    expect(CARD_CSS).toContain(
+      ".llamapad-card__event--success{color:var(--dsw-alias-state-success-primary)}",
+    );
+  });
+
+  it("事件时间为等宽数字，分钟跳动时不牵动整行换行", () => {
+    expect(CARD_CSS).toMatch(/\.llamapad-card__eventTime\{[^}]*font-variant-numeric:tabular-nums/);
+  });
+});

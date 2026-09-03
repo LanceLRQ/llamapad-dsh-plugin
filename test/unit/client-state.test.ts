@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   buildCardView,
   connectionFormState,
+  describeEventTone,
   describeInferring,
   describeLoadingElapsed,
+  formatEventTime,
   inferringDotState,
   rowActionFor,
+  selectNotifiableEvents,
 } from "../../src/client/state";
-import type { CardModel, CardSnapshot } from "../../src/rpc-contract";
+import type { CardEvent, CardModel, CardSnapshot } from "../../src/rpc-contract";
 
 function model(overrides: Partial<CardModel> = {}): CardModel {
   return {
@@ -18,6 +21,10 @@ function model(overrides: Partial<CardModel> = {}): CardModel {
     status: "ready",
     ...overrides,
   };
+}
+
+function event(overrides: Partial<CardEvent> = {}): CardEvent {
+  return { id: 1, ts: 1_000, kind: "model.start", message: "事件消息", ...overrides };
 }
 
 function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
@@ -32,7 +39,7 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     // 本文件测的是 buildCardView 等纯逻辑，不涉及连接配置区，占位即可
     // （任务 6 给 CardSnapshot 加了必填的 connection 字段，这里只是同步 fixture）。
     connection: { panelUrl: "http://panel.local", tokenConfigured: false },
-    // 事件流同上：必填字段的合法占位（卡片消费 events 是后续任务的活）
+    // 事件流的合法占位；涉及事件消费的用例各自覆盖
     events: [],
     ...overrides,
   };
@@ -266,5 +273,89 @@ describe("connectionFormState：连接表单的可保存判定", () => {
   it("草稿填了 token → 提示将被覆盖", () => {
     expect(connectionFormState(conn, { panelUrl: "http://p:8080", token: "x" }).tokenHint)
       .toBe("replace");
+  });
+});
+
+describe("describeEventTone：事件行的三档着色", () => {
+  it("四个失败/中断类 kind → error", () => {
+    expect(describeEventTone("model.exit")).toBe("error");
+    expect(describeEventTone("model.start_failed")).toBe("error");
+    expect(describeEventTone("download.failed")).toBe("error");
+    expect(describeEventTone("download.queue_stalled")).toBe("error");
+  });
+
+  it("两个完成类 kind → success", () => {
+    expect(describeEventTone("model.start")).toBe("success");
+    expect(describeEventTone("download.complete")).toBe("success");
+  });
+
+  it("其余一律 neutral——分级不是事件语义的完整复刻，未知 kind 不因认不得而失色", () => {
+    expect(describeEventTone("model.stop")).toBe("neutral");
+    expect(describeEventTone("model.restarted")).toBe("neutral");
+    expect(describeEventTone("download.started")).toBe("neutral");
+    expect(describeEventTone("auth.token_rejected")).toBe("neutral");
+    expect(describeEventTone("config.updated")).toBe("neutral");
+    expect(describeEventTone("")).toBe("neutral");
+    // 只差一个字符的近亲也不放宽：前缀相同不等于同一个 kind
+    expect(describeEventTone("model")).toBe("neutral");
+    expect(describeEventTone("model.exitx")).toBe("neutral");
+  });
+});
+
+describe("selectNotifiableEvents：值得打断用户（弹 Toast）的事件挑选", () => {
+  it("没见过的 model./download. 事件入选，见过的不再入选（同一事件只弹一次）", () => {
+    const snap = snapshot({
+      events: [event({ id: 1, kind: "model.start" }), event({ id: 2, kind: "download.complete" })],
+    });
+    expect(selectNotifiableEvents(new Set(), snap).map((e) => e.id)).toEqual([1, 2]);
+    // 下一轮快照带同样的 id：已被吸收，不再是新闻
+    expect(selectNotifiableEvents(new Set([1, 2]), snap)).toEqual([]);
+  });
+
+  it("auth./config. 等运维前缀即便也是新 id 也不入选——Toast 只弹用户关心的", () => {
+    const snap = snapshot({
+      events: [
+        event({ id: 1, kind: "auth.token_rejected" }),
+        event({ id: 2, kind: "config.updated" }),
+        event({ id: 3, kind: "model.exit" }),
+      ],
+    });
+    expect(selectNotifiableEvents(new Set(), snap).map((e) => e.id)).toEqual([3]);
+  });
+
+  it("返回按 ts 升序，即便快照里乱序——Toast 播放顺序须与真实发生顺序一致", () => {
+    const snap = snapshot({
+      events: [
+        event({ id: 3, ts: 3_000, kind: "download.complete" }),
+        event({ id: 1, ts: 1_000, kind: "model.start" }),
+        event({ id: 2, ts: 2_000, kind: "model.exit" }),
+      ],
+    });
+    expect(selectNotifiableEvents(new Set(), snap).map((e) => e.id)).toEqual([1, 2, 3]);
+  });
+
+  it("不改写传入的 prevIds（调用方拿它当跨轮次的已见集合，被改写会污染去重）", () => {
+    const seen = new Set<number>([1]);
+    selectNotifiableEvents(seen, snapshot({ events: [event({ id: 2 })] }));
+    expect(seen.has(2)).toBe(false);
+    expect(seen.size).toBe(1);
+  });
+});
+
+describe("formatEventTime：事件时间展示", () => {
+  // 用本地时区构造时间戳（new Date(年, 月, 日, 时, 分)），期望值也按本地时区写，
+  // 这样测试在任意时区的机器上都得到同一结论，不依赖跑测试的环境。
+  it("个位时/分补零成两位", () => {
+    const ts = new Date(2026, 8, 3, 9, 5).getTime();
+    expect(formatEventTime(ts, ts)).toBe("09:05");
+  });
+
+  it("24 小时制：午夜与最后一分钟", () => {
+    expect(formatEventTime(new Date(2026, 8, 3, 23, 59).getTime(), 0)).toBe("23:59");
+    expect(formatEventTime(new Date(2026, 8, 4, 0, 0).getTime(), 0)).toBe("00:00");
+  });
+
+  it("两位数字直通，不再加工", () => {
+    expect(formatEventTime(new Date(2026, 8, 3, 14, 37).getTime(), 0)).toBe("14:37");
   });
 });
