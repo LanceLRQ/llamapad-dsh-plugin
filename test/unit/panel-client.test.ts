@@ -198,6 +198,48 @@ describe("createPanelClient", () => {
     });
   });
 
+  describe("外部取消 signal（超时与取消的合并）", () => {
+    it("startModel 带 signal：fetch 收到合并 signal，外部 abort 后在途请求被取消", async () => {
+      const controller = new AbortController();
+      // 挂起型 fetch：只在收到的 signal abort 时才落牌，模拟服务端排空期间的在途等待
+      const fn = vi.fn((_url: any, init?: any) =>
+        new Promise<Response>((_, reject) => {
+          init.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }));
+      const client = createPanelClient({ ...base, fetch: fn as any });
+
+      const pending = client.startModel("a", { signal: controller.signal });
+      pending.catch(() => {}); // 断言前先挂上兜底，避免未处理拒绝噪声
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ code: "PANEL_UNREACHABLE" });
+      // 不是裸透传外部 signal——超时层仍然在（外层还有 AbortSignal.timeout 包着）
+      expect((fn.mock.calls[0]![1] as any).signal).not.toBe(controller.signal);
+    });
+
+    it("stopModel 带 signal：请求带上的合并 signal 跟随外部 signal abort", async () => {
+      const controller = new AbortController();
+      const { fn, calls } = fakeFetch([{ body: { ok: true } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+
+      await client.stopModel("a", { signal: controller.signal });
+
+      const signal = calls[0]!.init.signal as AbortSignal;
+      expect(signal).not.toBe(controller.signal);
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+    });
+
+    it("带 signal 时单请求超时仍然生效（合并不会吞掉 AbortSignal.timeout 那一层）", async () => {
+      const spy = vi.spyOn(AbortSignal, "timeout");
+      const { fn } = fakeFetch([{ body: { ok: true } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+      await client.stopModel("a", { signal: new AbortController().signal });
+      expect(spy).toHaveBeenCalledWith(5000);
+      spy.mockRestore();
+    });
+  });
+
   it("startModel 409 → RUNTIME_BUSY，透传面板 message", async () => {
     const { fn } = fakeFetch([{
       status: 409,

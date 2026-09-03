@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@deepseek-ai/cordis";
 import { PanelGateway, type PanelGatewayOptions } from "../../src/panel-gateway";
-import { RPC_CONTRIBUTION, RPC_NAMESPACE, RPC_WIRE_MODEL } from "../../src/rpc-contract";
+import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_WIRE_MODEL } from "../../src/rpc-contract";
 import { PanelError, type PanelClient, type PanelModelView } from "../../src/panel-client";
 import { EnsureError, type ModelGate } from "../../src/switching";
 
@@ -251,6 +251,30 @@ describe("PanelGateway", () => {
       expect(ensure).toHaveBeenCalledWith("a", { waitReady: false });
     });
 
+    it("末位 signal 透传给 gate.ensure 的 options（RPC 取消通道的 host 半身入口）", async () => {
+      const ensure = vi.fn(async () => {});
+      const { gateway } = makeGateway({ gate: fakeGate({ ensure }) });
+      const controller = new AbortController();
+
+      await gateway.start("a", controller.signal);
+
+      expect(ensure).toHaveBeenCalledWith("a", { waitReady: false, signal: controller.signal });
+    });
+
+    it("用户取消（signal.aborted）：返回不带 panelError 的快照——取消不是故障，不画红色横幅", async () => {
+      const controller = new AbortController();
+      const ensure = vi.fn(async () => {
+        controller.abort(); // 模拟在途等待被取消后 ensure 抛出
+        throw new EnsureError("等待 a 就绪时被取消", "ABORTED");
+      });
+      const { gateway } = makeGateway({ gate: fakeGate({ ensure }) });
+
+      const snapshot = await gateway.start("a", controller.signal);
+
+      expect(snapshot.panelError).toBeNull();
+      expect(snapshot.models).toHaveLength(1); // 快照本体照常组装
+    });
+
     it("gate.ensure 抛错：不外抛，走 panelError，其余字段尽量填", async () => {
       const ensure = vi.fn(async () => { throw new EnsureError("模型不存在: x", "MODEL_NOT_FOUND"); });
       const { gateway } = makeGateway({ gate: fakeGate({ ensure }) });
@@ -317,6 +341,30 @@ describe("PanelGateway", () => {
       await expect(gateway.stop("")).rejects.toThrow();
     });
 
+    it("末位 signal 透传给 client.stopModel 的 options", async () => {
+      const stopModel = vi.fn(async () => ({ ok: true as const }));
+      const { gateway } = makeGateway({ client: fakeClient({ stopModel }) });
+      const controller = new AbortController();
+
+      await gateway.stop("a", controller.signal);
+
+      expect(stopModel).toHaveBeenCalledWith("a", { signal: controller.signal });
+    });
+
+    it("用户取消（signal.aborted）：返回不带 panelError 的快照（与 start 同一条取消语义）", async () => {
+      const controller = new AbortController();
+      const stopModel = vi.fn(async () => {
+        controller.abort();
+        throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE");
+      });
+      const { gateway } = makeGateway({ client: fakeClient({ stopModel }) });
+
+      const snapshot = await gateway.stop("a", controller.signal);
+
+      expect(snapshot.panelError).toBeNull();
+      expect(snapshot.models).toHaveLength(1);
+    });
+
     it("stopModel 抛 RUNTIME_BUSY：panelError 直出面板原文，不套「面板请求失败」的壳", async () => {
       const { gateway } = makeGateway({
         client: fakeClient({
@@ -363,6 +411,14 @@ describe("PanelGateway", () => {
     it("snapshot 没有参数", () => {
       const snapshot = RPC_CONTRIBUTION.descriptors.find((d) => d.method === "snapshot");
       expect(snapshot?.parameters).toEqual([]);
+    });
+
+    it("start/stop 描述符声明 cancellation（浏览器侧以末位可选 signal 形参暴露），snapshot/saveConnection 不带", () => {
+      const byMethod = new Map(RPC_CONTRIBUTION.descriptors.map((d) => [d.method, d]));
+      expect(byMethod.get(RPC_METHOD.start)?.cancellation).toEqual({ parameter: "signal" });
+      expect(byMethod.get(RPC_METHOD.stop)?.cancellation).toEqual({ parameter: "signal" });
+      expect(byMethod.get(RPC_METHOD.snapshot)?.cancellation).toBeUndefined();
+      expect(byMethod.get(RPC_METHOD.saveConnection)?.cancellation).toBeUndefined();
     });
   });
 

@@ -185,7 +185,14 @@ const SNAPSHOT_CODEC = strict<CardSnapshot>(`${RPC_PACKAGE}#CardSnapshot`, parse
 const MODEL_NAME_CODEC = strict<string>(`${RPC_PACKAGE}#ModelName`, (value) =>
   asString(value, RPC_WIRE_MODEL));
 
-/** 一条 InvocationDescriptor 的最小形状（dsh 的类型更宽，这里只用到这些字段）。 */
+/**
+ * 一条 InvocationDescriptor 的最小形状（dsh 的类型更宽，这里只用到这些字段）。
+ *
+ * cancellation：声明「传输层取消通道」（见 dsh-typert-protocol 的 types.d.ts）——
+ * signal 不进 wire 参数，浏览器侧生成方法以**末位可选形参 `signal?: AbortSignal`**
+ * 暴露，由网关注入到 host 方法业务形参之后。只有可能长时间在途的方法（start/stop
+ * 的排空等待最长 60s+）才声明；snapshot/saveConnection 一问一答，不需要。
+ */
 interface Descriptor {
   readonly id: string;
   readonly service: string;
@@ -198,10 +205,15 @@ interface Descriptor {
     readonly source: "json";
     readonly codec: StrictCodec<unknown>;
   }[];
+  readonly cancellation?: { readonly parameter: "signal" };
   readonly result: StrictCodec<unknown>;
 }
 
-function descriptor(method: string, parameters: Descriptor["parameters"]): Descriptor {
+function descriptor(
+  method: string,
+  parameters: Descriptor["parameters"],
+  cancellation?: Descriptor["cancellation"],
+): Descriptor {
   return {
     id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/${method}`,
     service: RPC_NAMESPACE,
@@ -209,6 +221,8 @@ function descriptor(method: string, parameters: Descriptor["parameters"]): Descr
     method,
     invocation: { kind: "direct" },
     parameters,
+    // 不声明取消通道的方法不带这个字段（而不是传 undefined 撑开对象）
+    ...(cancellation !== undefined ? { cancellation } : {}),
     result: SNAPSHOT_CODEC,
   };
 }
@@ -234,18 +248,23 @@ const TOKEN_PARAM = {
   codec: strict<string>(`${RPC_PACKAGE}#Token`, (value) => asString(value, RPC_WIRE_TOKEN)),
 } as const;
 
+/** start/stop 共用的取消通道声明（见 Descriptor.cancellation 注释）。 */
+const SIGNAL_CANCELLATION = { parameter: "signal" } as const;
+
 /**
  * 浏览器侧 `ctx.remote.$mount()` 的入参。
  *
  * 四个方法都以 CardSnapshot 作为返回值——动作做完顺带回传最新状态，
  * 省掉「点完按钮再多打一次 snapshot」的往返，也避免中间态闪烁。
+ * start/stop 额外声明 cancellation：生成方法暴露为 `start(model, signal?)`，
+ * 供卡片把「取消等待」手势传到 host（见 Descriptor.cancellation 注释）。
  */
 export const RPC_CONTRIBUTION = {
   package: RPC_PACKAGE,
   descriptors: [
     descriptor(RPC_METHOD.snapshot, []),
-    descriptor(RPC_METHOD.start, [MODEL_PARAM]),
-    descriptor(RPC_METHOD.stop, [MODEL_PARAM]),
+    descriptor(RPC_METHOD.start, [MODEL_PARAM], SIGNAL_CANCELLATION),
+    descriptor(RPC_METHOD.stop, [MODEL_PARAM], SIGNAL_CANCELLATION),
     descriptor(RPC_METHOD.saveConnection, [PANEL_URL_PARAM, TOKEN_PARAM]),
   ],
 } as const;

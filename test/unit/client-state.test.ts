@@ -89,16 +89,23 @@ describe("rowActionFor", () => {
     expect(action).toEqual({ kind: "start", disabled: true, missingReason: "missing-mmproj", pending: false });
   });
 
-  it("本行有动作在途 → 禁用且 pending=true", () => {
+  it("本行有动作在途 → 可点（按钮此时承担「取消等待」语义）且 pending=true", () => {
     const m = model({ name: "a", status: "ready" });
     const action = rowActionFor(m, { model: "a", kind: "start" });
-    expect(action).toEqual({ kind: "start", disabled: true, missingReason: null, pending: true });
+    expect(action).toEqual({ kind: "start", disabled: false, missingReason: null, pending: true });
   });
 
-  it("别的行有动作在途 → 本行也禁用（避免同一面板互相插队），但 pending=false", () => {
+  it("别的行有动作在途 → 本行仍禁用（避免同一面板互相插队），但 pending=false", () => {
     const m = model({ name: "b", status: "ready" });
     const action = rowActionFor(m, { model: "a", kind: "start" });
     expect(action).toEqual({ kind: "start", disabled: true, missingReason: null, pending: false });
+  });
+
+  it("在途行自己也缺文件时仍禁用（missingReason 优先于取消语义）", () => {
+    const m = model({ name: "a", status: "missing-file" });
+    const action = rowActionFor(m, { model: "a", kind: "start" });
+    expect(action.disabled).toBe(true);
+    expect(action.pending).toBe(true);
   });
 
   it("动作在途时按钮语义取用户发起的动作，不随 model.status 翻转", () => {

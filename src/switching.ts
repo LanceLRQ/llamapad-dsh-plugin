@@ -5,7 +5,8 @@ import type { PanelClient } from "./panel-client";
  * - llamapad 是单模型运行时：start 自带停旧起新，这里不感知旧模型
  * - 同目标并发 ensure 合流到进行中的那一次（两把请求只触发一次 start）
  * - 前序失败不阻断后续排队者（tail 永远吞错续链）
- * - abort 只取消「等待就绪」，已发出的 start 不撤回（服务端语义如此，见调研文档）
+ * - abort 取消「等待就绪」与在途的 start POST（客户端 fetch 层面掐断等待）；
+ *   服务端若已收下 start 则不撤回（服务端语义如此，见调研文档）
  */
 
 export type EnsureErrorCode =
@@ -62,15 +63,24 @@ export function createModelGate(client: PanelClient): ModelGate {
   async function ensureOnce(model: string, options: EnsureOptions): Promise<void> {
     const status = await client.runtimeStatus();
     if (status.running?.model === model) return;
-    const drainOptions = options.drain !== undefined || options.drainTimeoutMs !== undefined
+    // signal 并进 startModel 的 options：取消手势要能掐断在途 POST 本身（排空等待
+    // 最长 60s+），而不只是后面的就绪轮询——否则「取消」之后还得干等请求自己回来。
+    // 与 drain 字段同住一个对象：两者都缺席时保持第二参数 undefined（向后兼容）。
+    const hasDrainFields = options.drain !== undefined || options.drainTimeoutMs !== undefined;
+    const startOptions = hasDrainFields || options.signal !== undefined
       ? {
           ...(options.drain !== undefined ? { drain: options.drain } : {}),
           ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+          ...(options.signal !== undefined ? { signal: options.signal } : {}),
         }
       : undefined;
     try {
-      await client.startModel(model, drainOptions);
+      await client.startModel(model, startOptions);
     } catch (error) {
+      // 在途 POST 被外部 signal 掐断时，request() 已把 AbortError 折成
+      // PANEL_UNREACHABLE——但面板并没有不可达，是调用方主动放弃，必须还原成
+      // ABORTED，否则聊天路径会把「用户取消」当「面板挂了」处理。
+      if (options.signal?.aborted) throw new EnsureError(`启动 ${model} 时被取消`, "ABORTED");
       const code = (error as { code?: string }).code;
       if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
         || code === "RUNTIME_BUSY" || code === "START_REJECTED") {

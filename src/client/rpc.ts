@@ -14,19 +14,23 @@ type RemoteResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: RemoteFailure };
 
-/** ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的四个方法一一对应。 */
+/**
+ * ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的四个方法一一对应。
+ * start/stop 的末位可选 signal 对应描述符的 cancellation 声明：signal 不进 wire
+ * 参数，由传输层截走，一路送到 host 侧 gateway 的末位形参（见 rpc-contract.ts）。
+ */
 export interface PanelRemoteNamespace {
   snapshot(): Promise<RemoteResult<CardSnapshot>>;
-  start(model: string): Promise<RemoteResult<CardSnapshot>>;
-  stop(model: string): Promise<RemoteResult<CardSnapshot>>;
+  start(model: string, signal?: AbortSignal): Promise<RemoteResult<CardSnapshot>>;
+  stop(model: string, signal?: AbortSignal): Promise<RemoteResult<CardSnapshot>>;
   saveConnection(panelUrl: string, token: string): Promise<RemoteResult<CardSnapshot>>;
 }
 
 /** 卡片真正调用的接口：拆完外壳、失败已经是 Error，调用方只需要 try/catch。 */
 export interface PanelApi {
   snapshot(): Promise<CardSnapshot>;
-  start(model: string): Promise<CardSnapshot>;
-  stop(model: string): Promise<CardSnapshot>;
+  start(model: string, signal?: AbortSignal): Promise<CardSnapshot>;
+  stop(model: string, signal?: AbortSignal): Promise<CardSnapshot>;
   saveConnection(panelUrl: string, token: string): Promise<CardSnapshot>;
 }
 
@@ -41,8 +45,9 @@ async function unwrap<T>(result: Promise<RemoteResult<T>>, label: string): Promi
 export function createPanelApi(namespace: PanelRemoteNamespace): PanelApi {
   return {
     snapshot: () => unwrap(namespace.snapshot(), "snapshot"),
-    start: (model) => unwrap(namespace.start(model), "start"),
-    stop: (model) => unwrap(namespace.stop(model), "stop"),
+    // signal 两位恒传（缺席为 undefined）：namespace 调用形状不随参数有无变化
+    start: (model, signal) => unwrap(namespace.start(model, signal), "start"),
+    stop: (model, signal) => unwrap(namespace.stop(model, signal), "stop"),
     saveConnection: (panelUrl, token) =>
       unwrap(namespace.saveConnection(panelUrl, token), "saveConnection"),
   };

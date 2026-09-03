@@ -80,8 +80,12 @@ export class PanelGateway extends TypertRemoteService {
    * receiver[descriptor.method](...) 直接取属性调用的，对不上是运行期 500。
    * 形参名反而不重要：wire 字段名由描述符的 parameters[].wire 写死，不再经宿主
    * 的 SRC 形参名推导（那条路对第三方插件走不通，见 index.ts 里 typert 注册的注释）。
+   *
+   * 末位 signal 是描述符 cancellation 声明出来的传输层取消通道（不进 wire 参数，
+   * 由网关注入到业务形参之后）：浏览器侧暴露为 start(model, signal?)，一路传给
+   * gate.ensure，用来掐断可能长达 60s+ 的排空等待。
    */
-  async start(model: string): Promise<CardSnapshot> {
+  async start(model: string, signal?: AbortSignal): Promise<CardSnapshot> {
     if (!model) throw new TypeError("llamapad 设置卡片: model 不能为空");
     try {
       await this.options.gate.ensure(model, {
@@ -90,19 +94,28 @@ export class PanelGateway extends TypertRemoteService {
         // 0ms 预算会被聊天路径等其他等待者继承而立刻 START_TIMEOUT。
         waitReady: false,
         ...this.drainOptions(),
+        ...(signal !== undefined ? { signal } : {}),
       });
     } catch (error) {
+      // 用户取消不是故障：不塞 panelError（那会画红色横幅），只回一份最新快照，
+      // 让卡片安静地回到当前状态。判定依据是 signal 自身而非错误类型——abort 在
+      // panel-client 里已被折成 PANEL_UNREACHABLE，靠错误分不出「取消」和「真挂」。
+      if (signal?.aborted === true) return this.buildSnapshot();
       return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
     }
     return this.buildSnapshot();
   }
 
-  /** 方法名须与描述符的 method 一致，理由同 start()。 */
-  async stop(model: string): Promise<CardSnapshot> {
+  /** 方法名须与描述符的 method 一致，理由同 start()；末位 signal 语义亦同。 */
+  async stop(model: string, signal?: AbortSignal): Promise<CardSnapshot> {
     if (!model) throw new TypeError("llamapad 设置卡片: model 不能为空");
     try {
-      await this.options.client.stopModel(model, this.drainOptions());
+      await this.options.client.stopModel(model, {
+        ...this.drainOptions(),
+        ...(signal !== undefined ? { signal } : {}),
+      });
     } catch (error) {
+      if (signal?.aborted === true) return this.buildSnapshot();
       return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
     }
     return this.buildSnapshot();

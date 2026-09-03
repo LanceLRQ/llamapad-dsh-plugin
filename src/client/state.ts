@@ -72,14 +72,17 @@ export interface RowAction {
   readonly kind: "start" | "stop";
   readonly disabled: boolean;
   readonly missingReason: "missing-file" | "missing-mmproj" | null;
+  /** true = 本行动作在途：Card.tsx 会把这一行的按钮换成「取消等待」语义 */
   readonly pending: boolean;
 }
 
 /**
  * 推导一行模型的操作按钮状态。
  *
- * 只要有任意一个动作在途（不论作用于哪个模型），全部行都禁用——面板同一时刻只运行
- * 一个模型，允许在途动作时继续点别的行等于给同一面板发互相插队的启停请求。
+ * 有动作在途时：**在途行可点**——按钮此时承担「取消等待」的语义（Card.tsx 拿
+ * AbortController 截断在途请求），其余行仍禁用——面板同一时刻只运行一个模型，
+ * 允许在途动作时继续点别的行等于给同一面板发互相插队的启停请求。缺文件的行
+ * 永远禁用，即便它恰好是在途行（那种组合本身就是异常态，取消入口不值得为它开口子）。
  */
 export function rowActionFor(model: CardModel, pending: PendingAction | null): RowAction {
   const missingReason = missingReasonOf(model.status);
@@ -92,7 +95,7 @@ export function rowActionFor(model: CardModel, pending: PendingAction | null): R
     : model.status === "running"
       ? "stop"
       : "start";
-  const disabled = missingReason !== null || pending !== null;
+  const disabled = missingReason !== null || (pending !== null && !isPendingRow);
   return { kind, disabled, missingReason, pending: isPendingRow };
 }
 

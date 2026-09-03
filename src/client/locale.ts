@@ -24,8 +24,8 @@ export const zh = {
   inferringUnknown: "推理状态未知",
   start: "启动",
   stop: "停止",
-  startPending: "启动中…",
-  stopPending: "停止中…",
+  // 在途动作行的按钮文案：点击是取消在途等待（含 60s+ 的排空），不是再发一次动作
+  cancelAction: "取消等待",
   stopPendingHint: "停止前会等待在途请求处理完毕，最长约 60 秒。",
   missingFile: "模型文件缺失",
   missingMmproj: "mmproj 文件缺失",
@@ -61,8 +61,8 @@ export const en = {
   inferringUnknown: "Inference state unknown",
   start: "Start",
   stop: "Stop",
-  startPending: "Starting…",
-  stopPending: "Stopping…",
+  // In-flight action row button: clicking cancels the pending wait (incl. 60s+ drain)
+  cancelAction: "Cancel",
   stopPendingHint: "Waiting for in-flight requests to drain before stopping (up to ~60s).",
   missingFile: "Model file missing",
   missingMmproj: "mmproj file missing",

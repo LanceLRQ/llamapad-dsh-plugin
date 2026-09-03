@@ -131,6 +131,8 @@ export function Card({ api, t }: CardProps) {
   // 不能让这个 effect 因为快照内容变化而频繁重建。
   const apiRef = useRef(api);
   apiRef.current = api;
+  // 在途动作的取消控制器：runAction 里创建、动作收尾时清空（见 runAction 注释）
+  const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     if (!open) return;            // 折起来就不打面板了
     let cancelled = false;
@@ -164,16 +166,32 @@ export function Card({ api, t }: CardProps) {
   }, [isStarting, open]);
 
   const runAction = (model: string, kind: "start" | "stop") => {
+    // 每个动作配一个 AbortController 存 ref：在途行的按钮换成「取消等待」语义，
+    // 点击只 abort、不重发动作。pending 与 abortRef 同生共死（finally 里一起清），
+    // 其它行在有动作在途时本来就被禁用，所以任意时刻至多一个在途控制器。
+    const controller = new AbortController();
+    abortRef.current = controller;
     setPending({ model, kind });
     setActionError(null);
-    const call = kind === "start" ? apiRef.current.start(model) : apiRef.current.stop(model);
+    const call = kind === "start"
+      ? apiRef.current.start(model, controller.signal)
+      : apiRef.current.stop(model, controller.signal);
     call
       .then((next) => {
         setSnapshot(next);
         setLoadError(null);
       })
-      .catch((error: unknown) => setActionError(describeError(error)))
-      .finally(() => setPending(null));
+      .catch((error: unknown) => {
+        // 用户主动取消不是故障：不画红色横幅。host 侧对取消会回一份不带
+        // panelError 的快照，但传输层也可能先一步以错误收场——统一按 signal
+        // 状态判定，快照交给既有轮询自然追平。
+        if (controller.signal.aborted) return;
+        setActionError(describeError(error));
+      })
+      .finally(() => {
+        if (abortRef.current === controller) abortRef.current = null;
+        setPending(null);
+      });
   };
 
   if (snapshot === null) {
@@ -282,9 +300,12 @@ export function Card({ api, t }: CardProps) {
                   size="sm"
                   icon={action.kind === "stop" ? <IconStopFill16 /> : <IconPlayOutline16 />}
                   disabled={action.disabled}
-                  onClick={() => runAction(model.name, action.kind)}
+                  onClick={() =>
+                    // 在途行的按钮承担「取消等待」：只 abort 在途请求，不重发动作
+                    action.pending ? abortRef.current?.abort() : runAction(model.name, action.kind)
+                  }
                 >
-                  {action.pending ? t(pendingLabelKey(action.kind)) : t(action.kind === "stop" ? "stop" : "start")}
+                  {action.pending ? t("cancelAction") : t(action.kind === "stop" ? "stop" : "start")}
                 </Button>
               </li>
             ))}
@@ -362,10 +383,6 @@ function inferringLabelKey(badge: InferringBadge): LocaleKey {
   if (badge === "inferring") return "inferring";
   if (badge === "idle") return "idle";
   return "inferringUnknown";
-}
-
-function pendingLabelKey(kind: "start" | "stop"): LocaleKey {
-  return kind === "start" ? "startPending" : "stopPending";
 }
 
 function missingReasonKey(reason: "missing-file" | "missing-mmproj"): LocaleKey {

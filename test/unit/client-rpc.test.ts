@@ -55,13 +55,30 @@ describe("createPanelApi", () => {
     const start = vi.fn(async (model: string) => ({ ok: true as const, value: { ...value, running: model } }));
     const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn() });
     await expect(api.start("m1")).resolves.toEqual({ ...value, running: "m1" });
-    expect(start).toHaveBeenCalledWith("m1");
+    // signal 形参缺席时也按两位传（undefined 占位），保持 namespace 调用形状稳定
+    expect(start).toHaveBeenCalledWith("m1", undefined);
   });
 
   it("stop 失败 → 抛出 Error 且不吞掉底层 message", async () => {
     const stop = vi.fn(async () => ({ ok: false as const, error: { code: "DRAIN_TIMEOUT", message: "排空超时" } }));
     const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn() });
     await expect(api.stop("m1")).rejects.toThrow(/DRAIN_TIMEOUT/);
-    expect(stop).toHaveBeenCalledWith("m1");
+    expect(stop).toHaveBeenCalledWith("m1", undefined);
+  });
+
+  it("start 的 signal 形参透传（取消手势要一路带到 host）", async () => {
+    const start = vi.fn(async () => ({ ok: true as const, value: fakeSnapshot() }));
+    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn() });
+    const controller = new AbortController();
+    await api.start("m1", controller.signal);
+    expect(start).toHaveBeenCalledWith("m1", controller.signal);
+  });
+
+  it("stop 的 signal 形参透传", async () => {
+    const stop = vi.fn(async () => ({ ok: true as const, value: fakeSnapshot() }));
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn() });
+    const controller = new AbortController();
+    await api.stop("m1", controller.signal);
+    expect(stop).toHaveBeenCalledWith("m1", controller.signal);
   });
 });

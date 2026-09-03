@@ -101,6 +101,39 @@ describe("createModelGate", () => {
     expect(startModel).toHaveBeenCalledWith("a", undefined);
   });
 
+  it("signal 透传：ensureOnce 把 signal 并进 startModel 的 options（取消不再只作用于就绪等待）", async () => {
+    const client = fakeClient();
+    const controller = new AbortController();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a", { signal: controller.signal, waitReady: false });
+    expect(startModel).toHaveBeenCalledWith("a", { signal: controller.signal });
+  });
+
+  it("signal 与排空参数并存时一起进 startModel 的 options", async () => {
+    const client = fakeClient();
+    const controller = new AbortController();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a", {
+      signal: controller.signal, drain: true, drainTimeoutMs: 60000, waitReady: false,
+    });
+    expect(startModel).toHaveBeenCalledWith("a", { drain: true, drainTimeoutMs: 60000, signal: controller.signal });
+  });
+
+  it("startModel 在途时外部 abort：折成 ABORTED 而不是 PANEL_UNREACHABLE（面板没挂，是调用方放弃）", async () => {
+    const client = fakeClient();
+    const controller = new AbortController();
+    (client as any).startModel = async () => {
+      controller.abort(); // 模拟 fetch 被取消后 request() 折出的 PANEL_UNREACHABLE
+      throw Object.assign(new Error("llamapad 面板不可达: http://panel"), { code: "PANEL_UNREACHABLE" });
+    };
+    const gate = createModelGate(client);
+    await expect(
+      gate.ensure("a", { signal: controller.signal, waitReady: false }),
+    ).rejects.toMatchObject({ code: "ABORTED" });
+  });
+
   it("waitReady:false：start 发出即返回，不做就绪轮询", async () => {
     const client = fakeClient(); client.setHealthy(false);
     const health = vi.spyOn(client, "llamaHealth");

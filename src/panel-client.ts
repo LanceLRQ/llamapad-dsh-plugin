@@ -72,12 +72,19 @@ export const DEFAULT_DRAIN_TIMEOUT_MS = 60_000;
 export interface StartModelOptions {
   drain?: boolean;
   drainTimeoutMs?: number;
+  /**
+   * 调用方取消手势（浏览器侧「取消等待」按钮一路传来）。与单请求超时合并后交给
+   * fetch——排空等待最长 60s+，没有它用户只能干等。不进请求体，纯属客户端行为。
+   */
+  signal?: AbortSignal;
 }
 
 /** POST .../stop 的可选排空参数，形状与 StartModelOptions 一致（服务端契约同构） */
 export interface StopModelOptions {
   drain?: boolean;
   drainTimeoutMs?: number;
+  /** 语义同 StartModelOptions.signal：取消在途的排空等待，不进请求体 */
+  signal?: AbortSignal;
 }
 
 export interface StopModelResult {
@@ -134,7 +141,25 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
   const base = options.baseUrl.replace(/\/+$/, "");
   const timeoutMs = options.requestTimeoutMs ?? 30_000;
 
-  async function request(path: string, init: RequestInit = {}, timeoutOverrideMs?: number): Promise<Response> {
+  /**
+   * 统一的单请求入口：超时（必有一层 AbortSignal.timeout）与外部取消 signal
+   * （可选）在这里合并成一个 fetch signal。
+   *
+   * 合并策略：有外部 signal 且运行时支持 AbortSignal.any 时，用 any([timeout,
+   * external]) 合成——任一触发即取消，超时兜底语义不被外部 signal 顶掉（反之亦然）；
+   * AbortSignal.any 缺席（老 Node/老浏览器）时降级为只用超时 signal——取消手势丢失
+   * 但行为不炸，比「为保取消而丢掉超时」安全：超时是防挂死的底线，取消只是体验增强。
+   */
+  async function request(
+    path: string,
+    init: RequestInit = {},
+    timeoutOverrideMs?: number,
+    externalSignal?: AbortSignal,
+  ): Promise<Response> {
+    const timeoutSignal = AbortSignal.timeout(timeoutOverrideMs ?? timeoutMs);
+    const signal = externalSignal !== undefined && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([timeoutSignal, externalSignal])
+      : timeoutSignal;
     try {
       return await doFetch(`${base}${path}`, {
         ...init,
@@ -143,7 +168,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
           ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
           ...(init.headers as Record<string, string> | undefined),
         },
-        signal: AbortSignal.timeout(timeoutOverrideMs ?? timeoutMs),
+        signal,
       });
     } catch {
       throw new PanelError(`llamapad 面板不可达: ${base}`, "PANEL_UNREACHABLE");
@@ -217,6 +242,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         `/api/v1/models/${encodeURIComponent(name)}/start`,
         { method: "POST", ...(body !== undefined ? { body } : {}) },
         timeoutOverride,
+        startOptions?.signal,
       );
       if (res.ok) return;
       throw await startStopError(res, name, "启动");
@@ -227,6 +253,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         `/api/v1/models/${encodeURIComponent(name)}/stop`,
         { method: "POST", ...(body !== undefined ? { body } : {}) },
         timeoutOverride,
+        stopOptions?.signal,
       );
       if (res.ok) return (await res.json()) as StopModelResult;
       throw await startStopError(res, name, "停止");
