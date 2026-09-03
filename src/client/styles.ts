@@ -80,3 +80,47 @@ export function injectCardStyles(): void {
   tag.textContent = CARD_CSS;
   document.head.appendChild(tag);
 }
+
+/* ------------------------------------------------------------------ *
+ * 监控页（settings.section 整页）
+ *
+ * 与卡片样式分两个标签注入而不是并进 CARD_CSS：监控页与设置卡片是两个独立的
+ * slot 注册（settings.section / settings.plugin.item），宿主可能只挂其中之一——
+ * 并在一起会让只开卡片的那页也白背一份监控 CSS；判重也各管各的，谁先挂谁先注。
+ * token 用法对齐既有体系：横幅同 __banner 的 error 配色，数值 tabular-nums 防轮询
+ * 抖动；曲线 svg（__spark）块级铺满卡宽，viewBox 均匀缩放（高度按比例跟缩，末点
+ * 圆不变形）。三卡两列网格与卡片的 __list 同构，断点放宽到 720px——整页栏宽比
+ * 卡片列表宽，两列曲线更容易先挤。
+ * ------------------------------------------------------------------ */
+export const MONITOR_STYLE_TAG_ID = "llamapad-dsh-plugin/monitor.css";
+
+export const MONITOR_CSS = `
+.llamapad-monitor{display:flex;flex-direction:column;gap:14px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
+.llamapad-monitor__header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.llamapad-monitor__title{margin:0;font-size:16px;font-weight:600;line-height:1.4}
+.llamapad-monitor__ranges{display:flex;gap:6px;margin-left:auto}
+.llamapad-monitor__banner{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-radius:8px;padding:8px 10px}
+.llamapad-monitor__grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.llamapad-monitor__card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.llamapad-monitor__cardTitle{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600}
+.llamapad-monitor__metric{display:flex;flex-direction:column;gap:4px}
+.llamapad-monitor__metricHead{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.llamapad-monitor__metricLabel{color:var(--dsw-alias-label-secondary);font-size:12px}
+.llamapad-monitor__metricValue{font-variant-numeric:tabular-nums;font-weight:500}
+.llamapad-monitor__spark{display:block;width:100%;height:auto}
+.llamapad-monitor__gpuRows{display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:10px}
+.llamapad-monitor__gpuRow{color:var(--dsw-alias-label-tertiary);font-size:12px;font-variant-numeric:tabular-nums}
+.llamapad-monitor__hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
+@media (max-width:720px){.llamapad-monitor__grid{grid-template-columns:1fr}}
+`;
+
+/** 注入模式与 injectCardStyles 一模一样（判重标签不同），理由见其上方注释。 */
+export function injectMonitorStyles(): void {
+  if (typeof document === "undefined") return;
+  if (document.querySelector(`style[data-plugin-css=${JSON.stringify(MONITOR_STYLE_TAG_ID)}]`) !== null) return;
+  const tag = document.createElement("style");
+  tag.dataset["plugin"] = "llamapad-dsh-plugin";
+  tag.dataset["pluginCss"] = MONITOR_STYLE_TAG_ID;
+  tag.textContent = MONITOR_CSS;
+  document.head.appendChild(tag);
+}

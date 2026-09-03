@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPanelApi, type PanelRemoteNamespace } from "../../src/client/rpc";
-import type { CardSnapshot } from "../../src/rpc-contract";
+import type { CardSnapshot, MonitorSnapshot } from "../../src/rpc-contract";
+
+function fakeMonitorSnapshot(overrides: Partial<MonitorSnapshot> = {}): MonitorSnapshot {
+  return {
+    series: {},
+    gpu: null,
+    mode: "full",
+    serverTs: 1_000,
+    panelError: null,
+    ...overrides,
+  };
+}
 
 function fakeSnapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
   return {
@@ -35,6 +46,7 @@ describe("createPanelApi", () => {
       start: vi.fn(),
       stop: vi.fn(),
       saveConnection: vi.fn(),
+      monitor: vi.fn(),
     };
     const api = createPanelApi(namespace);
     await expect(api.snapshot()).resolves.toEqual(value);
@@ -46,6 +58,7 @@ describe("createPanelApi", () => {
       start: vi.fn(),
       stop: vi.fn(),
       saveConnection: vi.fn(),
+      monitor: vi.fn(),
     };
     const api = createPanelApi(namespace);
     await expect(api.snapshot()).rejects.toThrow(/PANEL_UNREACHABLE/);
@@ -55,7 +68,7 @@ describe("createPanelApi", () => {
   it("start 成功 → 透传形参并返回新 snapshot", async () => {
     const value = fakeSnapshot({ running: "m1" });
     const start = vi.fn(async (model: string) => ({ ok: true as const, value: { ...value, running: model } }));
-    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn() });
+    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn(), monitor: vi.fn() });
     await expect(api.start("m1")).resolves.toEqual({ ...value, running: "m1" });
     // signal 形参缺席时也按两位传（undefined 占位），保持 namespace 调用形状稳定
     expect(start).toHaveBeenCalledWith("m1", undefined);
@@ -63,14 +76,14 @@ describe("createPanelApi", () => {
 
   it("stop 失败 → 抛出 Error 且不吞掉底层 message", async () => {
     const stop = vi.fn(async () => ({ ok: false as const, error: { code: "DRAIN_TIMEOUT", message: "排空超时" } }));
-    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn() });
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn(), monitor: vi.fn() });
     await expect(api.stop("m1")).rejects.toThrow(/DRAIN_TIMEOUT/);
     expect(stop).toHaveBeenCalledWith("m1", undefined);
   });
 
   it("start 的 signal 形参透传（取消手势要一路带到 host）", async () => {
     const start = vi.fn(async () => ({ ok: true as const, value: fakeSnapshot() }));
-    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn() });
+    const api = createPanelApi({ snapshot: vi.fn(), start, stop: vi.fn(), saveConnection: vi.fn(), monitor: vi.fn() });
     const controller = new AbortController();
     await api.start("m1", controller.signal);
     expect(start).toHaveBeenCalledWith("m1", controller.signal);
@@ -78,9 +91,32 @@ describe("createPanelApi", () => {
 
   it("stop 的 signal 形参透传", async () => {
     const stop = vi.fn(async () => ({ ok: true as const, value: fakeSnapshot() }));
-    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn() });
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop, saveConnection: vi.fn(), monitor: vi.fn() });
     const controller = new AbortController();
     await api.stop("m1", controller.signal);
     expect(stop).toHaveBeenCalledWith("m1", controller.signal);
+  });
+
+  it("monitor 成功 → 透传 range/since/signal 并返回 MonitorSnapshot", async () => {
+    const value = fakeMonitorSnapshot({ mode: "delta" });
+    const monitor = vi.fn(async () => ({ ok: true as const, value }));
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop: vi.fn(), saveConnection: vi.fn(), monitor });
+    const controller = new AbortController();
+    await expect(api.monitor("30m", 12_345, controller.signal)).resolves.toEqual(value);
+    expect(monitor).toHaveBeenCalledWith("30m", 12_345, controller.signal);
+  });
+
+  it("monitor 的 since/signal 缺席时按三位传 undefined（首帧全量语义，调用形状稳定）", async () => {
+    const monitor = vi.fn(async () => ({ ok: true as const, value: fakeMonitorSnapshot() }));
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop: vi.fn(), saveConnection: vi.fn(), monitor });
+    await expect(api.monitor("7d")).resolves.toEqual(fakeMonitorSnapshot());
+    expect(monitor).toHaveBeenCalledWith("7d", undefined, undefined);
+  });
+
+  it("monitor 失败 → 抛出携带 code 与 message 的 Error", async () => {
+    const monitor = vi.fn(async () => ({ ok: false as const, error: { code: "INPUT_INVALID", message: "range 非法" } }));
+    const api = createPanelApi({ snapshot: vi.fn(), start: vi.fn(), stop: vi.fn(), saveConnection: vi.fn(), monitor });
+    await expect(api.monitor("30m", 0)).rejects.toThrow(/INPUT_INVALID/);
+    await expect(api.monitor("30m", 0)).rejects.toThrow(/range 非法/);
   });
 });

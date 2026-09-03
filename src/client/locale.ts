@@ -44,6 +44,31 @@ export const zh = {
   // 面板侧事件 message 本身就是中文人类可读文本（「模型 xxx 已启动」），逐 kind
   // 翻译会随面板事件表无界膨胀，en 环境下宁可原样显示也不维护一份必然滞后的映射。
   eventsTitle: "最近事件",
+  // ── 监控页（settings.section 整页）──
+  // 导航条目文案：注册时以 thunk 形式声明（index.tsx 里 bind 本命名空间），宿主
+  // 每次 read 都重新解析，语言切换后无需重新注册。
+  monitorTitle: "llamapad 监控",
+  monitorClose: "关闭",
+  monitorRangeLabel: "时间窗口",
+  range30m: "30 分钟",
+  range2h: "2 小时",
+  range24h: "24 小时",
+  range7d: "7 天",
+  monitorLoading: "正在读取监控数据…",
+  monitorRefreshFailed: "监控数据刷新失败，下方显示的是上一次读到的内容。",
+  monitorCardInfer: "推理",
+  monitorCardGpu: "GPU",
+  monitorCardContainer: "容器",
+  monitorTokens: "生成速度",
+  monitorKvCache: "KV cache",
+  monitorGpuMem: "显存占用",
+  monitorGpuUtil: "GPU 利用率",
+  monitorCpu: "CPU 占用",
+  monitorMem: "内存占用",
+  monitorNoData: "暂无数据",
+  monitorGpuUnavailable: "GPU 状态不可用（纯 CPU 机器，或面板没有提供该信息）。",
+  monitorGpuProbing: "正在探测 GPU 状态…",
+  monitorGpuTotals: "合计 {value}",
 } as const;
 
 export const en = {
@@ -83,4 +108,27 @@ export const en = {
   connSaved: "Saved. Reconnecting with the new settings.",
   // Toast text intentionally bypasses this dictionary; see the zh entry's comment.
   eventsTitle: "Recent activity",
+  // ── Monitor page (settings.section full page) ──
+  monitorTitle: "llamapad Monitor",
+  monitorClose: "Close",
+  monitorRangeLabel: "Time range",
+  range30m: "30 min",
+  range2h: "2 hours",
+  range24h: "24 hours",
+  range7d: "7 days",
+  monitorLoading: "Loading monitoring data…",
+  monitorRefreshFailed: "Refresh failed; showing the last known data.",
+  monitorCardInfer: "Inference",
+  monitorCardGpu: "GPU",
+  monitorCardContainer: "Container",
+  monitorTokens: "Generation speed",
+  monitorKvCache: "KV cache",
+  monitorGpuMem: "GPU memory",
+  monitorGpuUtil: "GPU utilization",
+  monitorCpu: "CPU usage",
+  monitorMem: "Memory usage",
+  monitorNoData: "No data yet",
+  monitorGpuUnavailable: "GPU stats unavailable (CPU-only machine, or not provided by the panel).",
+  monitorGpuProbing: "Detecting GPU status…",
+  monitorGpuTotals: "Total {value}",
 } satisfies Record<LocaleKey, string>;

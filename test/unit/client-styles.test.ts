@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CARD_CSS, CARD_STYLE_TAG_ID, injectCardStyles } from "../../src/client/styles";
+import {
+  CARD_CSS,
+  CARD_STYLE_TAG_ID,
+  MONITOR_CSS,
+  MONITOR_STYLE_TAG_ID,
+  injectCardStyles,
+  injectMonitorStyles,
+} from "../../src/client/styles";
 
 // 卡片的 CSS 注入抄的是官方 dsh-client-ui-settings-general 的判重写法：
 // <style data-plugin-css="..."> + document.querySelector 判重。这里不装 jsdom，
@@ -64,6 +71,33 @@ describe("injectCardStyles", () => {
   });
 });
 
+describe("injectMonitorStyles", () => {
+  it("document 不存在时（node 测试环境）安全跳过，不抛错", () => {
+    // @ts-expect-error 显式模拟无 DOM 环境
+    delete globalThis.document;
+    expect(() => injectMonitorStyles()).not.toThrow();
+  });
+
+  it("首次调用插入带监控样式标记的标签，与卡片样式各插各的", () => {
+    const { doc, created } = fakeDocument();
+    // @ts-expect-error 同上
+    globalThis.document = doc;
+    injectMonitorStyles();
+    expect(created).toHaveLength(1);
+    expect(created[0]?.dataset["pluginCss"]).toBe(MONITOR_STYLE_TAG_ID);
+    expect(created[0]?.textContent).toBe(MONITOR_CSS);
+  });
+
+  it("重复调用判重，不会插入第二次", () => {
+    const { doc, created } = fakeDocument();
+    // @ts-expect-error 同上
+    globalThis.document = doc;
+    injectMonitorStyles();
+    injectMonitorStyles();
+    expect(created).toHaveLength(1);
+  });
+});
+
 describe("CARD_CSS：折叠态与网格布局的关键规则", () => {
   it("列表是两列网格", () => {
     expect(CARD_CSS).toContain("grid-template-columns:repeat(2,minmax(0,1fr))");
@@ -112,5 +146,33 @@ describe("CARD_CSS：事件流小节", () => {
 
   it("事件时间为等宽数字，分钟跳动时不牵动整行换行", () => {
     expect(CARD_CSS).toMatch(/\.llamapad-card__eventTime\{[^}]*font-variant-numeric:tabular-nums/);
+  });
+});
+
+describe("MONITOR_CSS：监控页的关键规则", () => {
+  it("三卡区是两列网格，窄容器回落单列", () => {
+    expect(MONITOR_CSS).toContain(".llamapad-monitor__grid{");
+    expect(MONITOR_CSS).toMatch(/\.llamapad-monitor__grid\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+    expect(MONITOR_CSS).toContain("@media (max-width:720px)");
+  });
+
+  it("panelError 横幅与卡片 banner 同一套 error token 着色", () => {
+    expect(MONITOR_CSS).toMatch(
+      /\.llamapad-monitor__banner\{[^}]*var\(--dsw-alias-state-error-primary\)/,
+    );
+  });
+
+  it("曲线 svg 块级铺满卡宽（viewBox 均匀缩放的前提）", () => {
+    expect(MONITOR_CSS).toMatch(/\.llamapad-monitor__spark\{[^}]*display:block/);
+    expect(MONITOR_CSS).toMatch(/\.llamapad-monitor__spark\{[^}]*width:100%/);
+  });
+
+  it("当前值是等宽数字，轮询刷新时数字跳动不牵动布局", () => {
+    expect(MONITOR_CSS).toMatch(/\.llamapad-monitor__metricValue\{[^}]*font-variant-numeric:tabular-nums/);
+  });
+
+  it("分卡明细行与 GPU 合计行有独立容器", () => {
+    expect(MONITOR_CSS).toContain(".llamapad-monitor__gpuRow{");
+    expect(MONITOR_CSS).toContain(".llamapad-monitor__gpuRows{");
   });
 });
