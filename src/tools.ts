@@ -6,8 +6,9 @@
  * 边界（与 CLAUDE.md「用户边界」一致）：只做运行时调度的查询与启停，不做删除模型/
  * 文件、改配置、下载管理等高危操作——那些留在 llamapad 面板的人工确认流程里。
  *
- * 失败语义：查询类工具把"面板不可达"当作有效答案返回（不抛错）；启停类工具的真实
- * 故障（模型不存在、鉴权失败等）直接 throw——框架的 toolErrorResult 会接住，转成
+ * 失败语义：status 把"面板不可达"当作有效答案返回（不抛错——可达性本身就是它要
+ * 回答的问题）；list_models / events 等清单查询与启停工具的真实故障（面板不可达、
+ * 模型不存在、鉴权失败等）直接 throw——框架的 toolErrorResult 会接住，转成
  * isError + 错误文本喂给模型，不需要在这里另建一套 { error } 返回值联合体。
  */
 import type { Context } from "@deepseek-ai/cordis";
@@ -48,6 +49,12 @@ export const inject = ["tools"];
 /** 列模型结果的硬上限：框架没有内置的结果大小/截断机制，超大返回值要自己截。 */
 export const LIST_MODELS_LIMIT = 100;
 
+/** 事件查询的默认条数与硬上限，与面板 /api/v1/events 的契约一致（limit 默认 20、
+ * 上限 100）。两端各守一次：工具侧先钳一道再发请求，面板即便不守约（旧版本忽略
+ * limit 参数全量返回），返回值也不会超出 output schema 承诺的至多 100 条。 */
+export const EVENTS_DEFAULT_LIMIT = 20;
+export const EVENTS_LIMIT = 100;
+
 export function apply(ctx: Context, config: Config) {
   // 静态校验（对齐 index.ts 的 assertStaticConfig 模式）：写错的档位名是编程/配置错误，
   // 不是「还没填」——静默回落 allow 会把用户要的确认门悄悄变成直通，越早抛越好。
@@ -76,6 +83,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(buildStatusTool(client));
   ctx.tools.register(buildListModelsTool(client));
+  ctx.tools.register(buildEventsTool(client));
   ctx.tools.register(buildStartModelTool(client, gate, config));
   ctx.tools.register(buildStopModelTool(client));
 
@@ -285,6 +293,154 @@ export function buildListModelsTool(client: PanelClient): ToolDefinition {
         total: all.length,
         truncated: all.length > LIST_MODELS_LIMIT,
       };
+    },
+  });
+}
+
+// ---- llamapad_events ----
+
+/** presentResult 从 result.meta 读回的投影形状（execute 返回值经 JSON 持久化后的样子）。 */
+interface EventsProjection {
+  events: Array<{ id: number; ts: number; kind: string; message: string }>;
+  total: number;
+}
+
+/**
+ * meta 随会话日志持久化，回放时可能来自旧版本 schema（字段缺席或多余）。按字段逐个
+ * 收窄，事件行里有任何一项形状对不上就整体返回 undefined，让呈现层回退默认卡——
+ * 排障场景里把半编造的事件行当真比看不到卡片更糟（对齐 status 的 readStatusProjection）。
+ */
+function readEventsProjection(meta: unknown): EventsProjection | undefined {
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const { events, total } = meta as Record<string, unknown>;
+  if (!Array.isArray(events) || typeof total !== "number") return undefined;
+  const narrowed: EventsProjection["events"] = [];
+  for (const event of events) {
+    if (typeof event !== "object" || event === null) return undefined;
+    const { id, ts, kind, message } = event as Record<string, unknown>;
+    if (typeof id !== "number" || typeof ts !== "number"
+        || typeof kind !== "string" || typeof message !== "string") {
+      return undefined;
+    }
+    narrowed.push({ id, ts, kind, message });
+  }
+  return { events: narrowed, total };
+}
+
+/**
+ * 毫秒时间戳 → 本地时间 YYYY-MM-DD HH:mm。时区取舍：工具在 host 进程里跑，Date
+ * 按宿主机时区解释——排障看的是「用户自己经历过的时刻」（「模型为什么凌晨三点停了」），
+ * 本地时区正是想要的口径。手写补零格式而非 toLocaleString：后者的输出随运行环境的
+ * locale/ICU 漂移（宽窄年、逗号分隔都见过），喂模型的文本要一个稳定可解析的形状。
+ */
+function formatEventTime(ts: number): string {
+  const date = new Date(ts);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())}`
+    + ` ${p2(date.getHours())}:${p2(date.getMinutes())}`;
+}
+
+/** 调用卡与结果卡共用的标题；kind 过滤拼进标题，一眼看出这次查的是哪类事件。 */
+function eventsTitle(kind: unknown): string {
+  // presentResult 的回放路径上 args 只做软校验，kind 可能已不是 string——
+  // 非字符串时宁可不拼，也不把垃圾值渲染进人看的标题
+  return typeof kind === "string" && kind ? `查询 llamapad 事件（${kind}）` : "查询 llamapad 事件";
+}
+
+/**
+ * 事件的多行文本：每行 `[YYYY-MM-DD HH:mm] kind message`（面板按 ts 倒序返回，原样
+ * 即「最新在上」）。render（喂模型）与 presentResult 的 terminal 输出共用一份格式化，
+ * 两边口径不会打架——对齐 status 的「首行口径一致」原则。
+ */
+function formatEventsLines(requestedLimit: number | undefined, value: EventsProjection): string {
+  if (value.events.length === 0) return "没有匹配的事件";
+  const lines = value.events.map((e) => `[${formatEventTime(e.ts)}] ${e.kind} ${e.message}`);
+  // 超限提示：请求的 limit 被钳到上限时，面板返回的「正好 100 条」不是「只有 100 条」，
+  // 不提示的话模型会把截断读成全集（面板不提供全量真实总数，这里只能提示钳制事实）
+  if (requestedLimit !== undefined && requestedLimit > EVENTS_LIMIT) {
+    lines.push(`（limit ${requestedLimit} 超过上限 ${EVENTS_LIMIT}，已按前 ${EVENTS_LIMIT} 条返回）`);
+  }
+  return lines.join("\n");
+}
+
+export function buildEventsTool(client: PanelClient): ToolDefinition {
+  return defineTool({
+    name: "llamapad_events",
+    description:
+      "查询 llamapad 面板的操作事件历史（模型启停/异常退出、下载、配置变更等），排障用——如回答" +
+      `"模型为什么停了"。只读。不传参数返回最近 ${EVENTS_DEFAULT_LIMIT} 条，limit 可调（上限 ${EVENTS_LIMIT}，` +
+      "超出按上限处理），kind 精确过滤事件类型（如 model.exit 只看容器异常退出）。",
+    parameters: {
+      limit: {
+        type: "integer",
+        description: `返回最近多少条事件，默认 ${EVENTS_DEFAULT_LIMIT}，上限 ${EVENTS_LIMIT}（更大的值按上限处理）`,
+      },
+      kind: {
+        type: "string",
+        description: "事件类型精确过滤（非子串匹配），如 model.exit / model.stop / download.failed；不传返回全部类型",
+      },
+    },
+    // 只读：一次 events 查询，无副作用、无进程内共享可变状态，可安全并入并行组
+    isConcurrencySafe: () => true,
+    output: {
+      schema: {
+        type: "object",
+        properties: {
+          events: {
+            type: "array",
+            required: true,
+            description: `事件列表（按时间倒序，至多 ${EVENTS_LIMIT} 条）`,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                id: { type: "integer", required: true, description: "事件自增 id" },
+                ts: { type: "integer", required: true, description: "事件时间戳（毫秒，Epoch UTC）" },
+                kind: { type: "string", required: true, description: "事件类型，如 model.exit" },
+                message: { type: "string", required: true, description: "人类可读的事件描述" },
+              },
+            },
+          },
+          // total = 返回条数而非全量真实总数：面板 events 接口不提供全量计数，
+          // 不伪造一个查不到的数字（截断与否由 limit 钳制 + 超限提示表达）
+          total: { type: "integer", required: true, description: "返回条数（= events.length）" },
+        },
+        additionalProperties: false,
+      },
+      render: (args, value) => [{ type: "text", text: formatEventsLines(args.limit, value) }],
+      // 与 status 同理：value 本身就是 lossless JSON，原样投影进 meta 供回放重建终端卡
+      presentationMeta: (_args, value) => value,
+    },
+    // 排障查询不是终端命令语义，generic 卡即可；kind 进标题标明过滤范围
+    presentCall: (args) => ({ card: "generic", title: eventsTitle(args.kind) }),
+    presentResult: (args, result) => {
+      const projection = readEventsProjection(result.meta);
+      if (!projection) return undefined;
+      return {
+        card: "terminal",
+        title: eventsTitle(args.kind),
+        output: formatEventsLines(
+          // 回放路径 args 只做软校验，limit 先收窄再进格式化（超限提示要用它做比较）
+          typeof args.limit === "number" ? args.limit : undefined,
+          projection,
+        ),
+        // 查询本身成功即 0：空结果是「没有匹配的事件」的合法答案，不是失败
+        exitCode: 0,
+      };
+    },
+    async execute(args) {
+      // 先钳后发：超上限的 limit 不透传给面板（旧面板可能忽略参数全量返回），
+      // 返回行再 slice 一道兜底，保证 output schema 承诺的「至多 100 条」恒成立
+      const limit = Math.min(args.limit ?? EVENTS_DEFAULT_LIMIT, EVENTS_LIMIT);
+      const events = await client.getEvents({ limit, ...(args.kind ? { kind: args.kind } : {}) });
+      // 显式投影四个契约字段：面板将来加字段也不会撑破 additionalProperties:false
+      const projected = events.slice(0, EVENTS_LIMIT).map((e) => ({
+        id: e.id,
+        ts: e.ts,
+        kind: e.kind,
+        message: e.message,
+      }));
+      return { events: projected, total: projected.length };
     },
   });
 }

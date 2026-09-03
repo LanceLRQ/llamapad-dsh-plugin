@@ -1,14 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   apply,
+  buildEventsTool,
   buildListModelsTool,
   buildStartModelTool,
   buildStatusTool,
   buildStopModelTool,
   Config,
+  EVENTS_DEFAULT_LIMIT,
+  EVENTS_LIMIT,
   LIST_MODELS_LIMIT,
 } from "../../src/tools";
-import { PanelError, type PanelClient, type PanelModelView } from "../../src/panel-client";
+import {
+  PanelError,
+  type PanelClient,
+  type PanelEvent,
+  type PanelModelView,
+} from "../../src/panel-client";
 import { createModelGate } from "../../src/switching";
 
 function fakeExec(signal: AbortSignal = new AbortController().signal): any {
@@ -37,6 +45,7 @@ function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient {
     startModel: async (name: string) => { running = name; },
     stopModel: async () => { running = null; return { ok: true }; },
     llamaHealth: async () => true,
+    getEvents: async () => [],
     ...overrides,
   } as PanelClient;
 }
@@ -198,6 +207,152 @@ describe("llamapad_list_models", () => {
   });
 });
 
+describe("llamapad_events", () => {
+  /**
+   * 用本地时间分量构造 ts：new Date(2026, 8, 3, 8, 30) 在任何时区的机器上都指向
+   * 「本地 2026-09-03 08:30」，而工具的行格式化用的也是本地时区——期望串因此
+   * 不随测试机的时区设置漂移（时区取舍见 formatEventTime 注释）。
+   */
+  const localTs = (h: number, m: number) => new Date(2026, 8, 3, h, m).getTime();
+
+  it("默认参数：limit 取 EVENTS_DEFAULT_LIMIT，不带 kind 键", async () => {
+    const getEvents = vi.fn(async () => [] as PanelEvent[]);
+    const client = fakeClient({ getEvents });
+    const value = await buildEventsTool(client).execute({}, fakeExec());
+    expect(getEvents).toHaveBeenCalledWith({ limit: EVENTS_DEFAULT_LIMIT });
+    expect(value).toEqual({ events: [], total: 0 });
+  });
+
+  it("limit 超上限 → 钳制为 EVENTS_LIMIT 再请求 getEvents", async () => {
+    const getEvents = vi.fn(async () => [] as PanelEvent[]);
+    const client = fakeClient({ getEvents });
+    await buildEventsTool(client).execute({ limit: 500 }, fakeExec());
+    expect(getEvents).toHaveBeenCalledWith({ limit: EVENTS_LIMIT });
+  });
+
+  it("kind 精确过滤 → 原样透传 getEvents", async () => {
+    const getEvents = vi.fn(async () => [] as PanelEvent[]);
+    const client = fakeClient({ getEvents });
+    await buildEventsTool(client).execute({ kind: "model.exit" }, fakeExec());
+    expect(getEvents).toHaveBeenCalledWith({ limit: EVENTS_DEFAULT_LIMIT, kind: "model.exit" });
+  });
+
+  it("面板返回超上限的行 → 防御性截为 EVENTS_LIMIT 条，total 同步为返回条数", async () => {
+    const many: PanelEvent[] = Array.from({ length: EVENTS_LIMIT + 20 }, (_, i) => ({
+      id: i + 1,
+      ts: 1_700_000_000_000 + i,
+      kind: "model.stop",
+      message: `m${i}`,
+    }));
+    const client = fakeClient({ getEvents: async () => many });
+    const value: any = await buildEventsTool(client).execute({ limit: EVENTS_LIMIT }, fakeExec());
+    expect(value.events).toHaveLength(EVENTS_LIMIT);
+    expect(value.total).toBe(EVENTS_LIMIT);
+  });
+
+  it("getEvents 抛 PanelError → 直接 throw（对齐 list_models：真实故障交框架 toolErrorResult）", async () => {
+    const client = fakeClient({
+      getEvents: async () => { throw new PanelError("面板不可达", "PANEL_UNREACHABLE"); },
+    });
+    await expect(buildEventsTool(client).execute({}, fakeExec())).rejects.toMatchObject({
+      code: "PANEL_UNREACHABLE",
+    });
+  });
+
+  it("render：每行 [YYYY-MM-DD HH:mm] kind message，多行 join", () => {
+    const tool = buildEventsTool(fakeClient());
+    const blocks = tool.output.render({}, {
+      events: [
+        { id: 3, ts: localTs(9, 5), kind: "model.exit", message: "模型 a 异常退出（exit 137）" },
+        { id: 2, ts: localTs(8, 30), kind: "model.stop", message: "停止模型 a" },
+      ],
+      total: 2,
+    });
+    expect(blocks).toEqual([{
+      type: "text",
+      text: "[2026-09-03 09:05] model.exit 模型 a 异常退出（exit 137）\n"
+        + "[2026-09-03 08:30] model.stop 停止模型 a",
+    }]);
+  });
+
+  it("render：空结果 → 「没有匹配的事件」", () => {
+    const tool = buildEventsTool(fakeClient());
+    const blocks = tool.output.render({}, { events: [], total: 0 });
+    expect(blocks).toEqual([{ type: "text", text: "没有匹配的事件" }]);
+  });
+
+  it("render：请求 limit 超上限 → 输出末尾追加超限提示（不把「按上限返回」伪装成「只有这么多」）", () => {
+    const tool = buildEventsTool(fakeClient());
+    const blocks = tool.output.render({ limit: 300 }, {
+      events: [{ id: 1, ts: localTs(8, 30), kind: "model.stop", message: "停止模型 a" }],
+      total: 1,
+    });
+    expect(blocks[0]).toMatchObject({ type: "text" });
+    expect((blocks[0] as { text: string }).text).toContain(
+      `limit 300 超过上限 ${EVENTS_LIMIT}，已按前 ${EVENTS_LIMIT} 条返回`,
+    );
+  });
+
+  it("presentCall：generic 卡，无 kind 时标题不带过滤后缀", () => {
+    const tool = buildEventsTool(fakeClient());
+    expect(tool.presentCall?.({})).toEqual({ card: "generic", title: "查询 llamapad 事件" });
+  });
+
+  it("presentCall：kind 拼进标题，一眼看出查的是哪类事件", () => {
+    const tool = buildEventsTool(fakeClient());
+    expect(tool.presentCall?.({ kind: "model.exit" })).toEqual({
+      card: "generic",
+      title: "查询 llamapad 事件（model.exit）",
+    });
+  });
+
+  it("presentationMeta：原样投影 value，供 presentResult 在回放路径读回", () => {
+    const tool = buildEventsTool(fakeClient());
+    const value = {
+      events: [{ id: 1, ts: localTs(8, 30), kind: "model.stop", message: "停止模型 a" }],
+      total: 1,
+    };
+    expect(tool.output.presentationMeta?.({}, value)).toEqual(value);
+  });
+
+  it("presentResult：meta 有效 → terminal 卡逐行输出，exitCode 0（查询成功即 0，空结果是合法答案）", () => {
+    const tool = buildEventsTool(fakeClient());
+    const view = tool.presentResult?.({}, {
+      content: [],
+      isError: false,
+      meta: {
+        events: [
+          { id: 3, ts: localTs(9, 5), kind: "model.exit", message: "模型 a 异常退出（exit 137）" },
+          { id: 2, ts: localTs(8, 30), kind: "model.stop", message: "停止模型 a" },
+        ],
+        total: 2,
+      },
+    });
+    expect(view).toEqual({
+      card: "terminal",
+      title: "查询 llamapad 事件",
+      output: "[2026-09-03 09:05] model.exit 模型 a 异常退出（exit 137）\n"
+        + "[2026-09-03 08:30] model.stop 停止模型 a",
+      exitCode: 0,
+    });
+  });
+
+  it("presentResult：meta 形状过时（事件行字段坏掉）→ 回退默认卡，不编造事件", () => {
+    const tool = buildEventsTool(fakeClient());
+    const view = tool.presentResult?.({}, {
+      content: [],
+      isError: false,
+      meta: { events: [{ id: "3", ts: localTs(9, 5), kind: "model.exit", message: "x" }], total: 1 },
+    });
+    expect(view).toBeUndefined();
+  });
+
+  it("presentResult：meta 缺失（嵌套调用不投影/执行抛错）→ 回退默认卡", () => {
+    const tool = buildEventsTool(fakeClient());
+    expect(tool.presentResult?.({}, { content: [], isError: false })).toBeUndefined();
+  });
+});
+
 describe("llamapad_start_model", () => {
   it("默认参数：走共享门，drain 默认 true，等待就绪后 waitedReady:true", async () => {
     const client = fakeClient();
@@ -342,12 +497,13 @@ describe("llamapad_stop_model", () => {
 });
 
 describe("并发安全声明（isConcurrencySafe）", () => {
-  it("四个工具都允许并入并行组：查询只读，启停经共享门/幂等终态收敛", () => {
+  it("五个工具都允许并入并行组：查询只读，启停经共享门/幂等终态收敛", () => {
     const client = fakeClient();
     const gate = createModelGate(client);
     const start = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000 });
     expect(buildStatusTool(client).isConcurrencySafe?.({})).toBe(true);
     expect(buildListModelsTool(client).isConcurrencySafe?.({})).toBe(true);
+    expect(buildEventsTool(client).isConcurrencySafe?.({})).toBe(true);
     expect(start.isConcurrencySafe?.({ model: "a" })).toBe(true);
     expect(buildStopModelTool(client).isConcurrencySafe?.({})).toBe(true);
   });
@@ -391,7 +547,7 @@ describe("B 形态 apply：toolApproval 配置", () => {
     const ctx = fakeToolsCtx();
     apply(ctx, Config(toolsValid) as any);
     expect(ctx.on).not.toHaveBeenCalled();
-    expect(ctx.tools.register).toHaveBeenCalledTimes(4);
+    expect(ctx.tools.register).toHaveBeenCalledTimes(5);
   });
 });
 
@@ -409,7 +565,7 @@ describe("B 形态 apply：ask 档审批门（tools/pre-execute waterfall）", (
     const { ctx, listener } = captureListener();
     expect(ctx.on).toHaveBeenCalledTimes(1);
     expect(typeof listener).toBe("function");
-    expect(ctx.tools.register).toHaveBeenCalledTimes(4);
+    expect(ctx.tools.register).toHaveBeenCalledTimes(5);
   });
 
   it("start 工具 + 下游 allow → 升级为 ask（带原因文案）", async () => {
