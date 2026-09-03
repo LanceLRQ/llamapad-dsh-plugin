@@ -37,7 +37,16 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   落盘，落后于宿主就是两份框架并存。2026-08-27 实测过代价：`dsh-llm` 0.1.x 的运行时在派发路径上
   **无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有这个方法，
   每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护测试；
-  升级 dsh 后先跑它
+  升级 dsh 后先跑它。本包现钉 `dsh-attachment` / `dsh-system-prompt` 均 0.1.1-rc.2
+  （多模态输入与系统提示快照消费的宿主服务，2026-09-03 第三批新增），升级 dsh 时同样要同步
+- **模型状态刷新走 `status-watch.ts`**（2026-09-03 起吸收并替代已删除的 directory-refresh）：
+  host 侧常驻 SSE（面板 `/api/v1/events/stream`）事件驱动，`model.*` 事件即时探测、运行中模型
+  变化才 `ctx.emit("llm/adapters-updated")`；断流看门狗按节拍用 `getEvents({limit:1})` 核对水位，
+  SSE 建连连败 3 次降级回定时轮询（节拍 `statusRefreshMs`）、恢复自动切回。**fleetCache 与
+  eventRing 是它的两个副产物**——分别是提示词快照（`fleet-snapshot.ts`）与设置卡片事件流的
+  数据源，实例在 apply 内闭包持有（防 fiber 重复装载串次），配置热更不重建、事件环历史不丢，
+  别当可随手重建的缓存。`statusRefreshMs: 0` = 整个 watcher 不启动（SSE 也不连，0 的语义是
+  「不打扰面板」）
 - llamapad API 只读参照：`/mnt/data/github/llamapad/`（跨仓库，不改它）。**接口契约以面板正式文档
   `docs/guide/zh/api.md` 为准**，源码 `src/app/api/v1/` 作为细节佐证。文档里两条与本插件直接相关的
   约定：start 返回 200 不代表模型可用（要轮询 `runtime/status` 的 `ready`）、对已在运行的模型再次
@@ -93,7 +102,8 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 **模型选择器运行状态标记已实施**（2026-08-27）：`listModels` 按面板 `status` 字段给运行中模型加
 `●` 前缀、给 `missing-file`/`missing-mmproj` 追加提示（纯函数 `describeModel`，`adapter.ts`）；
 新增 `directory-refresh.ts` 轮询面板运行状态，仅在运行中模型变化时 `ctx.emit("llm/adapters-updated")`
-触发浏览器侧目录重拉，间隔由新增 Config 字段 `statusRefreshMs`（默认 5000ms，0 关闭）控制。
+触发浏览器侧目录重拉，间隔由新增 Config 字段 `statusRefreshMs`（默认 5000ms，0 关闭）控制
+（directory-refresh 已于 2026-09-03 被 `status-watch.ts` 吸收替代，见「关键约束」）。
 
 **resolveModel 的 contextWindow 改用面板生效配置为权威来源**（2026-08-28）：改读
 `GET /api/v1/models/:name/effective` 的 `merged`（`mergeConfig(defaults, overrides)`，同时覆盖
@@ -105,13 +115,28 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 的 `readCtxSize`，两个来源共用它，选源在 `resolveModel`）。同时把 `describeModel` 的缺件提示文案指向面板新增的
 文件页「自动寻找」入口。
 
+**第三批功能已全部实施**（2026-09-03，方案见
+`docs/design/2026-09-03-multimodal-monitor-events-prompt.md`，五个 micro-step 计划见
+`docs/plans/2026-09-03-m1..m5-*.md`）：
+
+- **M1 快赢包**：4+1 工具声明 `isConcurrencySafe`；status/events 终端呈现卡（面板不可达 →
+  exitCode 1）；start/stop 打通 RPC 取消通道（卡片在途按钮变「取消等待」）；B 形态 Config 新增
+  `toolApproval: allow|ask` 审批门（ask 档经 `tools/pre-execute` 升级为 ask，宿主无审批通道时
+  框架折算为拒绝执行）
+- **M2 多模态输入**：mmproj 三态门控声明 `inputModalities`（配了 text+image / 没配 text /
+  老面板不可知省略）；ImageBlock 经宿主 attachments 服务读字节转 `image_url`（读不出降级显式
+  占位文本），proxy/direct 双模式；补钉 `dsh-attachment` 0.1.1-rc.2
+- **M3 事件驱动**：`status-watch.ts` 吸收并替代 directory-refresh（SSE 常连 + 看门狗 + 连败
+  3 次降级轮询），卡片「最近事件」列表与新事件 Toast，第 5 个工具 `llamapad_events`
+  （limit 默认 20 上限 100 / kind 精确过滤）
+- **M4 GPU 监控页**：host 侧 monitor RPC（metrics 窗口增量协议 + gpu 快照，cancellation）；
+  浏览器侧 `settings.section` 整页（六指标 SVG 曲线、30m/2h/24h/7d 四档、分卡温度功耗、
+  增量轮询带取消）
+- **M5 提示词快照**：系统提示注入 `llamapad:local-fleet` 分节（英文，running + 可启动清单
+  ≤20 条），数据源 fleetCache；Config 新增 `statusPromptSection` 默认 true（隐私：快照随
+  系统提示发给远端 provider）；补钉 `dsh-system-prompt` 0.1.1-rc.2
+
+全部测试 497 单测 + 31 假面板 E2E 全绿；真机冒烟清单已记入 `docs/manual-smoke.md`（待执行）。
+
 待办：
-- 阶段二：生命周期控制的显式入口。**「零成本外链」那一步已被核实推翻**——host 侧单独注册在
-  设置界面里什么都不显示，露出任何内容都要自行复刻浏览器端 client module 的产物格式（官方
-  tsdown preset 未发布）。订正后的门槛结构见设计文档第 3 节；下一步是产物格式的专项调研 spike
-- **面板接口对齐已完成一轮**（2026-09-02，审查见 `docs/audit/2026-09-02-面板接口对齐审查.md`，
-  施工图见 `docs/plans/2026-09-02-面板接口对齐.md`）。原「关注 llamapad M5 反代改造」一条已结案：
-  M5 的结果是面板 Chat 页弃用 iframe 改自建 Playground，`/api/v1/proxy/llama/*` 不但保留还成了面板
-  自己的主要消费者，并新增短地址别名 `/llama-proxy/*`（经 Next rewrite，行为完全一致）。真正需要跟进
-  的是同一路由上新长出来的思考强度改写层，已在本轮接入
 - 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）

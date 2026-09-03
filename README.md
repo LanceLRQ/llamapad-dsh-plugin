@@ -11,18 +11,25 @@
 插件行，可以只挂一个也可以两个同挂；`./client` 不是插件行，随 A 形态自动加载，无需单独配置。
 
 **状态：A 形态 + 聊天路由解耦（阶段一）+ B 形态管理工具 + 设置卡片（阶段二）均已实现并通过
-全部测试（300 单测 + 17 假面板 E2E），并已在真实 dsh + GPU 环境完成端到端冒烟。**
+全部测试，并已在真实 dsh + GPU 环境完成端到端冒烟。第三批（阶段三，2026-09-03）也已全部
+实现并通过全部测试（497 单测 + 31 假面板 E2E），内容：工具呈现升级与并发安全声明、RPC 取消
+通道（卡片「取消等待」）、B 形态启停审批门、多模态输入（贴图）、SSE 事件驱动刷新、GPU 监控页、
+系统提示本地模型场快照——真机冒烟清单见手册（待执行）。**
 计划与实施记录见 [docs/plans/2026-08-24-a-form-adapter.md](docs/plans/2026-08-24-a-form-adapter.md)；
 聊天路由三档与设置卡片的设计与落地记录见
 [docs/design/chat-vs-lifecycle-decoupling.md](docs/design/chat-vs-lifecycle-decoupling.md)与
 [docs/design/settings-card-design.md](docs/design/settings-card-design.md)；
 B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-design.md)；
+第三批的设计与实施记录见
+[docs/design/2026-09-03-multimodal-monitor-events-prompt.md](docs/design/2026-09-03-multimodal-monitor-events-prompt.md)
+与 `docs/plans/2026-09-03-m1..m5-*.md`（五个里程碑计划）；
 真机冒烟步骤与结果见 [docs/manual-smoke.md](docs/manual-smoke.md)。
 
 > ⚠️ **依赖版本必须与宿主 dsh 同代**：构建把 `@deepseek-ai/*` 全部 external，运行时由 pnpm 按
 > 本包 `package.json` 的钉版落盘。落后于宿主时会装出第二份框架，宿主拿新接口调旧基类当场崩
 > （实测：`dsh-llm` 0.1.x 的运行时无条件调用 `adapter.prepareCall`，而 0.0.1-rc.1 的基类没有
-> 这个方法）。升级 dsh 后请同步本包的钉版。
+> 这个方法）。本包现在还钉了 `dsh-attachment` / `dsh-system-prompt`（均 0.1.1-rc.2，多模态
+> 输入与系统提示快照消费的宿主服务），升级 dsh 时这两个同样要同步。
 
 > ⚠️ **破坏性变化**：`chatBehavior` 默认值为 `strict`（0.x 阶段直接切换默认值，不做过渡期）。
 > 若你依赖旧版「选模型即切容器」的自动切换行为，请在配置里显式设置 `chatBehavior: auto-switch`。
@@ -52,10 +59,15 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 - **模型选择器上的运行状态标记**：运行中的模型名前会有 `▶︎` 前缀（实心播放三角，带
   U+FE0E 变体选择符强制取文本形态，避免在部分系统被渲染成彩色 emoji）；`missing-file`/
   `missing-mmproj`（配置了但文件缺失）的模型会在说明文字后追加提示——选中这类模型
-  必然在启动时 422，提前标出来省一次踩坑。标记随 `statusRefreshMs` 轮询自动刷新：
-  插件定期查询面板运行状态，只在"当前运行中的模型"发生变化时才通知 dsh 重拉模型
-  目录（浏览器侧目录本身不轮询，只在收到通知时重拉），关掉轮询（`statusRefreshMs: 0`）
-  后标记会停在插件启动那一刻的旧值，不再跟随面板侧的启停更新。`hideStoppedModels`
+  必然在启动时 422，提前标出来省一次踩坑。标记由面板事件驱动刷新：插件 host 侧常驻
+  一条 SSE 连接（面板 `/api/v1/events/stream`），`model.*` 事件（启停、异常退出）一到
+  立即探测一次面板运行状态，只在"当前运行中的模型"发生变化时才通知 dsh 重拉模型目录
+  （浏览器侧目录本身不轮询，只在收到通知时重拉）——刷新延迟从「一个轮询间隔」降到
+  「一次推送 + 一次探测」。SSE 建连连续失败 3 次自动降级回定时轮询、面板恢复后自动切回
+  事件驱动（降级轮询的节拍仍是 `statusRefreshMs`）；常连接的静默断流由看门狗兜底（按
+  节拍读一眼最新事件 id 核对水位，发现流落后即重连补齐）。`statusRefreshMs: 0` 仍是
+  **完全关闭**——连 SSE 也不连（0 的语义是「不打扰面板」，常驻连接违背它），关闭后标记
+  会停在插件启动那一刻的旧值，不再跟随面板侧的启停更新。`hideStoppedModels`
   开启后选择器只列出运行中的模型（默认关闭，没有模型在跑时选择器会是空的）；
   `chatBehavior: auto-switch` 档下该开关被忽略并打一条 console 警告——那一档要靠选中
   未启动的模型来触发自动启动，藏起来会让整档不可用
@@ -63,17 +75,29 @@ B 形态工具见 [docs/design/b-form-tools-design.md](docs/design/b-form-tools-
 ## B 形态：管理工具（`llamapad-dsh-plugin/tools`）
 
 独立入口，`inject: ['tools']`，与 A 形态共享 `panel-client` 与切换门（同一 `panelUrl` 下共用一把
-锁，两个入口不会互相插队「一边起一边停」）。4 个工具：
+锁，两个入口不会互相插队「一边起一边停」）。5 个工具：
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `llamapad_status` | 无 | 面板是否可达、有没有模型在跑、是否有在途推理。忙碌状态不可知时**省略**相关字段而不是报成"不忙" |
 | `llamapad_list_models` | 无 | 列全部模型配置，至多 100 条（按名称升序），`total`/`truncated` 如实反映截断 |
+| `llamapad_events` | `limit`/`kind` 可选 | 查询面板操作事件历史（模型启停/异常退出、下载、配置变更等），排障用——如回答"模型为什么停了"。`limit` 默认 20、上限 100；`kind` 精确过滤事件类型（如 `model.exit` 只看容器异常退出） |
 | `llamapad_start_model` | `model` 必填；`waitReady`/`drain`/`timeoutMs` 可选 | 启动/切换（单模型语义自动停旧起新）。`drain` 默认 `true`，切换不打断在途输出 |
 | `llamapad_stop_model` | `drain`/`drainTimeoutMs` 可选 | 停止当前运行的模型。没有模型在跑时返回 `stopped:false` 而不是报错 |
 
 刻意**不开放**删除模型/文件、改配置、下载管理——高危操作留在 llamapad 面板的人工确认流程里。
 工具失败直接抛错，由 dsh 转成模型可读的错误文本。
+
+五个工具都声明了 `isConcurrencySafe`（只读查询，或启停经共享门串行/合流），可被宿主安全地
+并入并行组。调用与结果呈现：`llamapad_status` 是终端卡语义（等价一条 `llamapad status` 命令，
+面板不可达 → `exitCode: 1`，UI 用退出状态徽标呈现）；`llamapad_events` 的结果同样以终端卡
+输出多行事件（每行 `[时间] 类型 描述`，按时间倒序）；启停工具的调用卡带 `execute` 标记
+（改变面板运行状态的操作）。
+
+**启停审批门 `toolApproval`**（B 形态独有配置，默认 `allow`）：设为 `ask` 后，Agent 调用
+`llamapad_start_model` / `llamapad_stop_model` 需先经用户确认（框架的 approval 通道）；宿主
+没有审批通道时，框架会把 `ask` 折算为**拒绝执行**——确认门绝不会静默放行。共享 GPU 场景
+建议 `ask`（启停会影响别的会话）。
 
 ## 设置卡片
 
@@ -87,8 +111,14 @@ dsh 的**设置 → 插件 → 插件配置**页签里会有一张 llamapad 卡�
 - 运行状态（有没有模型在跑、是否正在推理）
 - 模型列表：卡片式两列网格，超过约 4 行时列表内部定高（320px）滚动，卡片本身不被撑高；
   dsh 窗口窄于 520px 时回落单列
-- 每行一个启动/停止按钮（单模型语义，点启动即切换）
+- 每行一个启动/停止按钮（单模型语义，点启动即切换）；**在途等待时按钮变「取消等待」**——
+  点击即中止这次等待（AbortSignal 经 host RPC 的取消通道一路传到面板 HTTP 请求），按钮
+  恢复原状、不报错误横幅（用户主动取消不算故障）
 - 底部「连接设置」区：面板地址与 API token 两个输入框 + 保存按钮
+- 底部「最近事件」列表：面板最近发生的操作事件（模型启停/异常退出、下载完成等，来自
+  插件的事件环，为空时整节不渲染），失败类（`model.exit` / `model.start_failed` /
+  `download.failed` 等）标红、成功类（`model.start` / `download.complete`）标绿；轮询发现
+  新事件时弹一条 Toast 轻提醒（约 3 秒自灭，多条排队逐条展示，不打断对话）
 
 **卡片内可直接配置连接**：面板地址与 token 不必预先写进 cordis.yml——在「连接设置」区填好
 保存即可，写入 `$DSH_HOME/settings.yaml` 里本插件的独立分节（不碰 cordis.yml），优先级高于
@@ -110,6 +140,48 @@ cordis.yml，**改完立即生效，不用重启 dsh**。token 输入框留空�
 > 机器时二者不是一回事。给 `panelPublicUrl` 填浏览器能访问到的面板地址即可；单机部署两者
 > 一致，可以不配。构建前置要求见文首「`dist/` 不入库」的提示。
 
+## 多模态输入（贴图）
+
+配了 mmproj（视觉投影器）的模型可以接收图片输入。插件按面板模型配置的 `mmprojFile`
+字段向 dsh 声明 `inputModalities`，三态门控：
+
+- 配置了 mmproj 且文件在 → `["text", "image"]`，dsh 聊天输入框随之开放贴图
+- 没配 mmproj，或配了但文件缺失（`missing-mmproj`）→ `["text"]`
+- 老面板的响应里没有该字段（不可知）→ 整个省略，不冒充任何一种能力
+
+链路：dsh 聊天里贴的图（ImageBlock）→ 宿主 attachments 服务读出字节 → 转 `image_url`
+（base64 data URL）随消息发给 llama.cpp，`proxy` / `direct` 两种模式都支持。图片读不出来
+（attachments 服务缺席、存储层校验不过等）时**降级为显式占位文本**（`[image attachment
+unavailable]`）而不是静默丢图——模型至少知道这里本该有一张图，排障也看得见；工具结果里
+的图片同样以占位文本降级。GIF / WebP 等格式能否被吃掉以 llama.cpp 的解码能力为准。
+
+## GPU 监控页
+
+dsh 设置导航里的整页监控（注册进 `settings.section` slot，条目排在官方设置页之后）。
+内容：tokens/s、KV cache tokens、GPU 显存、GPU 利用率、容器 CPU、容器内存六条 SVG
+曲线，外加分卡明细（每张卡的显存占用/利用率/温度/功耗）。时间窗四档可切：
+30m / 2h / 24h / 7d。
+
+- 轮询节拍匹配数据分辨率：30m/2h 档 5 秒（5s 采样 ring），24h/7d 档 60 秒（15min
+  聚合桶，快了纯空转）
+- 轮询是**增量**的：带上次水位 `since` 只取新点拼接，窗口滚动到点自动整窗重拉；
+  切页 / 切档时在途请求即刻取消，组件挂载即轮询、离开页面即停
+- 温度/功耗解析不到（nvidia-smi 不报）时该段省略而不是补 0——「65°C」和「温度未知」
+  是两回事
+
+## 系统提示快照（混合路由）
+
+插件向 dsh 的系统提示注入一个 `llamapad:local-fleet` 分节（英文，消费方是模型）：正在
+跑什么模型、还能启动哪些（可启动清单至多 20 条，超出以计数提示）。任何 provider 的
+模型——包括云端模型——都能在系统提示里看到本地模型场，进而自行把合适的任务引导到本地
+模型，或直接调 `llamapad_start_model` 拉起（"云端大脑 + 本地算力"混合路由的地基）。数据
+来自事件驱动刷新器顺手维护的舰队缓存，每次组装系统提示时同步求值，注册一次即永远反映
+最新状态；面板不可达 / 还没探测成功时这一节自动缺席（不会谎报"本地没有模型"）。
+
+配置开关 `statusPromptSection`（默认 `true`）。**隐私说明**：快照会作为系统提示的一部分
+发给会话使用的 provider——会话走云端模型时等于把本地 GPU 上有什么模型告诉了云端服务商，
+介意请关闭。
+
 ## 配置
 
 | 字段 | 默认 | 说明 |
@@ -127,8 +199,12 @@ cordis.yml，**改完立即生效，不用重启 dsh**。token 输入框留空�
 | `drainTimeoutMs` | `60000` | 排空等待的最长时间（`drainOnSwitch=true` 时生效）；`auto-switch` 档与设置卡片启停按钮共用同一个数字 |
 | `requestTimeoutMs` | `30000` | 面板控制面单请求超时 |
 | `defaultContextWindow` | — | 模型未配置 ctx_size 时的兜底 |
-| `statusRefreshMs` | `5000` | 轮询面板运行状态并刷新模型选择器的间隔（毫秒）；`0` 关闭。仅影响选择器上的运行中标记，不影响对话 |
+| `statusRefreshMs` | `5000` | 刷新模型选择器运行状态的节拍（毫秒）：SSE 事件驱动模式下是断流看门狗的探测间隔，SSE 连败降级后是轮询间隔；`0` 完全关闭（连 SSE 也不连）。仅影响选择器上的运行中标记，不影响对话 |
 | `hideStoppedModels` | `false` | 开启后模型选择器只显示运行中的模型；`chatBehavior: auto-switch` 档下该开关被忽略（那一档要靠选中未启动的模型触发自动启动），忽略时会打一条 console 警告 |
+| `statusPromptSection` | `true` | 系统提示是否包含本地模型场快照分节（见上「系统提示快照（混合路由）」）。隐私考量：关闭后该分节不再随系统提示发给远端 provider |
+
+B 形态（`llamapad-dsh-plugin/tools`）另有独有配置 `toolApproval`（默认 `allow`；`ask` 档下
+Agent 调用启停工具需用户确认，宿主无审批通道时折算为拒绝执行，见上「B 形态」）。
 
 挂载示例见 [examples/cordis.yml](examples/cordis.yml)。
 
@@ -277,6 +353,11 @@ pnpm pack              # prepare 钩子自动先 build，产出可安装 tgz
 - [聊天路由与生命周期解耦](docs/design/chat-vs-lifecycle-decoupling.md)
   ——阶段一（`chatBehavior` 三档 + 在途流保护）与阶段二（设置卡片）均已实施
 - [设置卡片设计记录](docs/design/settings-card-design.md)——架构、四条真机硬约束、已知缺口
+- [第三批方案：多模态 / 监控 / 事件 / 提示词快照](docs/design/2026-09-03-multimodal-monitor-events-prompt.md)
+  与五个里程碑计划：[M1 快赢包](docs/plans/2026-09-03-m1-quick-wins.md)（工具呈现升级 /
+  RPC 取消 / 审批门）、[M2 多模态输入](docs/plans/2026-09-03-m2-multimodal.md)、
+  [M3 事件驱动](docs/plans/2026-09-03-m3-events.md)、[M4 GPU 监控页](docs/plans/2026-09-03-m4-monitor.md)、
+  [M5 提示词快照](docs/plans/2026-09-03-m5-fleet-prompt.md)
 - [手工冒烟手册](docs/manual-smoke.md)
 - [dsh 插件调研归档](docs/research/2026-08-24-dsh-plugin-research.md)（契约细节 + UX 评估依据）
-- [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（暂不实现）
+- [B 形态（管理工具插件）设计稿](docs/design/b-form-tools-design.md)（已实施，见上「B 形态」一节）
