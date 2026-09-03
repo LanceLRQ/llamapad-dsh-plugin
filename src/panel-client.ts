@@ -28,10 +28,18 @@ export interface PanelModelView {
   /** 运行中且启动后配置又被保存过——容器参数不热更新，需重启才生效。
    *  面板 modelsView.ts 一直在返回，老面板缺席时为 undefined（不可知，不等于 false） */
   configStale?: boolean;
+  /** 配置了 mmproj（视觉投影器）时为其相对路径，否则 null——它是「这个模型能不能看图」
+   *  的能力判据（见 adapter.inputModalitiesFor）。面板 ModelView 一直在返回；
+   *  老面板缺席时为 undefined（不可知），与 configStale 的「缺席不可知」语义一致 */
+  mmprojFile?: string | null;
 }
 
 export interface PanelModelDetail {
   name: string; displayName: string; namespace: string; overrides?: unknown;
+  /** 同 PanelModelView.mmprojFile。来源不同：详情行是 repo StoredModel 的 mmproj_file
+   *  （snake_case，映射见 getModel），且「没配」在该响应里就是字段缺席（repo 把 DB NULL
+   *  归一成 undefined）——与「老面板不可知」在详情路径上无法区分，统一按 undefined 处理 */
+  mmprojFile?: string | null;
 }
 
 /** GET /api/v1/models/:name/effective 的插件侧投影：只取合并后配置，
@@ -216,6 +224,8 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
     async listModels() {
       const res = await request("/api/v1/models");
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
+      // 列表行就是 ModelView（驼峰，含 mmprojFile: string | null），与插件侧投影同名
+      // 同形，直接解包透传即可——缺席（老面板）自然保持 undefined，无需映射
       const body = (await res.json()) as { models: PanelModelView[] };
       return body.models;
     },
@@ -223,7 +233,23 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       const res = await request(`/api/v1/models/${encodeURIComponent(name)}`);
       if (res.status === 404) return null;
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
-      return (await res.json()) as PanelModelDetail;
+      // 详情响应是 repo StoredModel 原样序列化（snake_case：display_name / mmproj_file
+      // 等），插件侧投影统一驼峰。display_name 双读：真机契约是 snake_case（历史版本
+      // 只读驼峰，真机上展示名恒回落到模型 id——假面板/单测喂的是驼峰，两条路都得活）。
+      // mmproj_file 在「没配」时本就是字段缺席（repo 把 DB NULL 归一成 undefined，
+      // JSON 序列化丢键），保持缺席透出——归一成 null 会把「老面板不可知」塌缩成
+      // 「明确文本模型」，inputModalitiesFor 的三态就只剩两态了
+      const row = (await res.json()) as {
+        name: string; display_name?: string; displayName?: string; namespace: string;
+        overrides?: unknown; mmproj_file?: string | null;
+      };
+      return {
+        name: row.name,
+        displayName: row.display_name ?? row.displayName ?? row.name,
+        namespace: row.namespace,
+        ...(row.overrides !== undefined ? { overrides: row.overrides } : {}),
+        ...(row.mmproj_file !== undefined ? { mmprojFile: row.mmproj_file } : {}),
+      };
     },
     async getEffectiveConfig(name) {
       const res = await request(`/api/v1/models/${encodeURIComponent(name)}/effective`);

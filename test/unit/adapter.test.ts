@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LlamapadAdapter, describeModel, filterModelsForSelector } from "../../src/adapter";
+import { LlamapadAdapter, describeModel, filterModelsForSelector, inputModalitiesFor } from "../../src/adapter";
 import type { PanelModelView } from "../../src/panel-client";
 
 function sseResponse(lines: string[], status = 200): Response {
@@ -99,6 +99,25 @@ describe("LlamapadAdapter", () => {
       { provider: "llamapad", id: "a", name: "▶︎ 模型A", description: "main · Q4_K_M" },
       { provider: "llamapad", id: "b", name: "模型B", description: "main · 文件缺失（面板文件页可自动寻找）" },
     ]);
+  });
+
+  it("listModels：按 mmprojFile 三态上报 inputModalities（视觉 / 文本 / 老面板不可知省略）", async () => {
+    const client = { baseUrl: "x", listModels: async () => [
+      { name: "vl", displayName: "VL", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "ready", mmprojFile: "main/vl-mmproj.gguf" },
+      { name: "vl-broken", displayName: "VLB", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "missing-mmproj", mmprojFile: "main/gone.gguf" },
+      { name: "txt", displayName: "T", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "ready", mmprojFile: null },
+      { name: "old", displayName: "O", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "ready" },
+    ], getModel: async () => null, runtimeStatus: async () => ({ running: null }), startModel: async () => {}, llamaHealth: async () => true };
+    const adapter = new LlamapadAdapter({ client, gate: { ensure: async () => {}, lastStarted: () => null }, token: "t", mode: "proxy", fetchImpl: async () => null as any } as any);
+    const models = await adapter.listModels("llamapad");
+    // 配了 mmproj 且文件在 → 声明 image（running 状态同样成立，见 inputModalitiesFor 用例）
+    expect(models[0]).toMatchObject({ id: "vl", inputModalities: ["text", "image"] });
+    // 配了但文件缺（missing-mmproj，启动必 422）→ 不冒充视觉模型
+    expect(models[1]).toMatchObject({ id: "vl-broken", inputModalities: ["text"] });
+    // 明确 null（没配 mmproj）→ 文本模型
+    expect(models[2]).toMatchObject({ id: "txt", inputModalities: ["text"] });
+    // 字段缺席（老面板，不可知）→ 省略 inputModalities，不冒充任何一边
+    expect(models[3]).not.toHaveProperty("inputModalities");
   });
 
   it("resolveModel：/effective 不可用时回退读 overrides.server.ctx_size，缺省省略", async () => {
@@ -501,6 +520,42 @@ describe("resolveModel：思考强度上报", () => {
   });
 });
 
+describe("resolveModel：inputModalities 上报", () => {
+  // 与「思考强度上报」同款替身：getModel 喂 detail（panel-client 映射后的驼峰形状）
+  function clientWith(over: Record<string, unknown> = {}) {
+    return {
+      baseUrl: "http://panel:8080",
+      listModels: async () => [],
+      getModel: async () => ({ name: "a", displayName: "模型A", namespace: "main" }),
+      getEffectiveConfig: async () => ({ merged: { server: { ctx_size: 4096 } } }),
+      runtimeStatus: async () => ({ running: null }),
+      startModel: async () => {},
+      llamaHealth: async () => true,
+      ...over,
+    };
+  }
+  const build = (client: unknown) => new LlamapadAdapter({
+    client, gate: { ensure: async () => {}, lastStarted: () => null },
+    token: "t", mode: "proxy", fetchImpl: async () => null as any,
+  } as any);
+
+  it("detail 带 mmprojFile（配了 mmproj）→ [text, image]", async () => {
+    const client = clientWith({ getModel: async () => ({ name: "a", displayName: "模型A", namespace: "main", mmprojFile: "main/mmproj.gguf" }) });
+    await expect(build(client).resolveModel("llamapad", "a")).resolves.toMatchObject({ inputModalities: ["text", "image"] });
+  });
+
+  it("detail 不带 mmprojFile（没配，或老面板详情缺席）→ 省略字段，不冒充", async () => {
+    const resolved = await build(clientWith()).resolveModel("llamapad", "a");
+    expect(resolved).not.toHaveProperty("inputModalities");
+  });
+
+  it("detail 拿不到（getModel 返回 null，无回落列表的判定）→ 省略字段", async () => {
+    const client = clientWith({ getModel: async () => null });
+    const resolved = await build(client).resolveModel("llamapad", "a");
+    expect(resolved).not.toHaveProperty("inputModalities");
+  });
+});
+
 function view(name: string, status: string): PanelModelView {
   return { name, displayName: name, namespace: "main", quant: "Q4_K_M",
            sizeBytes: 0, hostPort: 18080, status };
@@ -539,5 +594,28 @@ describe("describeModel：运行标记用实心播放三角", () => {
 
   it("前缀带 U+FE0E 变体选择符，强制文本形态而非彩色 emoji", () => {
     expect(describeModel(view("x", "running")).name.codePointAt(1)).toBe(0xfe0e);
+  });
+});
+
+describe("inputModalitiesFor：mmproj 能力门控", () => {
+  it("配置了 mmproj 且文件不缺（ready/running/missing-file 均非 mmproj 缺失）→ [text, image]", () => {
+    expect(inputModalitiesFor("main/mmproj.gguf", "ready")).toEqual(["text", "image"]);
+    expect(inputModalitiesFor("main/mmproj.gguf", "running")).toEqual(["text", "image"]);
+    // gguf 缺失只挡启动，不否定视觉能力本身——文件找回来即可用
+    expect(inputModalitiesFor("main/mmproj.gguf", "missing-file")).toEqual(["text", "image"]);
+  });
+
+  it("配置了 mmproj 但 status=missing-mmproj（配了文件却缺，启动必 422）→ [text]", () => {
+    expect(inputModalitiesFor("main/mmproj.gguf", "missing-mmproj")).toEqual(["text"]);
+  });
+
+  it("明确 null（没配 mmproj，面板对非视觉模型的取值）→ [text]", () => {
+    expect(inputModalitiesFor(null, "ready")).toEqual(["text"]);
+    expect(inputModalitiesFor(null, "running")).toEqual(["text"]);
+  });
+
+  it("undefined（老面板没这个字段，不可知）→ undefined（调用方省略字段，不冒充）", () => {
+    expect(inputModalitiesFor(undefined, "ready")).toBeUndefined();
+    expect(inputModalitiesFor(undefined, "missing-mmproj")).toBeUndefined();
   });
 });

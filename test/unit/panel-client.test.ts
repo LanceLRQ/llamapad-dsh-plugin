@@ -129,6 +129,49 @@ describe("createPanelClient", () => {
     await expect(createPanelClient({ ...base, fetch: hit.fn as any }).getModel("x")).resolves.toMatchObject({ name: "x" });
   });
 
+  it("listModels：mmprojFile 三态原样透传——路径 / null / 缺席（老面板不可知）", async () => {
+    const { fn } = fakeFetch([{ body: { models: [
+      { name: "vl", displayName: "VL", namespace: "main", quant: null, sizeBytes: 1, hostPort: 18080, status: "ready", mmprojFile: "main/vl-mmproj.gguf" },
+      { name: "txt", displayName: "T", namespace: "main", quant: null, sizeBytes: 1, hostPort: 18080, status: "ready", mmprojFile: null },
+      { name: "old", displayName: "O", namespace: "main", quant: null, sizeBytes: 1, hostPort: 18080, status: "ready" },
+    ] } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    const models = await client.listModels();
+    // 列表行的字段名就是驼峰 mmprojFile，直接透传；绝不把缺席归一成 null——
+    // 那会把「老面板不可知」塌缩成「明确文本模型」，三态语义就丢了
+    expect(models[0]!.mmprojFile).toBe("main/vl-mmproj.gguf");
+    expect(models[1]!.mmprojFile).toBeNull();
+    expect(models[2]!.mmprojFile).toBeUndefined();
+  });
+
+  it("getModel：详情行的 mmproj_file（snake_case）映射为 mmprojFile，缺席时保持 undefined", async () => {
+    const hit = fakeFetch([{ body: { name: "vl", displayName: "VL", namespace: "main", mmproj_file: "main/vl-mmproj.gguf", overrides: {} } }]);
+    const detail = await createPanelClient({ ...base, fetch: hit.fn as any }).getModel("vl");
+    expect(detail).toMatchObject({ name: "vl", namespace: "main", mmprojFile: "main/vl-mmproj.gguf", overrides: {} });
+    expect(detail).not.toHaveProperty("mmproj_file");  // 投影统一驼峰，蛇形原键不外泄
+
+    const bare = fakeFetch([{ body: { name: "txt", displayName: "T", namespace: "main" } }]);
+    const bareDetail = await createPanelClient({ ...base, fetch: bare.fn as any }).getModel("txt");
+    expect(bareDetail).toMatchObject({ name: "txt" });
+    expect(bareDetail!.mmprojFile).toBeUndefined();
+  });
+
+  it("getModel：详情行 display_name（snake_case，真机契约）优先于驼峰，两者皆无回落 name", async () => {
+    // 真机详情是 StoredModel 原样（display_name 蛇形）；驼峰只有假面板/旧单测在喂。
+    // 双读保两条路都活，修复「真机上展示名恒回落到模型 id」的既有偏差
+    const snake = fakeFetch([{ body: { name: "a", display_name: "真机名", namespace: "main" } }]);
+    await expect(createPanelClient({ ...base, fetch: snake.fn as any }).getModel("a"))
+      .resolves.toMatchObject({ name: "a", displayName: "真机名" });
+
+    const camel = fakeFetch([{ body: { name: "a", displayName: "驼峰名", namespace: "main" } }]);
+    await expect(createPanelClient({ ...base, fetch: camel.fn as any }).getModel("a"))
+      .resolves.toMatchObject({ name: "a", displayName: "驼峰名" });
+
+    const neither = fakeFetch([{ body: { name: "a", namespace: "main" } }]);
+    await expect(createPanelClient({ ...base, fetch: neither.fn as any }).getModel("a"))
+      .resolves.toMatchObject({ name: "a", displayName: "a" });
+  });
+
   it("getEffectiveConfig：404→null，200→返回体，非 ok→PanelError", async () => {
     const miss = fakeFetch([{ status: 404, body: { error: "no" } }]);
     await expect(createPanelClient({ ...base, fetch: miss.fn as any }).getEffectiveConfig("x")).resolves.toBeNull();

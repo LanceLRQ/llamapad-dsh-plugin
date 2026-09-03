@@ -1,5 +1,5 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
-import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from "@deepseek-ai/dsh-llm";
+import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, ModelModality, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
 import { decideRoute, type ChatBehavior, type RouteBlockReason } from "./routing";
@@ -46,7 +46,13 @@ export class LlamapadAdapter extends LlmAdapter {
     const visible = filterModelsForSelector(models, this.options.hideStoppedModels === true);
     return visible.map((m) => {
       const { name, description } = describeModel(m);
-      return { provider, id: m.name, name, description };
+      // inputModalities 缺省 = 不可知（宿主类型契约），所以「老面板不可知」必须整个省略
+      // 字段而不是上报空数组——空数组是「什么都吃不了」的能力声明，不是未知
+      const inputModalities = inputModalitiesFor(m.mmprojFile, m.status);
+      return {
+        provider, id: m.name, name, description,
+        ...(inputModalities !== undefined ? { inputModalities } : {}),
+      };
     });
   }
 
@@ -67,12 +73,18 @@ export class LlamapadAdapter extends LlmAdapter {
     const source = effective !== null ? effective.merged : detail?.overrides;
     const contextWindow = readCtxSize(source) ?? this.options.defaultContextWindow;
     const reasoning = wantsReasoning ? await this.resolveReasoning(model, status) : undefined;
+    // 详情行（repo StoredModel）不做文件扫描，没有 status 可言——空串哨兵永不命中
+    // missing-mmproj 分支：配了 mmproj 即声明 image。配了但文件缺的诚实值由 listModels
+    // 报（那个模型启动必 422，本就聊不了天，这里的乐观声明无实害）；detail 拿不到
+    // （null，无回落列表的判定）与详情字段缺席一样按 undefined 省略处理
+    const inputModalities = inputModalitiesFor(detail?.mmprojFile, "");
     return {
       provider,
       id: model,
       name: detail?.displayName || model,
       ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
+      ...(inputModalities !== undefined ? { inputModalities } : {}),
     };
   }
 
@@ -241,6 +253,26 @@ export function describeModel(m: PanelModelView): { name: string; description: s
     : m.configStale === true ? " · 配置已改，重启后生效"
     : "";
   return { name, description: `${baseDescription}${suffix}` };
+}
+
+/**
+ * mmproj 能力门控：配了 mmproj（视觉投影器）的模型能吃图片输入，向 dsh 声明
+ * `inputModalities` 让宿主在贴图场景做正确的门控与提示。三态：
+ * - 配置了 mmproj 且不是 missing-mmproj → `["text","image"]`（missing-file 只挡启动，
+ *   不否定视觉能力本身——文件找回来即可用，故不参与判定）
+ * - 配了但文件缺（missing-mmproj，启动必 422）或明确 null（没配）→ `["text"]`
+ * - undefined（老面板没这个字段，不可知）→ undefined，调用方省略字段——
+ *   inputModalities 缺省即「不可知」，绝不冒充 text-only 或 vision
+ * 抽成纯函数便于单测覆盖三态边界，listModels 与 resolveModel 共用。
+ */
+export function inputModalitiesFor(
+  mmprojFile: string | null | undefined,
+  status: string,
+): readonly ModelModality[] | undefined {
+  if (mmprojFile === undefined) return undefined;
+  // 空串视同没配：面板 schema 本不允许，纯防御，语义与 null 一致
+  if (!mmprojFile || status === "missing-mmproj") return ["text"] as const;
+  return ["text", "image"] as const;
 }
 
 /**
