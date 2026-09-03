@@ -459,6 +459,72 @@ describe("LlamapadAdapter", () => {
   });
 });
 
+describe("LlamapadAdapter：图片 wire 通道（stream 预解析）", () => {
+  const imageRef: any = { attachmentId: "att_1", mediaType: "image/png", bytes: 3, width: 2, height: 1 };
+  const imageMsg = (extra: any[] = []) => ({
+    id: "m1", role: "user", source: {},
+    content: [{ type: "text", text: "看图" }, ...extra],
+  });
+
+  it("带图请求：预解析后 image_url 块进上游请求体（data URL 带 base64 前缀）", async () => {
+    const readImage = vi.fn(async () => ({ data: new Uint8Array([1, 2, 3]), mediaType: "image/png" }));
+    const { adapter, fetchImpl } = makeAdapter({ chatBehavior: "auto-switch", readImage });
+    await drain(adapter.stream(opts({ messages: [imageMsg([{ type: "image", attachment: imageRef }])] })));
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    const user = sent.messages.find((m: any) => m.role === "user");
+    expect(user.content).toEqual([
+      { type: "text", text: "看图" },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${Buffer.from([1, 2, 3]).toString("base64")}` } },
+    ]);
+    expect(readImage).toHaveBeenCalledTimes(1);
+    expect(readImage).toHaveBeenCalledWith(imageRef);
+  });
+
+  it("readImage 逐张 catch：失败的那张降级占位、成功的照发，整轮请求不被拖垮", async () => {
+    const badRef: any = { attachmentId: "att_bad", mediaType: "image/jpeg", bytes: 4, width: 2, height: 2 };
+    const readImage = vi.fn(async (ref: any) => {
+      if (ref === badRef) throw new Error("存储验证失败");
+      return { data: new Uint8Array([9]), mediaType: "image/png" };
+    });
+    const { adapter, fetchImpl } = makeAdapter({ chatBehavior: "auto-switch", readImage });
+    await drain(adapter.stream(opts({ messages: [imageMsg([
+      { type: "image", attachment: imageRef },
+      { type: "image", attachment: badRef },
+    ])] })));
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    const user = sent.messages.find((m: any) => m.role === "user");
+    expect(user.content).toEqual([
+      { type: "text", text: "看图[image attachment unavailable]" },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${Buffer.from([9]).toString("base64")}` } },
+    ]);
+  });
+
+  it("readImage 返回 null（服务缺席）→ 占位降级，请求照常发出", async () => {
+    const readImage = vi.fn(async () => null);
+    const { adapter, fetchImpl } = makeAdapter({ chatBehavior: "auto-switch", readImage });
+    await drain(adapter.stream(opts({ messages: [imageMsg([{ type: "image", attachment: imageRef }])] })));
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    expect(sent.messages[0].content).toBe("看图[image attachment unavailable]");
+  });
+
+  it("纯文本会话零开销：readImage 已配置也不被调用", async () => {
+    const readImage = vi.fn(async () => ({ data: new Uint8Array([1]), mediaType: "image/png" }));
+    const { adapter, fetchImpl } = makeAdapter({ chatBehavior: "auto-switch", readImage });
+    await drain(adapter.stream(opts()));
+    expect(readImage).not.toHaveBeenCalled();
+    // 请求体也保持旧形态：纯文本 user 消息 content 仍是 string
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    expect(sent.messages[0].content).toBe("hi");
+  });
+
+  it("未配置 readImage 时带图请求走旧路径：图静默忽略，请求照常成功", async () => {
+    const { adapter, fetchImpl } = makeAdapter({ chatBehavior: "auto-switch" });
+    await drain(adapter.stream(opts({ messages: [imageMsg([{ type: "image", attachment: imageRef }])] })));
+    const sent = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+    expect(sent.messages[0].content).toBe("看图");
+  });
+});
+
 describe("resolveModel：思考强度上报", () => {
   function clientWith(over: Record<string, unknown> = {}) {
     return {

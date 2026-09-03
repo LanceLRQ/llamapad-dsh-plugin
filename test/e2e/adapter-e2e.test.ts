@@ -123,4 +123,47 @@ describe("LlamapadAdapter E2E（假面板）", () => {
     expect(resolved.reasoning?.efforts.map((e) => e.id))
       .toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
   });
+
+  describe("图片 wire 通道", () => {
+    const pngRef: any = { attachmentId: "att_1", mediaType: "image/png", bytes: 3, width: 2, height: 1 };
+    const jpegRef: any = { attachmentId: "att_2", mediaType: "image/jpeg", bytes: 4, width: 2, height: 2 };
+
+    /** 与 drain() 同款拉流，但消息可自定义（图片用例需要带 ImageBlock） */
+    async function drainWithImages(readImage: any, blocks: any[]) {
+      const client = createPanelClient({ baseUrl, token: "lp_e2e", requestTimeoutMs: 2_000 });
+      const adapter = new LlamapadAdapter({
+        client, gate: createModelGate(client), token: "lp_e2e", mode: "proxy",
+        chatBehavior: "auto-switch", pollIntervalMs: 20, readImage,
+      });
+      const chunks = [];
+      for await (const c of adapter.stream({
+        provider: "llamapad", model: "qwen-small",
+        messages: [{ id: "m1", role: "user", content: blocks, source: {} }],
+      } as any)) chunks.push(c);
+      return chunks;
+    }
+
+    it("readImage 解析成功 → 转发到面板的请求体含 image_url 块（base64 data URL）", async () => {
+      await drainWithImages(
+        async (ref: any) => ({ data: new Uint8Array([1, 2, 3]), mediaType: ref.mediaType }),
+        [{ type: "text", text: "看图" }, { type: "image", attachment: pngRef }],
+      );
+      const sent = state.chatRequests.at(-1)!;
+      const user = (sent.messages as any[]).find((m: any) => m.role === "user");
+      expect(user.content).toEqual([
+        { type: "text", text: "看图" },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${Buffer.from([1, 2, 3]).toString("base64")}` } },
+      ]);
+    });
+
+    it("readImage 返回 null（服务缺席）→ 请求体降级为占位文本，纯文本 content", async () => {
+      await drainWithImages(
+        async () => null,
+        [{ type: "text", text: "看图" }, { type: "image", attachment: jpegRef }],
+      );
+      const sent = state.chatRequests.at(-1)!;
+      const user = (sent.messages as any[]).find((m: any) => m.role === "user");
+      expect(user.content).toBe("看图[image attachment unavailable]");
+    });
+  });
 });

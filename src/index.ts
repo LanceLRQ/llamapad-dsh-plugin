@@ -3,6 +3,9 @@ import Schema from "@deepseek-ai/schemastery";
 // 仅为副作用引入：dsh-typert-registry 用 declare module 给 ctx.typert 补上 register()
 // 等方法，不引入这个模块 TS 就看不到 augmentation（运行时由宿主提供，不进产物）。
 import type {} from "@deepseek-ai/dsh-typert-registry";
+// 同上：dsh-attachment 用 declare module 给 ctx.attachments（AttachmentStore 服务）
+// 补上类型；下面 ImageAttachmentRef 的类型引入顺带把这份 augmentation 带进编译。
+import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
 import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { LlamapadAdapter, type LlamapadAdapterOptions } from "./adapter";
 import {
@@ -135,6 +138,10 @@ export function apply(ctx: Context, config: Config) {
     setOptional(adapterOptions, "pollIntervalMs", cfg.pollIntervalMs);
     setOptional(adapterOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
     setOptional(adapterOptions, "defaultContextWindow", cfg.defaultContextWindow);
+    // 图片读取通道不依赖连接参数，每次 sync 接的都是同一个实现（赋值幂等，重复触发
+    // 的 onChange 无副作用）；放这里而非构造期，是为了让 adapterOptions 的全部接线
+    // 集中在一个函数里，避免「半个 options 在构造期、半个在 sync」的漂移。
+    adapterOptions.readImage = readImageFromAttachmentStore(ctx);
     gatewayOptions.panelUrl = params.panelUrl;
     // 设置卡片只需要「配没配」（CardSnapshot.connection.tokenConfigured），不需要 token
     // 本身参与任何请求——但缺了这行同步，tokenConfigured 会永远读到构造期的空字符串。
@@ -205,6 +212,35 @@ function assertStaticConfig(config: Config): void {
       && config.chatBehavior !== "auto-switch") {
     throw new Error(`chatBehavior 必须是 strict / passthrough / auto-switch 之一，当前: ${config.chatBehavior}`);
   }
+}
+
+/**
+ * adapter 图片读取通道的实现：机会式取宿主的 attachments 服务（AttachmentStore）。
+ *
+ * 为什么不能把 "attachments" 写进静态 inject（export const inject）：cordis 的静态注入
+ * 要求服务在启动期就位，缺席会阻塞本插件启动——而插件的价值不止图片（文本对话、
+ * 启停工具都不需要它），不该为一个可选能力赌上启动。host 的 web 组合实际必装此服务
+ * （图片贴图全靠它），但机会式获取 + null 降级让插件在任何宿主形态下都能起、纯文本
+ * 功能始终可用。
+ *
+ * ctx.get 的语义正是我们要的：服务未挂载返回 undefined（不抛错、不挂起等待）。每次
+ * 调用时现取而非启动时取一次——提供该服务的宿主组件可能在插件加载之后才挂载，
+ * 而注册表查询只是一次 map 命中，成本可忽略。
+ */
+function readImageFromAttachmentStore(ctx: Context) {
+  return async (ref: ImageAttachmentRef): Promise<{ data: Uint8Array; mediaType: string } | null> => {
+    const store = ctx.get("attachments");
+    if (store === undefined) return null;
+    try {
+      const stored = await store.readImage(ref);
+      // mediaType 取读回时验证过字节的那份（stored.ref.mediaType），比请求携带的 ref 更权威
+      return { data: stored.data, mediaType: stored.ref.mediaType };
+    } catch {
+      // 读失败（存储校验不过等）→ null，wire 层降级为占位文本；不重试，理由见
+      // adapter.ts 的 readImage 字段注释
+      return null;
+    }
+  };
 }
 
 /**

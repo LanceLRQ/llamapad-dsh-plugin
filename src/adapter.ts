@@ -1,10 +1,11 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
 import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, ModelModality, StreamChunk } from "@deepseek-ai/dsh-llm";
+import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
 import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
 import { decideRoute, type ChatBehavior, type RouteBlockReason } from "./routing";
 import { formatRouteBlock } from "./route-message";
-import { buildChatBody } from "./openai-wire";
+import { buildChatBody, collectImages, type ResolvedImage, type ResolvedImages } from "./openai-wire";
 import { translateOpenAiSse } from "./translate";
 import { buildReasoningInfo } from "./reasoning";
 
@@ -32,6 +33,14 @@ export interface LlamapadAdapterOptions {
   /** 选择器只显示运行中的模型；auto-switch 档由调用方负责忽略（见 filterModelsForSelector 注释） */
   hideStoppedModels?: boolean;
   fetchImpl?: typeof fetch;
+  /**
+   * 图片附件读取通道：把消息里的 ImageAttachmentRef 解成可进 wire 的字节（沿用
+   * fetchImpl 的注入模式，实现由 index.ts 接宿主的 attachments 服务）。
+   * 返回 null = 服务缺席或读失败——上游 wire 层以显式占位文本降级（对齐 dsh 的
+   * OFFLOADED_IMAGE_TEXT 思路），不静默丢图。不做重试：readImage 的失败多为存储层
+   * 校验不过（bytes 与 ref 不符），对同一输入重试只会得到同一结果，白白拖慢首 token。
+   */
+  readImage?: (ref: ImageAttachmentRef) => Promise<ResolvedImage | null>;
 }
 
 export class LlamapadAdapter extends LlmAdapter {
@@ -161,7 +170,11 @@ export class LlamapadAdapter extends LlmAdapter {
       : `${this.options.client.baseUrl}/api/v1/proxy/llama/v1/chat/completions`;
     const headers: Record<string, string> = { "content-type": "application/json", ...attributionHeaders() };
     if (this.options.mode === "proxy") headers.authorization = `Bearer ${this.options.token}`;
-    const body = buildChatBody(options);
+    // 图片预解析：放在路由判定之后——路由被拦（模型没起/名字对不上）时本轮请求根本
+    // 发不出去，白读一整批图。零开销门：没接 readImage 或会话里一张图都没有时不做
+    // 任何额外动作（纯文本会话不能为图片通道多做事，collectImages 甚至不被调用）。
+    const resolved = await resolveImages(options, this.options.readImage);
+    const body = buildChatBody(options, resolved);
     body.model = targetModel;  // strict 保持原样；passthrough 可能已改写为运行中的模型
     const response = await doFetch(url, {
       method: "POST",
@@ -191,6 +204,30 @@ function mapEnsureError(error: unknown, signalAborted: boolean): Error {
     return new LlmError((error as Error).message, code);
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * 把请求里的图片引用批量预解析成 wire 层要用的 Map（key 用 ref 对象引用，选择理由
+ * 见 openai-wire.ts 的 ResolvedImages 注释）。Promise.all 并行读、逐个 catch 成 null：
+ * 一张图失败只降级那一张（wire 层换占位文本），不拖垮整轮请求。
+ * 没接 readImage 或会话里一张图都没有时返回 undefined——buildChatBody 拿到
+ * undefined 即走旧版纯文本路径，纯文本会话为此零开销。
+ */
+async function resolveImages(
+  options: GenerateOptions,
+  readImage: ((ref: ImageAttachmentRef) => Promise<ResolvedImage | null>) | undefined,
+): Promise<ResolvedImages | undefined> {
+  if (readImage === undefined) return undefined;
+  const refs = collectImages(options);
+  if (refs.length === 0) return undefined;
+  const entries = await Promise.all(refs.map(async (ref) => {
+    try {
+      return [ref, await readImage(ref)] as const;
+    } catch {
+      return [ref, null] as const;
+    }
+  }));
+  return new Map(entries);
 }
 
 /**
