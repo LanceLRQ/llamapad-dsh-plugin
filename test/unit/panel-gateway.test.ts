@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@deepseek-ai/cordis";
 import { PanelGateway, type PanelGatewayOptions } from "../../src/panel-gateway";
 import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_WIRE_MODEL } from "../../src/rpc-contract";
-import { PanelError, type PanelClient, type PanelModelView } from "../../src/panel-client";
+import { PanelError, type PanelClient, type PanelModelView, type PanelEvent } from "../../src/panel-client";
 import { EnsureError, type ModelGate } from "../../src/switching";
 
 /** Service 构造只用到 ctx.reflect.provide（见 @deepseek-ai/cordis 的 Service 基类）。 */
@@ -80,9 +80,29 @@ describe("PanelGateway", () => {
         openUrl: "http://panel:8080",
         panelError: null,
         connection: { panelUrl: "http://panel:8080", tokenConfigured: false },
+        events: [], // 未接事件环（status-watch 未启用）时为空数组
       });
       expect(listModels).toHaveBeenCalledTimes(1);
       expect(runtimeStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it("events 惰性 getter 接线时：事件环内容经 toCardEvent 投影随快照下发（每次现取）", async () => {
+      const ring: PanelEvent[] = [
+        { id: 2, ts: 1725350400000, kind: "model.stop", message: "停止 qwen3" },
+        { id: 3, ts: 1725350500000, kind: "download.complete", message: "下载完成" },
+      ];
+      const { gateway } = makeGateway({ events: () => [...ring] });
+
+      const snapshot = await gateway.snapshot();
+      expect(snapshot.events).toEqual([
+        { id: 2, ts: 1725350400000, kind: "model.stop", message: "停止 qwen3" },
+        { id: 3, ts: 1725350500000, kind: "download.complete", message: "下载完成" },
+      ]);
+
+      // 环是活的：getter 现取意味着下一次快照能看到新事件，不需要重建 gateway
+      ring.push({ id: 4, ts: 1725350600000, kind: "model.start", message: "启动 qwen3" });
+      const next = await gateway.snapshot();
+      expect(next.events).toHaveLength(3);
     });
 
     it("无运行中模型、busy 为 null：running/inferring 均为 null，phase 为 idle，startedAt 为 null", async () => {

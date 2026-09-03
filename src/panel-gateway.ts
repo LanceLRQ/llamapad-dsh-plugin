@@ -12,8 +12,8 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { RPC_NAMESPACE, type CardModel, type CardSnapshot, type RuntimePhase } from "./rpc-contract";
-import { PanelError, type PanelClient, type PanelModelView } from "./panel-client";
+import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardSnapshot, type RuntimePhase } from "./rpc-contract";
+import { PanelError, type PanelClient, type PanelModelView, type PanelEvent } from "./panel-client";
 import type { ModelGate } from "./switching";
 
 /**
@@ -34,6 +34,12 @@ export interface PanelGatewayOptions {
   drainTimeoutMs?: number;
   /** 当前 token，只用来判定 CardSnapshot.connection.tokenConfigured——绝不下发到浏览器。 */
   token: string;
+  /**
+   * 最近面板事件的惰性 getter（status-watch 维护的事件环）。同样必须现取
+   * `this.options.events`（返回的函数内部闭包环实例），而不是构造期拷贝快照——
+   * 环是活的，拷走一份就永远停在构造那一刻。缺省时快照的 events 为空数组。
+   */
+  events?: () => PanelEvent[];
 }
 
 /** saveConnection 落盘走的口子：把补丁合并进本插件的 settings 分节，见 index.ts 的 writeSettings。 */
@@ -165,6 +171,9 @@ export class PanelGateway extends TypertRemoteService {
         // 只报「配没配」，token 本身一个字符都不下发（浏览器侧也没有任何用它的地方）
         tokenConfigured: this.options.token.trim() !== "",
       },
+      // 事件环经 toCardEvent 投影后随快照下发（PanelEvent → CardEvent 的字段裁剪，
+      // 见 rpc-contract.ts 的 toCardEvent 注释）；环未接线（statusRefreshMs=0）为空数组
+      events: (this.options.events?.() ?? []).map(toCardEvent),
     };
   }
 

@@ -18,6 +18,8 @@ function fakeSnapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     // 本文件不测连接配置区（那是 saveConnection 专属，client-rpc.test.ts 只测既有三个
     // 方法的外壳拆解），给一个合法占位即可。
     connection: { panelUrl: "http://panel.local", tokenConfigured: false },
+    // 事件流同上：合法占位，事件环的内容本文件不关心
+    events: [],
     ...overrides,
   };
 }

@@ -32,6 +32,8 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     // 本文件测的是 buildCardView 等纯逻辑，不涉及连接配置区，占位即可
     // （任务 6 给 CardSnapshot 加了必填的 connection 字段，这里只是同步 fixture）。
     connection: { panelUrl: "http://panel.local", tokenConfigured: false },
+    // 事件流同上：必填字段的合法占位（卡片消费 events 是后续任务的活）
+    events: [],
     ...overrides,
   };
 }

@@ -10,6 +10,9 @@
  *
  * 连带的构建约束：宿主既然按形参名推导，产物就**绝不能开 minify**（见 scripts/build.mjs）。
  */
+// 只引类型不引运行时：本文件同时进浏览器产物（client bundle），panel-client.ts 是
+// Node 侧的 HTTP 客户端，类型引用在编译期擦除、不会把它打进浏览器
+import type { PanelEvent } from "./panel-client";
 
 /** npm 包名，作为 TypertRemoteContribution.package 与描述符 id 前缀。 */
 export const RPC_PACKAGE = "llamapad-dsh-plugin";
@@ -77,6 +80,26 @@ export interface CardConnection {
   tokenConfigured: boolean;
 }
 
+/**
+ * 卡片事件流的一条（面板事件的下发投影）。字段与 PanelEvent 同形但独立声明：
+ * wire 契约只认这一个类型，面板侧投影将来加字段也不会顺着泄漏进浏览器产物——
+ * 卡片该展示什么由这里的字段集说了算。
+ */
+export interface CardEvent {
+  /** 面板事件表的自增 id，单调递增，浏览器侧用它做「已见过」去重 */
+  id: number;
+  /** 毫秒时间戳 */
+  ts: number;
+  /** 事件种类（model.start / model.stop / download.* …），卡片按前缀分组渲染 */
+  kind: string;
+  message: string;
+}
+
+/** PanelEvent → CardEvent 的投影映射，gateway 组装快照时逐条过一遍。 */
+export function toCardEvent(event: PanelEvent): CardEvent {
+  return { id: event.id, ts: event.ts, kind: event.kind, message: event.message };
+}
+
 /** 卡片一次轮询拿到的全部内容：列表 + 运行状态 + 打开面板用的地址。 */
 export interface CardSnapshot {
   models: CardModel[];
@@ -102,6 +125,11 @@ export interface CardSnapshot {
   panelError: string | null;
   /** 当前连接配置（面板地址 + token 是否已配），供设置卡片渲染连接区。 */
   connection: CardConnection;
+  /**
+   * 最近的面板事件（时间升序，最多 eventRing 容量条），来自 status-watch 的事件环。
+   * 浏览器卡片本任务暂未消费（事件流 UI 是后续任务的活），先随快照下发养数据。
+   */
+  events: CardEvent[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -129,6 +157,10 @@ function fail(field: string, expected: string): never {
 
 function asString(value: unknown, field: string): string {
   return typeof value === "string" ? value : fail(field, "string");
+}
+
+function asNumber(value: unknown, field: string): number {
+  return typeof value === "number" ? value : fail(field, "number");
 }
 
 function asNullableString(value: unknown, field: string): string | null {
@@ -159,10 +191,22 @@ function parseCardConnection(value: unknown): CardConnection {
   return { panelUrl: asString(row["panelUrl"], "snapshot.connection.panelUrl"), tokenConfigured };
 }
 
+function parseCardEvent(value: unknown, field: string): CardEvent {
+  const row = asRecord(value, field);
+  return {
+    id: asNumber(row["id"], `${field}.id`),
+    ts: asNumber(row["ts"], `${field}.ts`),
+    kind: asString(row["kind"], `${field}.kind`),
+    message: asString(row["message"], `${field}.message`),
+  };
+}
+
 function parseCardSnapshot(value: unknown): CardSnapshot {
   const row = asRecord(value, "snapshot");
   const models = row["models"];
   if (!Array.isArray(models)) fail("snapshot.models", "array");
+  const events = row["events"];
+  if (!Array.isArray(events)) fail("snapshot.events", "array");
   const inferring = row["inferring"];
   if (inferring !== null && typeof inferring !== "boolean") fail("snapshot.inferring", "boolean | null");
   const phase = row["phase"];
@@ -178,6 +222,7 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
     openUrl: asString(row["openUrl"], "snapshot.openUrl"),
     panelError: asNullableString(row["panelError"], "snapshot.panelError"),
     connection: parseCardConnection(row["connection"]),
+    events: events.map((item, index) => parseCardEvent(item, `snapshot.events[${index}]`)),
   };
 }
 

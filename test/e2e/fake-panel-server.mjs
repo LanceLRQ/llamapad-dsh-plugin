@@ -1,11 +1,23 @@
 import { createServer } from "node:http";
 
 /**
- * llamapad 假面板：实现插件用到的 5 个控制面端点 + llama.cpp 反代（health + chat SSE）。
- * 状态机：start 置 running + readyAt；health 在 readyAt 前回 503。
+ * llamapad 假面板：实现插件用到的控制面端点 + 事件端点（查询/SSE）+ llama.cpp 反代
+ * （health + chat SSE）。状态机：start 置 running + readyAt；health 在 readyAt 前回 503。
+ * start/stop 路由会像真实面板一样写 model.* 事件并推给挂着的 SSE 订阅者。
  */
 export function createFakePanel({ loadMs = 100 } = {}) {
-  const state = { running: null, readyAt: 0, starts: [], stops: [], chatRequests: [], busy: null };
+  const state = {
+    running: null, readyAt: 0, starts: [], stops: [], chatRequests: [], busy: null,
+    events: [], eventStreams: new Set(), eventConnections: 0,
+  };
+  let nextEventId = 1;
+  /** 写一条事件并推给全部 SSE 订阅者（真实面板 eventsStream.ts 的最小同构） */
+  const emitEvent = (kind, message) => {
+    const event = { id: nextEventId++, ts: Date.now(), kind, message };
+    state.events.push(event);
+    const frame = `data: ${JSON.stringify({ type: "event", ...event })}\n\n`;
+    for (const res of state.eventStreams) res.write(frame);
+  };
   const MODELS = [
     { name: "qwen-small", displayName: "Qwen 小", namespace: "main", ggufFile: "main/a.gguf", mmprojFile: null, status: "stopped", quant: "Q4_K_M", sizeBytes: 100, fileCount: 1, hostPort: 18080 },
     { name: "qwen-big", displayName: "Qwen 大", namespace: "main", ggufFile: "main/b.gguf", mmprojFile: null, status: "stopped", quant: "Q8_0", sizeBytes: 200, fileCount: 1, hostPort: 18080 },
@@ -46,6 +58,7 @@ export function createFakePanel({ loadMs = 100 } = {}) {
         state.starts.push(name);
         state.running = name;
         state.readyAt = Date.now() + loadMs;
+        emitEvent("model.start", `启动 ${name}`);
         const resBody = { id: `cid-${state.starts.length}` };
         if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
           // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
@@ -69,6 +82,7 @@ export function createFakePanel({ loadMs = 100 } = {}) {
         // stopModel 对无容器幂等成功（服务端语义），假面板同样不校验"是不是当前运行的那个"
         state.running = null;
         state.readyAt = 0;
+        emitEvent("model.stop", `停止 ${name}`);
         const resBody = { ok: true };
         if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
           // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
@@ -76,6 +90,34 @@ export function createFakePanel({ loadMs = 100 } = {}) {
           resBody.drain = { drained: true, reason: "idle" };
         }
         return json(200, resBody);
+      });
+      return;
+    }
+    // 事件查询：ts 倒序、limit 默认 20（与真实面板 /api/v1/events 契约一致）。
+    // kind 过滤顺手实现，虽然插件当前只用 limit
+    if (req.method === "GET" && url.pathname === "/api/v1/events") {
+      const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 20) || 20));
+      const kind = url.searchParams.get("kind");
+      const events = state.events
+        .filter((e) => !kind || e.kind === kind)
+        .slice(-limit)
+        .reverse();
+      return json(200, { events });
+    }
+    // 事件 SSE 流：连接即发 snapshot（最近 20 条，ts 倒序），此后增量 event 帧，
+    // 连接保持打开（真实面板 15s 心跳注释行对客户端解析不可见，这里省略不影响契约）
+    if (req.method === "GET" && url.pathname === "/api/v1/events/stream") {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      const snapshot = state.events.slice(-20).reverse();
+      res.write(`data: ${JSON.stringify({ type: "snapshot", events: snapshot })}\n\n`);
+      state.eventStreams.add(res);
+      state.eventConnections += 1;
+      req.on("close", () => {
+        state.eventStreams.delete(res);
       });
       return;
     }

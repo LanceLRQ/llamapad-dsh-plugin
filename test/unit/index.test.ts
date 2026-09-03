@@ -97,13 +97,13 @@ describe("插件入口", () => {
     expect(parsed.statusRefreshMs).toBe(5000);
   });
 
-  it("apply：注册后启动目录刷新器（ctx.effect 被调用一次）", () => {
+  it("apply：注册后启动状态刷新器（ctx.effect 被调用一次）", () => {
     const ctx = fakeCtx();
     apply(ctx, Config(valid) as any);
     expect(ctx.effect).toHaveBeenCalledTimes(1);
   });
 
-  it("statusRefreshMs=0 时不启动目录刷新器", () => {
+  it("statusRefreshMs=0 时不启动状态刷新器（SSE 也不连）", () => {
     const ctx = fakeCtx();
     apply(ctx, Config({ ...valid, statusRefreshMs: 0 }) as any);
     expect(ctx.effect).not.toHaveBeenCalled();
@@ -113,7 +113,7 @@ describe("插件入口", () => {
   // 排在早退之后，settings namespace 从未注册，设置页里卡片压根不出现，用户无处
   // 补配置。adapter 与 typert 描述符照常注册，client 换成 createUnconfiguredClient()
   // 这个所有方法都抛指路错误的桩（见「apply：未配置时的降级」）。
-  it("缺 panelUrl/token 时仍然注册 adapter 与目录刷新器", () => {
+  it("缺 panelUrl/token 时仍然注册 adapter 与状态刷新器", () => {
     const ctx = fakeCtx();
     apply(ctx, Config({}) as any);
     expect(ctx.llm.registerAdapter).toHaveBeenCalledTimes(1);

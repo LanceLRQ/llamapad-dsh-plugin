@@ -12,7 +12,7 @@ import {
   connectionChanged, createUnconfiguredClient, isConnectionComplete, readConnection,
   type ConnectionParams,
 } from "./connection";
-import { startDirectoryRefresh } from "./directory-refresh";
+import { createEventRing, createFleetCache, startStatusWatch } from "./status-watch";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
 import { PanelGateway, type PanelGatewayOptions } from "./panel-gateway";
 import { RPC_CONTRIBUTION, RPC_PACKAGE, SETTINGS_NAMESPACE } from "./rpc-contract";
@@ -99,6 +99,15 @@ export function apply(ctx: Context, config: Config) {
     client: adapterOptions.client, gate: adapterOptions.gate, panelUrl: "", token: "",
   };
 
+  // 事件环与 fleet 缓存放在 apply 内实例、闭包持有（而非模块级）：本插件在 dsh 里
+  // 是按 fiber 装载/卸载的，模块级单例会在重复装载时串次；而 syncConnection 的反复
+  // 触发（配置热更）不会重建它们——环里的历史事件与缓存不因改配置而丢。
+  // fleetCache 本任务还没有消费者：它是 M5「提示词快照」的数据源，先随每次状态
+  // 探测养数据；eventRing 经 gatewayOptions.events 接进设置卡片的快照。
+  const eventRing = createEventRing();
+  const fleetCache = createFleetCache();
+  gatewayOptions.events = () => eventRing.snapshot();
+
   let live: ConnectionParams | null = null;
 
   /** 幂等：连接参数没变就什么都不做。onChange 每次写入都会触发，包括我们自己写的那次。 */
@@ -173,7 +182,15 @@ export function apply(ctx: Context, config: Config) {
   }
 
   ctx.llm.registerAdapter([config.provider], new LlamapadAdapter(adapterOptions));
-  startDirectoryRefresh({ ctx, client: () => adapterOptions.client, intervalMs: config.statusRefreshMs });
+  // SSE 驱动的状态刷新器（吸收自旧 directory-refresh）：model.* 事件即时探测、断流
+  // 看门狗 + 降级轮询都在里面；intervalMs=0 完全不启动（连 SSE 都不连）
+  startStatusWatch({
+    ctx,
+    client: () => adapterOptions.client,
+    intervalMs: config.statusRefreshMs,
+    fleetCache,
+    eventRing,
+  });
 
   // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
