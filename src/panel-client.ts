@@ -71,6 +71,16 @@ export interface PanelRuntimeStatus {
   busy?: { inferring: boolean; slotsRunning: number } | null;
 }
 
+/** 面板 events 表行的插件侧投影：GET /api/v1/events 响应行与 SSE snapshot/event 帧
+ *  同构（面板 eventsStream.ts 的 EventRow）。ts 为毫秒时间戳；查询与快照按 ts 倒序、
+ *  增量帧按 id 升序——顺序语义由调用方消化，本层只透传 */
+export interface PanelEvent {
+  id: number;
+  ts: number;
+  kind: string;
+  message: string;
+}
+
 /** 排空等待的默认上限（毫秒），与服务端 runtime.ts 的 DEFAULT_DRAIN_TIMEOUT_MS 对齐。
  *  放在本文件（最底层、无同级依赖）供 adapter 与 index 的 schema 默认值共用，
  *  不让同一个数字散落三处各写一遍。 */
@@ -101,6 +111,22 @@ export interface StopModelResult {
   drain?: { drained: boolean; reason: "idle" | "timeout" | "unavailable" | "skipped" };
 }
 
+/** streamEvents 的回调句柄。错误语义刻意收窄：onError 只在「建连失败/端点不可用/
+ *  鉴权失败」时触发一次（供调用方降级），**已建立后的断流静默**——重连是调用方
+ *  （status-watch）的职责，本层是尽力而为的长连接，不做退避重试。 */
+export interface StreamEventsHandler {
+  /**
+   * 调用方取消手势（如组件卸载）：abort 即停流，语义等同调用返回的停止函数。
+   * SSE 需 Authorization 头而浏览器 EventSource 不支持自定义头，所以这里走
+   * fetch 流式解析而非 EventSource——signal 是这套自管解析的取消通道
+   */
+  signal?: AbortSignal;
+  /** 每条事件回调一次：snapshot 帧的 events 逐条、event 帧单条 */
+  onEvent: (event: PanelEvent) => void;
+  /** 端点不可用通道：PanelError（AUTH | PANEL_HTTP | PANEL_UNREACHABLE）。停止后静默 */
+  onError?: (error: PanelError) => void;
+}
+
 export interface PanelClient {
   readonly baseUrl: string;
   listModels(): Promise<PanelModelView[]>;
@@ -112,6 +138,14 @@ export interface PanelClient {
   /** 读当前运行模型的思考强度声明；端点不可用 / 无模型在跑 / 老面板一律 null（不可知） */
   getReasoningInfo(): Promise<PanelReasoningInfo | null>;
   llamaHealth(): Promise<boolean>;
+  /** 查询最近事件（ts 毫秒倒序）；limit/kind 缺省时不发参数，服务端默认 20 条 */
+  getEvents(options?: { limit?: number; kind?: string }): Promise<PanelEvent[]>;
+  /**
+   * 订阅面板事件 SSE 流（GET /api/v1/events/stream，连接即发 snapshot、此后增量
+   * event 帧、15s 心跳注释行）。尽力而为的长连接：断流不抛错（重连由调用方负责），
+   * 建连失败/鉴权失败走 handler.onError（供调用方降级）。返回幂等的停止函数。
+   */
+  streamEvents(handler: StreamEventsHandler): () => void;
 }
 
 /**
@@ -142,6 +176,52 @@ function buildDrainRequest(
     ? Math.max(defaultTimeoutMs, effectiveDrainMs + 10_000)
     : undefined;
   return { body, timeoutOverride };
+}
+
+/**
+ * SSE 帧解析器（纯函数工厂，导出供单测）：喂网络 chunk（字符串），内部攒缓冲，凑齐
+ * 完整帧（空行分界）就把 data 载荷 JSON.parse 后交给 onData。把撕裂/粘连/心跳注释/
+ * CRLF 这些边界全部收敛在这一个可单测的单元里消化，streamEvents 只剩连接管理。
+ *
+ * - 帧分隔：空行。CR/LF/CRLF 先统一归一成 \n 再找 \n\n 边界——面板侧 data 恒为单行
+ *   JSON（sse.ts），载荷里不会出现裸 CR/LF，归一不会破坏内容；chunk 撕在 \r 与 \n
+ *   之间也安全：归一后至多多出一行空行，而空行/空帧本来就被忽略
+ * - 帧内规则：只收集 data: 行（多行以 \n 拼接，SSE 规范语义），`:` 开头的注释行
+ *   （15s 心跳保活）与 id:/event:/retry: 行一概忽略——面板增量帧刻意不带 id: 行
+ *   （无 Last-Event-ID 重放语义），即便带了也不影响解析
+ * - 容错：JSON 解析失败的帧静默丢弃——尽力而为的流不该被一帧脏数据整条炸掉
+ */
+export function createSseFrameParser(onData: (json: unknown) => void): (chunk: string) => void {
+  let buffer = "";
+  return (chunk: string) => {
+    buffer = (buffer + chunk).replace(/\r\n?/g, "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith(":")) continue; // 心跳注释行，对客户端不可见
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, "")); // 冒号后至多一个空格
+      }
+      if (dataLines.length > 0) {
+        try {
+          onData(JSON.parse(dataLines.join("\n")));
+        } catch {
+          // 脏帧静默丢弃
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+  };
+}
+
+/** SSE 载荷的最小结构校验：四个字段齐且类型对才算一条事件——坏帧丢弃不炸流 */
+function isPanelEvent(v: unknown): v is PanelEvent {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.id === "number" && typeof e.ts === "number"
+    && typeof e.kind === "string" && typeof e.message === "string";
 }
 
 export function createPanelClient(options: PanelClientOptions): PanelClient {
@@ -310,6 +390,99 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       } catch {
         return false;
       }
+    },
+    async getEvents(eventsOptions) {
+      // limit/kind 缺省不发参数：让服务端用它自己的默认值（20 条/不过滤）。
+      // 显式发 limit=20 会把「默认」焊死在两端，将来服务端调整默认就失配了
+      const params = new URLSearchParams();
+      if (eventsOptions?.limit !== undefined) params.set("limit", String(eventsOptions.limit));
+      if (eventsOptions?.kind !== undefined) params.set("kind", eventsOptions.kind);
+      const qs = params.toString();
+      const res = await request(`/api/v1/events${qs ? `?${qs}` : ""}`);
+      if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
+      const body = (await res.json()) as { events: PanelEvent[] };
+      return body.events;
+    },
+    streamEvents(handler) {
+      // 停止语义三件套：stopped 标志（一切回调静默的判据）+ 内部 AbortController
+      // （掐断 fetch）+ reader.cancel()（掐断读循环——手动/代理包装的流未必把 fetch
+      // signal 的 abort 传导到 body，cancel 是兜底）。幂等：多次调用只生效一次
+      const internal = new AbortController();
+      let stopped = false;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+
+      const stop = (): void => {
+        if (stopped) return;
+        stopped = true;
+        internal.abort();
+        reader?.cancel().catch(() => {}); // 已关/已取消的流再 cancel 会拒，吞掉
+      };
+
+      if (handler.signal?.aborted) {
+        // 信号早已 abort：abort 事件已经错过（addEventListener 不会再触发），补检
+        // 短路——连都不建。组件卸载先于异步建连完成的场景（StrictMode 双执行）靠它
+        stopped = true;
+      } else {
+        // 外部取消走 stop()（而不只靠 fetch 的 signal abort）：保证 stopped 置位、
+        // 回调立即静默，与主动调停止函数的语义完全一致
+        handler.signal?.addEventListener("abort", stop, { once: true });
+      }
+
+      // 与 request() 同款合并降级策略：AbortSignal.any 可用则内外合并，缺席时降级
+      // 只用内部 signal——停止是底线语义必须保住，外部取消是增强丢了不炸。
+      // 关键差异：这里**故意没有超时层**——request() 的 AbortSignal.timeout 是单请求
+      // 超时语义，会把它不该管的常驻 SSE 连接在 30s 处掐死
+      const signal = handler.signal !== undefined && typeof AbortSignal.any === "function"
+        ? AbortSignal.any([internal.signal, handler.signal])
+        : internal.signal;
+
+      void (async () => {
+        if (stopped) return;
+        let connected = false; // 区分「建连失败」（走 onError 供降级）与「中途断流」（静默）
+        try {
+          const res = await doFetch(`${base}/api/v1/events/stream`, {
+            headers: { authorization: `Bearer ${options.token}` },
+            signal,
+          });
+          if (stopped) return;
+          if (!res.ok) {
+            // 401（token 失效）/404（老面板没有事件端点）等：不抛——streamEvents 是
+            // 尽力而为的订阅，把「端点不可用」经 onError 递给调用方做降级
+            handler.onError?.(new PanelError(await readError(res), codeFor(res), res.status));
+            return;
+          }
+          if (!res.body) return; // ok 却没有流体：怪异但不值得报错的边角，静默
+          connected = true;
+          reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const feed = createSseFrameParser((payload) => {
+            if (stopped) return; // 停止函数被调后一切回调静默
+            const frame = payload as { type?: unknown; events?: unknown };
+            if (frame?.type === "snapshot" && Array.isArray(frame.events)) {
+              // 连接建立即发的快照：逐条回调。面板不支持 Last-Event-ID 重放，断线
+              // 重连靠新 snapshot 对齐（幂等替换整表），那是调用方的职责——本层只透传
+              for (const e of frame.events) if (isPanelEvent(e)) handler.onEvent(e);
+            } else if (frame?.type === "event" && isPanelEvent(frame)) {
+              handler.onEvent(frame);
+            }
+          });
+          // { stream: true }：多字节 UTF-8 字符撕在 chunk 边界也不烂（事件 message 含中文）
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (stopped || done) break;
+            feed(decoder.decode(value, { stream: true }));
+          }
+        } catch {
+          // 不抛给调用方：网络错误/流断开一律吞掉。仅建连阶段的失败走 onError
+          // （PANEL_UNREACHABLE，调用方可据此降级或稍后自行重连）；已建立后的断流
+          // 静默——退避/周期重试策略属于调用方（status-watch），本层不做
+          if (!stopped && !connected) {
+            handler.onError?.(new PanelError(`llamapad 面板不可达: ${base}`, "PANEL_UNREACHABLE"));
+          }
+        }
+      })();
+
+      return stop;
     },
   };
 }

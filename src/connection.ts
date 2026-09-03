@@ -75,5 +75,9 @@ export function createUnconfiguredClient(): PanelClient {
     stopModel: async () => unconfigured(),
     getReasoningInfo: async () => null,
     llamaHealth: async () => false,
+    getEvents: async () => unconfigured(),
+    // streamEvents 是尽力而为的长连接（断流都不抛），未配置态给「立即静默的空流」
+    // 比抛错更贴契约：调用方（status-watch）本来就按「没有事件」处理静默
+    streamEvents: () => () => {},
   };
 }

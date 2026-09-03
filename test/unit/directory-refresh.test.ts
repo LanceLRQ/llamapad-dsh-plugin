@@ -46,6 +46,8 @@ function fakeClient(runtimeStatus: PanelClient["runtimeStatus"]): PanelClient {
     stopModel: async () => ({ ok: true }),
     getReasoningInfo: async () => null,
     llamaHealth: async () => true,
+    getEvents: async () => [],
+    streamEvents: () => () => {},
   };
 }
 

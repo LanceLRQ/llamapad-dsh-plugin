@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPanelClient, PanelError } from "../../src/panel-client";
+import {
+  createPanelClient,
+  createSseFrameParser,
+  PanelError,
+  type PanelEvent,
+} from "../../src/panel-client";
 
 /** 记录型 fetch 替身：按序返回预设响应 */
 function fakeFetch(responses: Array<{ status?: number; body?: unknown; reject?: Error }>) {
@@ -18,6 +23,41 @@ function fakeFetch(responses: Array<{ status?: number; body?: unknown; reject?: 
 }
 
 const base = { baseUrl: "http://panel:8080/", token: "lp_test" };  // 尾斜杠：实现要剥掉
+
+/** SSE 型 fetch 替身：返回以手动 ReadableStream 为体的 Response。
+ *  push 模拟服务端推帧、close 模拟服务端收流；fail 可注入非 ok 响应或网络错误。
+ *  push 在流被取消后（停止函数已 reader.cancel）会抛，吞掉——那正是「停止后静默」
+ *  要验证的状态，不该让替身自己炸测试。 */
+function sseFetch(fail?: { status: number; body?: string } | { reject: Error }) {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const encoder = new TextEncoder();
+  const fn = vi.fn(async (url: any, init?: any) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    if (fail && "reject" in fail) throw fail.reject;
+    if (fail) return new Response(fail.body ?? "{}", { status: fail.status });
+    const stream = new ReadableStream<Uint8Array>({ start(c) { source = c; } });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  });
+  return {
+    fn,
+    calls,
+    push: (chunk: string) => {
+      try {
+        source?.enqueue(encoder.encode(chunk));
+      } catch {
+        // 流已取消/已关：静默
+      }
+    },
+    close: () => source?.close(),
+  };
+}
+
+/** 测试事件工厂 + 两种帧的序列化（与面板 sse.ts 的 wire 格式一致：单行 data JSON） */
+const sseEvent = (id: number): PanelEvent =>
+  ({ id, ts: 1_700_000_000_000 + id, kind: "model.start", message: `事件 ${id}` });
+const snapshotFrame = (events: PanelEvent[]) => `data: ${JSON.stringify({ type: "snapshot", events })}\n\n`;
+const eventFrame = (e: PanelEvent) => `data: ${JSON.stringify({ type: "event", ...e })}\n\n`;
 
 describe("createPanelClient", () => {
   it("listModels 发 Bearer 头并解包 {models:[]}", async () => {
@@ -338,5 +378,235 @@ describe("createPanelClient", () => {
     await expect(createPanelClient({ ...base, fetch: fn503 as any }).getReasoningInfo()).resolves.toBeNull();
     const { fn: fnErr } = fakeFetch([{ reject: new Error("ECONNREFUSED") }]);
     await expect(createPanelClient({ ...base, fetch: fnErr as any }).getReasoningInfo()).resolves.toBeNull();
+  });
+
+  describe("getEvents", () => {
+    it("limit/kind 拼进 query，带 Bearer 头并解包 {events:[]} 响应", async () => {
+      const { fn, calls } = fakeFetch([{ body: { events: [
+        { id: 2, ts: 1725350400000, kind: "model.start", message: "启动 qwen3" },
+        { id: 1, ts: 1725350300000, kind: "model.stop", message: "停止 qwen3" },
+      ] } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const events = await client.getEvents({ limit: 5, kind: "model.start" });
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/events?limit=5&kind=model.start");
+      expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
+      expect(events).toEqual([
+        { id: 2, ts: 1725350400000, kind: "model.start", message: "启动 qwen3" },
+        { id: 1, ts: 1725350300000, kind: "model.stop", message: "停止 qwen3" },
+      ]);
+    });
+
+    it("limit/kind 缺省时不带 query（服务端用默认 20 条，不在客户端焊死）", async () => {
+      const { fn, calls } = fakeFetch([{ body: { events: [] } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.getEvents()).resolves.toEqual([]);
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/events");
+    });
+
+    it("非 ok → PanelError（401→AUTH、500→PANEL_HTTP），与其余读路径同一套映射", async () => {
+      const unauth = fakeFetch([{ status: 401, body: { error: "unauthorized" } }]);
+      await expect(createPanelClient({ ...base, fetch: unauth.fn as any }).getEvents())
+        .rejects.toMatchObject({ code: "AUTH", status: 401 });
+      const boom = fakeFetch([{ status: 500, body: { error: "boom" } }]);
+      await expect(createPanelClient({ ...base, fetch: boom.fn as any }).getEvents())
+        .rejects.toMatchObject({ code: "PANEL_HTTP", status: 500 });
+    });
+  });
+
+  describe("streamEvents", () => {
+    it("snapshot 帧的 events 逐条回调、event 帧单条回调（顺序保持），打 /api/v1/events/stream 且带 Bearer 头", async () => {
+      const { fn, push, calls } = sseFetch();
+      const events: PanelEvent[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: (e) => events.push(e) });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(snapshotFrame([sseEvent(1), sseEvent(2)]));
+      await vi.waitFor(() => expect(events).toHaveLength(2));
+      push(eventFrame(sseEvent(3)));
+      await vi.waitFor(() => expect(events).toHaveLength(3));
+      expect(events.map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/events/stream");
+      expect((calls[0]!.init.headers as any).authorization).toBe("Bearer lp_test");
+    });
+
+    it("心跳注释行不产生回调（帧内混排也只取 data）", async () => {
+      const { fn, push } = sseFetch();
+      const events: PanelEvent[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: (e) => events.push(e) });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(`: ping\n\n${snapshotFrame([sseEvent(1)])}`);
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      push(`: ping\n\n`);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(events).toHaveLength(1);  // 心跳不喂事件
+    });
+
+    it("停止函数后一切回调静默，且幂等", async () => {
+      const { fn, push } = sseFetch();
+      const events: PanelEvent[] = [];
+      const errors: PanelError[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const stop = client.streamEvents({
+        onEvent: (e) => events.push(e),
+        onError: (err) => errors.push(err),
+      });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(snapshotFrame([sseEvent(1)]));
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      stop();
+      stop();  // 幂等：重复调用不炸、不重复副作用
+      push(`${snapshotFrame([sseEvent(2)])}${eventFrame(sseEvent(3))}`);
+      await new Promise((r) => setTimeout(r, 25));
+      expect(events).toHaveLength(1);
+      expect(errors).toHaveLength(0);  // 停止不是错误
+    });
+
+    it("非 ok 响应（401）→ onError(AUTH)，不抛异常、onEvent 不触发", async () => {
+      const { fn } = sseFetch({ status: 401, body: JSON.stringify({ error: "unauthorized" }) });
+      const events: PanelEvent[] = [];
+      const errors: PanelError[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: (e) => events.push(e), onError: (err) => errors.push(err) });
+      await vi.waitFor(() => expect(errors).toHaveLength(1));
+      expect(errors[0]).toMatchObject({ code: "AUTH", status: 401 });
+      expect(events).toHaveLength(0);
+    });
+
+    it("网络错误（建连失败）→ onError(PANEL_UNREACHABLE)，不产生未处理拒绝", async () => {
+      const { fn } = sseFetch({ reject: new TypeError("fetch failed") });
+      const errors: PanelError[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: () => {}, onError: (err) => errors.push(err) });
+      await vi.waitFor(() => expect(errors).toHaveLength(1));
+      expect(errors[0]).toMatchObject({ code: "PANEL_UNREACHABLE" });
+    });
+
+    it("服务端正常收流（done）→ 静默退出，不触发 onError（断线重连是调用方职责）", async () => {
+      const { fn, push, close } = sseFetch();
+      const events: PanelEvent[] = [];
+      const errors: PanelError[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: (e) => events.push(e), onError: (err) => errors.push(err) });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(snapshotFrame([sseEvent(1)]));
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      close();
+      await new Promise((r) => setTimeout(r, 25));
+      expect(errors).toHaveLength(0);
+    });
+
+    it("常驻连接不设单请求超时：绝不调 AbortSignal.timeout 掐死 SSE", async () => {
+      const spy = vi.spyOn(AbortSignal, "timeout");
+      const { fn, push } = sseFetch();
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ onEvent: () => {} });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(snapshotFrame([sseEvent(1)]));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it("外部 signal abort 后静默：fetch 收到合并 signal 且跟随 abort", async () => {
+      const controller = new AbortController();
+      const { fn, push, calls } = sseFetch();
+      const events: PanelEvent[] = [];
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      client.streamEvents({ signal: controller.signal, onEvent: (e) => events.push(e) });
+      await vi.waitFor(() => expect(fn).toHaveBeenCalled());
+      push(snapshotFrame([sseEvent(1)]));
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      // 不是裸透传外部 signal——与内部停止 signal 合并后交给 fetch
+      const signal = calls[0]!.init.signal as AbortSignal;
+      expect(signal).not.toBe(controller.signal);
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+      push(eventFrame(sseEvent(2)));
+      await new Promise((r) => setTimeout(r, 25));
+      expect(events).toHaveLength(1);
+    });
+
+    it("传入已 abort 的 signal：不建连（fetch 不被调用），返回的停止函数仍可调", async () => {
+      const { fn } = sseFetch();
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      const controller = new AbortController();
+      controller.abort();
+      const stop = client.streamEvents({ signal: controller.signal, onEvent: () => {} });
+      expect(stop).toBeTypeOf("function");
+      stop();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(fn).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("createSseFrameParser（SSE 帧解析纯函数）", () => {
+  function collect() {
+    const got: unknown[] = [];
+    return { got, feed: createSseFrameParser((json) => got.push(json)) };
+  }
+
+  it("单帧：完整 data 行解析为 JSON 吐出", () => {
+    const { got, feed } = collect();
+    feed('data: {"type":"event","id":1,"ts":2,"kind":"model.start","message":"x"}\n\n');
+    expect(got).toEqual([{ type: "event", id: 1, ts: 2, kind: "model.start", message: "x" }]);
+  });
+
+  it("一个 chunk 里多帧粘连：逐帧吐出", () => {
+    const { got, feed } = collect();
+    feed('data: {"a":1}\n\ndata: {"b":2}\n\n');
+    expect(got).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it("跨 chunk 撕裂：载荷与帧分隔符断在任意位置都不丢帧、不半帧吐出", () => {
+    const { got, feed } = collect();
+    feed('data: {"type":"eve');
+    expect(got).toHaveLength(0);  // 未凑齐：绝不吐半帧
+    feed('nt"}\n');
+    expect(got).toHaveLength(0);  // 分隔符撕一半（\n 到了、\n 没到）
+    feed('\ndata: {"b":2}\n');
+    feed('\n');
+    expect(got).toEqual([{ type: "event" }, { b: 2 }]);
+  });
+
+  it("注释行（: 开头，15s 心跳）忽略；帧内注释与 data 混排只取 data", () => {
+    const { got, feed } = collect();
+    feed(': ping\n\n');
+    feed(': keepalive\ndata: {"a":1}\n: another\n\n');
+    expect(got).toEqual([{ a: 1 }]);
+  });
+
+  it("id:/event:/retry: 等非 data 行忽略；data: 后无空格也能解析", () => {
+    const { got, feed } = collect();
+    feed('id: 7\nevent: add\nretry: 5000\ndata:{"a":1}\n\n');
+    expect(got).toEqual([{ a: 1 }]);
+  });
+
+  it("多行 data 以 \\n 拼接后作为整体 JSON 解析", () => {
+    const { got, feed } = collect();
+    feed('data: {"a":\ndata: 1}\n\n');
+    expect(got).toEqual([{ a: 1 }]);
+  });
+
+  it("CRLF 行尾容忍，含撕裂在 \\r 与 \\n 之间", () => {
+    const { got, feed } = collect();
+    feed('data: {"a":1}\r\n\r\n');
+    feed('data: {"b":2}\r');  // 撕裂点落在 CRLF 中间
+    feed('\n\r\n');
+    expect(got).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it("无法 JSON 解析的载荷静默丢弃，不炸流", () => {
+    const { got, feed } = collect();
+    feed('data: not-json\n\n');
+    feed('data: {"a":1}\n\n');
+    expect(got).toEqual([{ a: 1 }]);
+  });
+
+  it("只有注释/空行、无 data 的帧不产生回调", () => {
+    const { got, feed } = collect();
+    feed('\n\n: only-comment\n\n\n\n');
+    expect(got).toEqual([]);
   });
 });
