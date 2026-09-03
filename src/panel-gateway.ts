@@ -135,20 +135,42 @@ export class PanelGateway extends TypertRemoteService {
     if (range !== "30m" && range !== "2h" && range !== "24h" && range !== "7d") {
       throw new TypeError(`llamapad 监控: range 必须是 30m/2h/24h/7d 之一，当前: ${JSON.stringify(range)}`);
     }
-    // metrics 窗口与 gpu/stats 并发拉取，allSettled 而不是 all：监控页要能画
-    // 「指标连不上」并继续显示 GPU 半边（反之亦然），任一半失败都不拖累另一半
-    const [windowResult, gpuResult] = await Promise.allSettled([
+    // metrics 窗口、gpu/stats 与运行状态三路并发拉取，allSettled 而不是 all：监控页要能画
+    // 「指标连不上」并继续显示 GPU 半边（反之亦然），任一半失败都不拖累另一半。
+    // 第三路 runtimeStatus 供页面顶部「运行中模型标题行」使用；它的失败只降级
+    // running/phase 为 null（页面画「运行状态未知」），不进 panelError——见
+    // rpc-contract.ts MonitorSnapshot.panelError 注释
+    const [windowResult, gpuResult, statusResult] = await Promise.allSettled([
       this.options.client.getMetricsWindow(range as MetricsRange, {
         ...(since !== undefined ? { since } : {}),
         ...(signal !== undefined ? { signal } : {}),
       }),
       this.options.client.getGpuStats(signal !== undefined ? { signal } : undefined),
+      this.options.client.runtimeStatus({
+        busy: true,
+        ...(signal !== undefined ? { signal } : {}),
+      }),
     ]);
     const series = windowResult.status === "fulfilled" ? windowResult.value.series : {};
     // metrics 半边失败时 mode 只能给 full：delta 的语义是「追加到已有曲线」，没有
     // 基础数据时浏览器必须走整窗替换（full）才不会把空缺当成「无新点」静默吞掉
     const mode = windowResult.status === "fulfilled" ? windowResult.value.mode : "full";
     const gpu = gpuResult.status === "fulfilled" ? gpuResult.value : null;
+    // 状态半边：成功才折算 running/phase，失败双双落 null——**不是 idle**。idle 是
+    // 「确认没有容器在跑」，null 是「不知道」，页面对这两种画法完全不同（空态 vs
+    // 未知行），折算会撒谎。phase 判定复用 buildSnapshot 的 resolvePhase：busy 在场
+    // 即稳态，它不会再发额外请求，与卡片快照同一条判定路径
+    const statusOk = statusResult.status === "fulfilled";
+    const runningInfo = statusOk ? statusResult.value.running : null;
+    const running = runningInfo !== null
+      ? { name: runningInfo.model, displayName: runningInfo.displayName ?? null }
+      : null;
+    // busy 缺席（面板未按 busy 模式响应）归一 null，与「探测失败」在 resolvePhase
+    // 入口处同等对待（见 buildSnapshot 的同款注释）
+    const busy = statusOk ? statusResult.value.busy ?? null : null;
+    const phase = statusOk
+      ? await this.resolvePhase(runningInfo?.model ?? null, busy)
+      : null;
     // 取消不是故障（切页/切档的常规手势）：panel-client 已把 abort 折成
     // PANEL_UNREACHABLE、与真挂了分不开，与 start/stop 同一条取消语义——看
     // signal 自身而非错误类型，aborted 时不塞 panelError（不画红色横幅）
@@ -159,7 +181,7 @@ export class PanelGateway extends TypertRemoteService {
         : gpuResult.status === "rejected"
           ? describePanelError(gpuResult.reason)
           : null;
-    return { series, gpu, mode, serverTs: Date.now(), panelError };
+    return { series, gpu, running, phase, mode, serverTs: Date.now(), panelError };
   }
 
   /** start/stop 共用的排空参数组装，只在配置了对应字段时才带上（panel-client.ts 的可选字段语义）。 */

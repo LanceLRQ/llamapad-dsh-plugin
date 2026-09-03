@@ -432,6 +432,10 @@ describe("PanelGateway", () => {
       expect(snapshot).toEqual({
         series: windowFixture.series,
         gpu: gpuFixture,
+        // 默认假 client 的 runtimeStatus 是 { running: null, busy: null }：
+        // 确认无模型在跑 → running null + phase idle（不是 null，null 是「不知道」）
+        running: null,
+        phase: "idle",
         mode: "full",
         serverTs: expect.any(Number),
         panelError: null,
@@ -487,16 +491,18 @@ describe("PanelGateway", () => {
       expect(snapshot.panelError).toContain("PANEL_HTTP");
     });
 
-    it("signal 透传给两条拉取的 options（RPC 取消通道 → 两条在途请求）", async () => {
+    it("signal 透传给三条拉取的 options（RPC 取消通道 → 三条在途请求）", async () => {
       const getMetricsWindow = vi.fn(async () => windowFixture);
       const getGpuStats = vi.fn(async () => gpuFixture);
-      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow, getGpuStats }) });
+      const runtimeStatus = vi.fn(async () => ({ running: null, busy: null }));
+      const { gateway } = makeGateway({ client: fakeClient({ getMetricsWindow, getGpuStats, runtimeStatus }) });
       const controller = new AbortController();
 
       await gateway.monitor("30m", undefined, controller.signal);
 
       expect(getMetricsWindow).toHaveBeenCalledWith("30m", { signal: controller.signal });
       expect(getGpuStats).toHaveBeenCalledWith({ signal: controller.signal });
+      expect(runtimeStatus).toHaveBeenCalledWith({ busy: true, signal: controller.signal });
     });
 
     it("用户取消（signal.aborted）：不塞 panelError——取消不是故障，不画红色横幅", async () => {
@@ -511,6 +517,72 @@ describe("PanelGateway", () => {
 
       expect(snapshot.panelError).toBeNull();
       expect(snapshot.series).toEqual({});
+    });
+
+    it("running/phase 来源①：runtimeStatus 成功且 busy 在场 → running 带 name+displayName、phase=ready，busy 非空不再发额外请求", async () => {
+      const runtimeStatus = vi.fn(async (options?: { busy?: boolean }) => {
+        expect(options).toEqual({ busy: true });
+        return { running: { model: "a", displayName: "模型 A" }, busy: { inferring: true, slotsRunning: 1 } };
+      });
+      const { gateway } = makeGateway({ client: fakeClient({ runtimeStatus }) });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      expect(snapshot.running).toEqual({ name: "a", displayName: "模型 A" });
+      expect(snapshot.phase).toBe("ready"); // busy 在场即稳态：resolvePhase 不再探测
+      expect(runtimeStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it("running/phase 来源①变体：displayName 缺席 → null；busy 缺席 + ready=false → phase=starting（复用 resolvePhase 的 ready 回退）", async () => {
+      let call = 0;
+      const runtimeStatus = vi.fn(async (): Promise<{ running: { model: string; ready?: boolean } | null; busy: null }> => {
+        call += 1;
+        // 第 1 次：monitor 的 allSettled 拉取（busy 模式，但面板没给 busy 字段）
+        // 第 2 次：resolvePhase 的 ready 回退探测
+        return call === 1
+          ? { running: { model: "a" }, busy: null }
+          : { running: { model: "a", ready: false }, busy: null };
+      });
+      const { gateway } = makeGateway({ client: fakeClient({ runtimeStatus }) });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      expect(snapshot.running).toEqual({ name: "a", displayName: null });
+      expect(snapshot.phase).toBe("starting");
+      expect(runtimeStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it("running/phase 来源②：runtimeStatus 探测失败 → running null + phase null（不知道≠idle），metrics/gpu 两半照常", async () => {
+      const getMetricsWindow = vi.fn(async () => windowFixture);
+      const getGpuStats = vi.fn(async () => gpuFixture);
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          getMetricsWindow,
+          getGpuStats,
+          runtimeStatus: async () => { throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE"); },
+        }),
+      });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      // null 是「不可知」的诚实值，绝不折算成 idle——idle 意味着「确认没有容器在跑」
+      expect(snapshot.running).toBeNull();
+      expect(snapshot.phase).toBeNull();
+      // 状态半边失败不拖累数据半边，也不进 panelError（数据是真的，红色横幅会撒谎）
+      expect(snapshot.series).toEqual(windowFixture.series);
+      expect(snapshot.gpu).toEqual(gpuFixture);
+      expect(snapshot.panelError).toBeNull();
+    });
+
+    it("running/phase 来源③：runtimeStatus 成功但无模型在跑 → running null + phase idle（确认没有容器在跑）", async () => {
+      const runtimeStatus = vi.fn(async () => ({ running: null, busy: { inferring: false, slotsRunning: 0 } }));
+      const { gateway } = makeGateway({ client: fakeClient({ runtimeStatus }) });
+
+      const snapshot = await gateway.monitor("30m", undefined);
+
+      expect(snapshot.running).toBeNull();
+      expect(snapshot.phase).toBe("idle");
+      expect(runtimeStatus).toHaveBeenCalledTimes(1); // busy 在场，无第二次探测
     });
 
     it("range 非法：属于无法执行的输入，直接抛 TypeError（对齐 model 为空串的先例）", async () => {
@@ -599,7 +671,7 @@ describe("PanelGateway", () => {
       }
     });
 
-    it("MONITOR_CODEC：完整快照逐字段收窄通过（series/gpu/mode/serverTs/panelError）", () => {
+    it("MONITOR_CODEC：完整快照逐字段收窄通过（series/gpu/running/phase/mode/serverTs/panelError）", () => {
       const snapshot = {
         series: { "gpu.util_percent": [{ ts: 1, value: 2 }], "infer.kv_cache_tokens": [] },
         gpu: {
@@ -608,6 +680,8 @@ describe("PanelGateway", () => {
           devices: [{ index: 0, memUsedMib: 1, memTotalMib: 2, utilPercent: 3, tempC: null, powerW: 44.5 }],
           totals: { memUsedMib: 1, memTotalMib: 2 },
         },
+        running: { name: "a", displayName: "模型 A" },
+        phase: "ready",
         mode: "delta",
         serverTs: 1,
         panelError: null,
@@ -618,7 +692,7 @@ describe("PanelGateway", () => {
     it("MONITOR_CODEC：series 缺席键容忍、坏点不容忍（在场就必须是好形状）", () => {
       // 六个键一个不给：合法（面板下线指标 = 不出键）。描述符的 codec 按
       // StrictCodec<unknown> 存放，parse 结果显式收窄回 MonitorSnapshot 再断言
-      const empty = resultCodec.parse({ series: {}, gpu: null, mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot;
+      const empty = resultCodec.parse({ series: {}, gpu: null, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot;
       expect(empty.series).toEqual({});
       // 在场键逐点校验：ts 非数字 / value 缺席 / 点不是对象，都拒
       for (const badPoints of [
@@ -628,32 +702,52 @@ describe("PanelGateway", () => {
       ]) {
         expect(() => resultCodec.parse({
           series: { "gpu.mem_used_mib": badPoints },
-          gpu: null, mode: "full", serverTs: 1, panelError: null,
+          gpu: null, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: null,
         })).toThrow(TypeError);
       }
       // 在场键不是数组也拒
       expect(() => resultCodec.parse({
         series: { "gpu.mem_used_mib": "12,13" },
-        gpu: null, mode: "full", serverTs: 1, panelError: null,
+        gpu: null, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: null,
       })).toThrow(TypeError);
     });
 
     it("MONITOR_CODEC：gpu 为 null（半边失败）或三态 unavailable 都放行，坏 status 拒", () => {
-      expect((resultCodec.parse({ series: {}, gpu: null, mode: "full", serverTs: 1, panelError: "面板请求失败" }) as MonitorSnapshot).gpu).toBeNull();
+      expect((resultCodec.parse({ series: {}, gpu: null, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: "面板请求失败" }) as MonitorSnapshot).gpu).toBeNull();
       const unavailable = { available: false, status: "unavailable", devices: [], totals: null };
-      expect((resultCodec.parse({ series: {}, gpu: unavailable, mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot).gpu)
+      expect((resultCodec.parse({ series: {}, gpu: unavailable, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: null }) as MonitorSnapshot).gpu)
         .toEqual(unavailable);
       expect(() => resultCodec.parse({
         series: {}, gpu: { available: false, status: "maybe", devices: [], totals: null },
-        mode: "full", serverTs: 1, panelError: null,
+        running: null, phase: "idle", mode: "full", serverTs: 1, panelError: null,
       })).toThrow(TypeError);
+    });
+
+    it("MONITOR_CODEC：running/phase 收窄（running 对象两字段或 null；phase 三态 + null 四值）", () => {
+      const base = { series: {}, gpu: null, mode: "full", serverTs: 1, panelError: null };
+      // running 对象逐字段：name 必串、displayName 串或 null（缺席不放行）
+      expect(resultCodec.parse({ ...base, running: { name: "a", displayName: "模型 A" }, phase: "ready" }))
+        .toEqual({ ...base, running: { name: "a", displayName: "模型 A" }, phase: "ready" });
+      expect((resultCodec.parse({ ...base, running: { name: "a", displayName: null }, phase: "starting" }) as MonitorSnapshot).running)
+        .toEqual({ name: "a", displayName: null });
+      // phase 四值：三态放行 + null（探测失败/不可知）放行——null ≠ idle，是独立第四值
+      for (const phase of ["idle", "starting", "ready", null] as const) {
+        expect((resultCodec.parse({ ...base, running: null, phase }) as MonitorSnapshot).phase).toBe(phase);
+      }
+      // 坏值拒：phase 四值之外、running 非对象、字段缺/坏型
+      for (const badPhase of ["busy", "Idle", "unknown", 1, undefined]) {
+        expect(() => resultCodec.parse({ ...base, running: null, phase: badPhase })).toThrow(TypeError);
+      }
+      for (const badRunning of [{ name: 1, displayName: null }, { name: "a", displayName: 2 }, { name: "a" }, "a", undefined]) {
+        expect(() => resultCodec.parse({ ...base, running: badRunning, phase: "ready" })).toThrow(TypeError);
+      }
     });
 
     it("MONITOR_CODEC：mode/serverTs/panelError 收窄（mode 两态、serverTs 数字、panelError 字符串或 null）", () => {
       for (const bad of [
-        { series: {}, gpu: null, mode: "partial", serverTs: 1, panelError: null },
-        { series: {}, gpu: null, mode: "full", serverTs: "1", panelError: null },
-        { series: {}, gpu: null, mode: "full", serverTs: 1, panelError: 42 },
+        { series: {}, gpu: null, running: null, phase: "idle", mode: "partial", serverTs: 1, panelError: null },
+        { series: {}, gpu: null, running: null, phase: "idle", mode: "full", serverTs: "1", panelError: null },
+        { series: {}, gpu: null, running: null, phase: "idle", mode: "full", serverTs: 1, panelError: 42 },
       ]) {
         expect(() => resultCodec.parse(bad)).toThrow(TypeError);
       }

@@ -6,6 +6,10 @@ function fakeMonitorSnapshot(overrides: Partial<MonitorSnapshot> = {}): MonitorS
   return {
     series: {},
     gpu: null,
+    // running/phase 本文件只当透传占位（外壳拆解不测推导逻辑），给合法的
+    // 「无运行容器」组合即可
+    running: null,
+    phase: "idle",
     mode: "full",
     serverTs: 1_000,
     panelError: null,

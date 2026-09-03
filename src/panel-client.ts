@@ -83,9 +83,11 @@ export interface PanelEvent {
 
 /* ------------------------------------------------------------------ *
  * 监控端点（GET /api/v1/metrics/window 与 GET /api/v1/gpu/stats）。
- * 面板一共采集 16 个指标，监控页只消费其中 6 个——键集收敛在下面的
- * MonitorMetricId / MONITOR_METRIC_IDS，面板将来增删指标都不会波及插件
- * （缺席键容忍；多出来的键在投影时直接丢弃，不下发不报错）。
+ * 面板 2026-09-01 起一共采集 18 个指标（新增 host.disk_read_bytes_per_sec 与
+ * host.disk_write_bytes_per_sec 两键），监控页只消费其中 6 个——键集收敛在下面的
+ * MonitorMetricId / MONITOR_METRIC_IDS。插件的 series 投影只按这 6 个键遍历且
+ * Partial 缺席容忍：面板将来继续增删指标都不波及插件（多出来的键在投影时直接
+ * 丢弃，不下发不报错，09-01 那两个 host 磁盘键就是这么被自然忽略的）。
  * ------------------------------------------------------------------ */
 
 /** metrics 窗口的时间档位（面板 RANGE_KEYS 的四值枚举，非法值面板回 400） */
@@ -124,8 +126,9 @@ export const MONITOR_METRIC_IDS: readonly MonitorMetricId[] = [
 /**
  * GET /api/v1/metrics/window 的插件侧投影。
  *
- * series 刻意声明为 Partial：面板的响应恒含全部 16 个指标键（buildWindowPayload
- * 补空数组），投影只保留六个监控键，且**缺席容忍**——面板将来下线某个指标、或老
+ * series 刻意声明为 Partial：面板的响应恒含全部 18 个指标键（buildWindowPayload
+ * 补空数组，含 09-01 新增的 host.disk_read/write_bytes_per_sec），投影只保留六个
+ * 监控键，且**缺席容忍**——面板将来下线某个指标、或老
  * 面板还没实现它时，键就是不出现在结果里，调用方按「未采集」处理即可，绝不为
  * 「面板少给了一个键」抛错。但**在场就必须是好形状**：某个键的值不是数组、或
  * 数组里混进 ts/value 非数字的坏点，本层直接抛 PanelError——坏数据折进
@@ -239,7 +242,12 @@ export interface PanelClient {
   listModels(): Promise<PanelModelView[]>;
   getModel(name: string): Promise<PanelModelDetail | null>;
   getEffectiveConfig(name: string): Promise<PanelEffectiveConfig | null>;
-  runtimeStatus(options?: { busy?: boolean }): Promise<PanelRuntimeStatus>;
+  /**
+   * 运行状态查询。busy:true 时响应附带 busy 字段（null 代表"不可知"，不代表"不忙"）；
+   * signal 是调用方取消手势（监控页 monitor 的第三条拉取带它——切页/切档时与
+   * metrics/gpu 两条一起取消在途，语义同 getMetricsWindow/getGpuStats 的 signal）。
+   */
+  runtimeStatus(options?: { busy?: boolean; signal?: AbortSignal }): Promise<PanelRuntimeStatus>;
   startModel(name: string, options?: StartModelOptions): Promise<void>;
   stopModel(name: string, options?: StopModelOptions): Promise<StopModelResult>;
   /** 读当前运行模型的思考强度声明；端点不可用 / 无模型在跑 / 老面板一律 null（不可知） */
@@ -562,7 +570,12 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       return (await res.json()) as PanelEffectiveConfig;
     },
     async runtimeStatus(options) {
-      const res = await request(`/api/v1/runtime/status${options?.busy ? "?busy=1" : ""}`);
+      const res = await request(
+        `/api/v1/runtime/status${options?.busy ? "?busy=1" : ""}`,
+        {},
+        undefined,
+        options?.signal,
+      );
       if (!res.ok) throw new PanelError(await readError(res), codeFor(res), res.status);
       return (await res.json()) as PanelRuntimeStatus;
     },

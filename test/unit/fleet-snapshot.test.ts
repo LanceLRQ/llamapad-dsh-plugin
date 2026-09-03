@@ -99,3 +99,62 @@ describe("renderFleetSnapshot", () => {
     expect(exact).not.toContain("… and");
   });
 });
+
+describe("renderFleetSnapshot：running 行的 contextWindow（F1 规格：name/quant/contextWindow）", () => {
+  it("quant 与 context 都在：Running: name (quant, Nk context)——131072 折成 128k", () => {
+    const text = renderFleetSnapshot(cache({
+      running: "qwen3-32b",
+      models: [model("qwen3-32b", "Q4_K_M")],
+      runningContextWindow: 131072,
+    }));
+    expect(text).toContain("Running: qwen3-32b (Q4_K_M, 128k context)");
+  });
+
+  it("quant 为 null、context 在：括号里只剩 (Nk context) 一段", () => {
+    const text = renderFleetSnapshot(cache({
+      running: "raw-gguf",
+      models: [model("raw-gguf", null)],
+      runningContextWindow: 131072,
+    }));
+    expect(text).toContain("Running: raw-gguf (128k context)");
+    expect(text).not.toContain(",,");
+  });
+
+  it("quant 在、context 缺席（undefined = 未知/读取失败）：维持旧形态 (quant)，不编造 context", () => {
+    const text = renderFleetSnapshot(cache({
+      running: "qwen3-32b",
+      models: [model("qwen3-32b", "Q4_K_M")],
+    }));
+    expect(text).toContain("Running: qwen3-32b (Q4_K_M)");
+    expect(text).not.toContain("context)");
+  });
+
+  it("两者皆无：无括号（不输出空括号或 (null)）", () => {
+    const text = renderFleetSnapshot(cache({
+      running: "raw-gguf",
+      models: [model("raw-gguf", null)],
+    }));
+    expect(text).toContain("Running: raw-gguf\n");
+    expect(text).not.toContain("()");
+  });
+
+  it("格式化边界：1024 恰好折 1k；1000 低于 1024 原样输出（折 k 会丢掉全部有效数字）", () => {
+    const at1k = renderFleetSnapshot(cache({
+      running: "m", models: [model("m", null)], runningContextWindow: 1024,
+    }));
+    expect(at1k).toContain("Running: m (1k context)");
+    const below = renderFleetSnapshot(cache({
+      running: "m", models: [model("m", null)], runningContextWindow: 1000,
+    }));
+    expect(below).toContain("Running: m (1000 context)");
+  });
+
+  it("running 不在 models 清单里（quant 查不到）但 context 在：名字后只跟 context", () => {
+    const text = renderFleetSnapshot(cache({
+      running: "phantom",
+      models: [model("other", "Q4_K_M")],
+      runningContextWindow: 65536,
+    }));
+    expect(text).toContain("Running: phantom (64k context)");
+  });
+});

@@ -7,10 +7,16 @@ import {
   IconCloseOutline16,
   IconWarningOutline16,
   Pill,
+  StateDot,
 } from "@deepseek-ai/dsh-client-ui-primitives";
 import { Sparkline } from "./Sparkline";
 import type { PanelApi } from "./rpc";
+// type-only：MonitorSnapshot/RuntimePhase 锚定 wire 契约（running/phase 的形状），
+// 编译期擦除，不会把运行时契约代码重复打进浏览器产物（rpc-contract 本就是浏览器
+// 侧要用的，但这里只需要类型）
+import type { MonitorSnapshot, RuntimePhase } from "../rpc-contract";
 import {
+  describeRunningView,
   formatGpuDeviceLine,
   formatMiB,
   formatMiBPair,
@@ -22,6 +28,7 @@ import {
   nextSince,
   pollIntervalFor,
   type MonitorSeries,
+  type RunningView,
 } from "./monitor-state";
 import { injectMonitorStyles } from "./styles";
 import type { LocaleKey } from "./locale";
@@ -90,10 +97,46 @@ function metricText(
   return value === null ? noData : format(value);
 }
 
+/**
+ * 运行中模型标题行（range 切换行下方，设计规格 F2）：loading/running 用 StateDot
+ * 表状态（ongoing 的像素追逐动画当「正在加载」，done 表已就绪，同卡片的用法）；
+ * idle 与 unknown 是提示行而非状态行——idle 明说「无运行容器」并交代哪些卡会因此
+ * 空着（notice 行，不替换整页：GPU host 级照画）；unknown 只能承认不知道。
+ * tone 的推导在 describeRunningView（纯函数，单测在那边），这里只照着摆。
+ */
+function RunningRow({ view, t }: { readonly view: RunningView; readonly t: Translate }) {
+  if (view.tone === "loading") {
+    return (
+      <div className="llamapad-monitor__status">
+        <StateDot state="ongoing" />
+        <span>{t("monitorStarting", { name: view.name ?? "" })}</span>
+      </div>
+    );
+  }
+  if (view.tone === "running") {
+    return (
+      <div className="llamapad-monitor__status">
+        <StateDot state="done" />
+        <span>{t("monitorRunning", { name: view.name ?? "" })}</span>
+      </div>
+    );
+  }
+  if (view.tone === "idle") {
+    // 推理/容器两张卡维持各自的「暂无数据」即可，不再重复说一遍空——这句提示
+    // 的职责是解释「为什么这两张卡是空的」以及「GPU 那张为什么还有数据」
+    return <p className="llamapad-monitor__hint">{t("monitorNoContainer")}</p>;
+  }
+  return <p className="llamapad-monitor__hint">{t("monitorStatusUnknown")}</p>;
+}
+
 export function MonitorPage({ api, t, close }: MonitorPageProps) {
   const [range, setRange] = useState<MetricsRange>("30m");
   const [series, setSeries] = useState<MonitorSeries>({});
   const [gpu, setGpu] = useState<PanelGpuStats | null>(null);
+  // 运行状态半身（快照的 running/phase）：与 series/gpu 一样「失败保持旧值」——
+  // 探测失败时旧状态仍是真的，不必整行闪成「未知」
+  const [running, setRunning] = useState<MonitorSnapshot["running"]>(null);
+  const [phase, setPhase] = useState<RuntimePhase | null>(null);
   // panelError 走快照字段（面板侧拉取失败的中文说明）；loadError 是 RPC 外壳本身
   // 抛错（传输/鉴权层）——分开存，横幅各画各的，语义同 Card.tsx 的两个错误位
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -133,6 +176,8 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
         setSeries(merged);
         since = nextSince(merged);
         setGpu(snapshot.gpu);
+        setRunning(snapshot.running);
+        setPhase(snapshot.phase);
         setPanelError(snapshot.panelError);
         setLoadError(null);
         setReceivedOnce(true);
@@ -174,6 +219,12 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
           {t("monitorClose")}
         </Button>
       </div>
+
+      {/* 运行中模型标题行（设计规格：range 切换 + 运行行含 phase）。首帧未到前
+          不渲染：此时 phase 初始值 null 会被 describeRunningView 折成 unknown，
+          与下方「正在读取监控数据…」同屏就成了噪音——「未知」要等真的探测过
+          （收到过至少一份快照）才说得出口。 */}
+      {receivedOnce ? <RunningRow view={describeRunningView(running, phase)} t={t} /> : null}
 
       {panelError !== null ? (
         <div className="llamapad-monitor__banner" role="alert">

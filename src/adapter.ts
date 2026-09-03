@@ -313,12 +313,16 @@ export function inputModalitiesFor(
 }
 
 /**
- * 从 llamapad 配置对象读 ctx_size。两个来源共用本函数：`/effective` 的 merged（全局默认
- * 与模型覆盖合并后的权威值）与模型级 overrides（`/effective` 不可用时的回退来源）——
- * 两者是同一套 `{ docker?, server? }` 两段结构，读法完全一致；「哪个来源更权威」由调用方
- * （resolveModel）选定后再交给本函数，不是本函数的职责。
+ * 从 llamapad 配置对象读 ctx_size。三个来源共用本函数：`/effective` 的 merged（全局默认
+ * 与模型覆盖合并后的权威值）、模型级 overrides（`/effective` 不可用时的回退来源）、以及
+ * status-watch 为 F1 提示词快照追加的那次 `/effective` 读取——前两者是同一套
+ * `{ docker?, server? }` 两段结构，读法完全一致；「哪个来源更权威」由调用方
+ * （resolveModel / status-watch 的 probe）选定后再交给本函数，不是本函数的职责。
+ * **ctx_size 的失效判定（args_override 非空即整段取代）只此一处**：导出共享而非
+ * 各处复制，正是因为这个判定极易被漏抄——抄漏一份就会出现「快照报了个已失效的
+ * contextWindow」的静默谎言。
  */
-function readCtxSize(config: unknown): number | undefined {
+export function readCtxSize(config: unknown): number | undefined {
   if (config === null || typeof config !== "object") return undefined;
   // docker.args_override 一旦设置（非空数组），llama-server 的生成参数整段被取代，
   // server.* 全段（含 ctx_size）不再生效——此时 ctx_size 已经不是权威值，宁可不报

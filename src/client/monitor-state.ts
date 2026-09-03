@@ -12,9 +12,38 @@ import type {
   PanelGpuDevice,
   PanelGpuStats,
 } from "../panel-client";
+import type { RuntimePhase } from "../rpc-contract";
 
 /** MonitorSnapshot.series 的形状重述，避免每个函数签名都写一遍 Partial Record。 */
 export type MonitorSeries = Partial<Record<MonitorMetricId, MetricPoint[]>>;
+
+/** describeRunningView 的返回：tone 驱动文案与 StateDot，name 为展示名（无则 null）。 */
+export interface RunningView {
+  tone: "loading" | "running" | "idle" | "unknown";
+  name: string | null;
+}
+
+/**
+ * 监控页顶部「运行中模型标题行」的展示折算（设计规格 F2：range 切换 + 运行标题行）。
+ *
+ * 四态映射：phase starting → loading（模型正读进显存）、ready → running、idle →
+ * idle（确认没有容器在跑，页面走「无运行容器」空态）、null → unknown（状态探测
+ * 失败/不可知——**不等于 idle**，页面只能说「运行状态未知」而不能断言空）。
+ *
+ * 守势规则：running 对象为 null 但 phase 非 idle（理论上不该发生——host 侧语义上
+ * running 与 phase 同生共死）归 unknown 不猜：宁可显示「未知」也不能拿着 starting/
+ * ready 的结论却显示不出模型名，那会引导用户去查一个可能不存在的容器。
+ */
+export function describeRunningView(
+  running: { name: string; displayName: string | null } | null,
+  phase: RuntimePhase | null,
+): RunningView {
+  if (phase === "idle") return { tone: "idle", name: null };
+  if (running === null || phase === null) return { tone: "unknown", name: null };
+  // 展示名优先 displayName（人配的名字），面板没给时回落模型 id
+  const name = running.displayName ?? running.name;
+  return phase === "starting" ? { tone: "loading", name } : { tone: "running", name };
+}
 
 /**
  * 把一轮 monitor 响应的 series 并进已有曲线。

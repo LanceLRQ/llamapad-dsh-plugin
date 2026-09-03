@@ -145,7 +145,8 @@ export interface CardSnapshot {
 }
 
 /**
- * 监控页一次轮询拿到的全部内容：六个指标的时序 + GPU 当前快照。
+ * 监控页一次轮询拿到的全部内容：六个指标的时序 + GPU 当前快照 + 运行状态（模型/阶段，
+ * 供页面顶部的运行中模型标题行使用——phase 三态 + null 的区分见下方 phase 注释）。
  *
  * series 的键集就是面板侧投影的六个监控键（MonitorMetricId），Partial 语义与
  * panel-client 侧一致：**缺席容忍**（面板下线某指标只是不再出键），**坏点不容忍**
@@ -162,10 +163,28 @@ export interface MonitorSnapshot {
   series: Partial<Record<MonitorMetricId, MetricPoint[]>>;
   /** gpu/stats 的投影；该半边拉取失败时为 null（series 半边照常下发） */
   gpu: PanelGpuStats | null;
+  /**
+   * 运行中模型（name + 展示名）；无模型在跑、或状态半边探测失败时为 null——
+   * 两种成因靠 phase 区分（phase idle = 前者，phase null = 后者）。
+   * displayName 为 null 表示面板没给展示名，浏览器侧回落用 name。
+   */
+  running: { name: string; displayName: string | null } | null;
+  /**
+   * 运行阶段，三态语义见 RuntimePhase。**null = 状态探测失败/不可知，不等于 idle**：
+   * idle 是「确认没有容器在跑」（监控页据此显示「无运行容器」空态），null 是
+   * 「不知道」（页面只能显示「运行状态未知」，不能断言空也不能断言在跑）。
+   * host 侧对「探测失败」必须落 null 而不是折算 idle，两者语义不可互换。
+   */
+  phase: RuntimePhase | null;
   mode: "full" | "delta";
   /** host 组装时刻（毫秒时间戳），仅展示用——见类型注释里关于时钟的说明 */
   serverTs: number;
-  /** 两条拉取任一失败的中文说明；成功为 null。语义同 CardSnapshot.panelError */
+  /**
+   * metrics/gpu 两条拉取任一失败的中文说明；成功为 null。语义同 CardSnapshot.panelError。
+   * 注意状态半边（runtimeStatus）失败**不进**这里：那半边失败只降级 running/phase
+   * 为 null（页面画「运行状态未知」），而 metrics/gpu 数据本身仍然是真的，红色
+   * 横幅会把「半边不可知」夸大成「整页数据不可信」。
+   */
   panelError: string | null;
 }
 
@@ -347,14 +366,31 @@ function parseGpuStats(value: unknown): PanelGpuStats {
   };
 }
 
+/** monitor.running 的投影校验：null 或 { name, displayName: string | null }。 */
+function parseMonitorRunning(value: unknown): MonitorSnapshot["running"] {
+  if (value === null) return null;
+  const row = asRecord(value, "monitor.running");
+  return {
+    name: asString(row["name"], "monitor.running.name"),
+    displayName: asNullableString(row["displayName"], "monitor.running.displayName"),
+  };
+}
+
 function parseMonitorSnapshot(value: unknown): MonitorSnapshot {
   const row = asRecord(value, "monitor");
   const mode = row["mode"];
   if (mode !== "full" && mode !== "delta") fail("monitor.mode", '"full" | "delta"');
+  // phase 四值校验：三态 + null（null = 探测失败/不可知，是独立第四值不是三态的别名）
+  const phase = row["phase"];
+  if (phase !== null && phase !== "idle" && phase !== "starting" && phase !== "ready") {
+    fail("monitor.phase", '"idle" | "starting" | "ready" | null');
+  }
   const gpuRow = row["gpu"];
   return {
     series: parseMonitorSeries(row["series"]),
     gpu: gpuRow === null ? null : parseGpuStats(gpuRow),
+    running: parseMonitorRunning(row["running"]),
+    phase,
     mode,
     serverTs: asNumber(row["serverTs"], "monitor.serverTs"),
     panelError: asNullableString(row["panelError"], "monitor.panelError"),

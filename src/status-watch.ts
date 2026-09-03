@@ -26,6 +26,7 @@
  * （0 的语义是「不打扰面板」，常驻 SSE 连接违背它，整个 watcher 都不启动）。
  */
 import type { Context } from "@deepseek-ai/cordis";
+import { readCtxSize } from "./adapter";
 import type { PanelClient, PanelEvent } from "./panel-client";
 
 /**
@@ -34,6 +35,13 @@ import type { PanelClient, PanelEvent } from "./panel-client";
  */
 export interface FleetCache {
   running: string | null;
+  /**
+   * 运行中模型的 contextWindow（token 数，来自 /effective merged 的 ctx_size）。
+   * undefined = 未知：端点读取失败 / 面板没配 ctx_size / args_override 使其失效——
+   * F1 快照对这三种情况一视同仁地省略 context 段，绝不能用 defaultContextWindow
+   * 之类凑数（那是聊天适配器的兜底，不是面板权威值）。
+   */
+  runningContextWindow?: number;
   models: { name: string; displayName: string; quant: string | null }[];
   /** 写入时刻（毫秒时间戳），消费者用它判断缓存新鲜度 */
   fetchedAt: number;
@@ -166,7 +174,7 @@ export function startStatusWatch(options: StatusWatchOptions): void {
     let recoveryDeadline = 0;
 
     /**
-     * 一次状态探测：runtimeStatus 与 listModels 并发，更新 fleetCache，运行中模型
+     * 一次状态探测：runtimeStatus 与 listModels 并发取，更新 fleetCache，运行中模型
      * 变化才 emit。SSE 事件触发与降级轮询共用这一份逻辑，两模式的 fleetCache 与
      * 「变化才 emit」语义因此完全一致。
      */
@@ -191,8 +199,30 @@ export function startStatusWatch(options: StatusWatchOptions): void {
       // fleetCache 只在两半都成功时写入：models 失败时硬写会向消费者谎报「没有模型」，
       // 不如保持上一份完整快照（get 返回 null 的初始态由消费者按「不可知」处理）
       if (statusResult.status === "fulfilled" && modelsResult.status === "fulfilled") {
+        const running = statusResult.value.running?.model ?? null;
+        // F1 提示词快照要 contextWindow：对运行中模型追加一次 /effective 读取。
+        // 放在缓存写入之前而不是并行发——目标模型名只有 status 落地后才知道；
+        // running 为空时干脆不发（没有目标可查，省一次往返）。读取失败 catch 成
+        // undefined（context 段整个省略），绝不因这个锦上添花的字段拖垮探测本身。
+        let runningContextWindow: number | undefined;
+        if (running !== null) {
+          try {
+            // readCtxSize 是 ctx_size 的唯一权威读取（含 args_override 失效判定），
+            // 见 adapter.ts 的导出注释——这里绝不另写一份判定
+            runningContextWindow = readCtxSize((await client().getEffectiveConfig(running))?.merged);
+          } catch {
+            runningContextWindow = undefined;
+          }
+          // 第二道过期守卫：这次 await 期间同样可能有新一轮探测出发（或已卸载）。
+          // 整份丢弃而不是只丢 ctx——旧探测的 running/models 也一并过期了，硬写
+          // 会把旧 ctx 配到新 running 上（串台），或把旧基线倒写进缓存
+          if (stopped || seq !== probeSeq) return;
+        }
         fleetCache?.update({
-          running: statusResult.value.running?.model ?? null,
+          running,
+          // undefined（未知）时省略字段而不是写 undefined——让缓存形状与
+          // renderFleetSnapshot 的「缺席即不渲染 context」语义天然对齐
+          ...(runningContextWindow !== undefined ? { runningContextWindow } : {}),
           models: modelsResult.value.map((m) => ({
             name: m.name, displayName: m.displayName, quant: m.quant,
           })),

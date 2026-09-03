@@ -24,6 +24,15 @@ function entry(model: { name: string; quant: string | null }): string {
 }
 
 /**
+ * ctx_size（token 数）→ 展示文案：>= 1024 折成 k（131072 → "128k"，四舍五入到最近的
+ * 整 k），低于 1024 的配置（如 512/1000）原样输出数字——折 k 会得到 "1k" 以下的
+ * 有效数字丢失，提示词里宁可多两个字符也要保真。
+ */
+function formatContext(tokens: number): string {
+  return tokens >= 1024 ? `${Math.round(tokens / 1024)}k` : String(tokens);
+}
+
+/**
  * 把一份 fleet 缓存渲染成系统提示分节文本；无可奉告时返回空串——systemPrompt
  * 的 renderPrompt 会丢弃空分节，所以「面板还没探测成功」「机器上一无所有」
  * 都天然降级为「这一节不存在」，不会留下标题空壳。
@@ -36,10 +45,22 @@ export function renderFleetSnapshot(cache: FleetCache | null): string {
   const lines: string[] = ["## Local model fleet (llamapad)", ""];
 
   // running 只是个名字，quant 要回 models 清单里查；查不到（面板清单与运行态
-  // 脱节的罕见窗口）就只报名字，不编造量化信息
+  // 脱节的罕见窗口）就只报名字，不编造量化信息。contextWindow 来自 status-watch
+  // 探测时的 /effective 读取（undefined = 未知/读取失败/args_override 失效），
+  // 同样缺席即省略——编一个 context 数字比不报更糟
   if (cache.running !== null) {
     const runningModel = cache.models.find((m) => m.name === cache.running);
-    lines.push(`Running: ${runningModel !== undefined ? entry(runningModel) : cache.running}`);
+    // 括号注解按「quant, context」拼：quant 缺省跳过它，context 缺省跳过它，
+    // 两者皆缺则整个括号不要——绝不输出 "(null)" 或空括号
+    const annotations = [
+      ...(runningModel?.quant != null ? [runningModel.quant] : []),
+      ...(cache.runningContextWindow !== undefined
+        ? [`${formatContext(cache.runningContextWindow)} context`]
+        : []),
+    ];
+    lines.push(annotations.length > 0
+      ? `Running: ${cache.running} (${annotations.join(", ")})`
+      : `Running: ${cache.running}`);
   } else {
     lines.push("No model is currently running.");
   }

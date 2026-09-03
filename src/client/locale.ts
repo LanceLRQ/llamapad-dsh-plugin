@@ -56,6 +56,12 @@ export const zh = {
   range7d: "7 天",
   monitorLoading: "正在读取监控数据…",
   monitorRefreshFailed: "监控数据刷新失败，下方显示的是上一次读到的内容。",
+  // ── 运行中模型标题行（range 切换行下方那行）──
+  monitorRunning: "运行中：{name}",
+  monitorStarting: "正在加载 {name}…",
+  // idle 的页面级提示：notice 行而非整页替换——GPU host 级指标与分卡明细照画
+  monitorNoContainer: "无运行容器——推理与容器指标为空，主机与 GPU 指标仍可用。",
+  monitorStatusUnknown: "运行状态未知",
   monitorCardInfer: "推理",
   monitorCardGpu: "GPU",
   monitorCardContainer: "容器",
@@ -118,6 +124,13 @@ export const en = {
   range7d: "7 days",
   monitorLoading: "Loading monitoring data…",
   monitorRefreshFailed: "Refresh failed; showing the last known data.",
+  // ── Running-model title row (below the range switcher) ──
+  monitorRunning: "Running: {name}",
+  monitorStarting: "Loading {name}…",
+  // Page-level idle notice: a notice line, not a full-page replacement — GPU host
+  // metrics and per-device details keep rendering
+  monitorNoContainer: "No running container — inference and container metrics are empty; host and GPU metrics are still available.",
+  monitorStatusUnknown: "Runtime status unknown",
   monitorCardInfer: "Inference",
   monitorCardGpu: "GPU",
   monitorCardContainer: "Container",

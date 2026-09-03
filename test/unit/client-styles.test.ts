@@ -175,4 +175,8 @@ describe("MONITOR_CSS：监控页的关键规则", () => {
     expect(MONITOR_CSS).toContain(".llamapad-monitor__gpuRow{");
     expect(MONITOR_CSS).toContain(".llamapad-monitor__gpuRows{");
   });
+
+  it("运行状态行有独立容器（StateDot + 文案横排，对齐卡片 __status 的做法）", () => {
+    expect(MONITOR_CSS).toContain(".llamapad-monitor__status{");
+  });
 });

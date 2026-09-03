@@ -71,8 +71,39 @@ describe("monitor E2E（gateway → 真面板客户端 → 假面板）", () => 
     expect(snapshot.mode).toBe("full");
     expect(snapshot.panelError).toBeNull();
     expect(snapshot.serverTs).toBeGreaterThanOrEqual(before); // host 组装时刻
+    // 初始状态无模型在跑：running null + phase idle（idle 是「确认没有」，不是「不知道」）
+    expect(snapshot.running).toBeNull();
+    expect(snapshot.phase).toBe("idle");
     // host 组装的返回值必须能原样通过浏览器侧 strict codec（两侧共用 rpc-contract）
     expect(monitorResultCodec.parse(snapshot)).toEqual(snapshot);
+  });
+
+  it("running/phase 三态：idle → starting（ready 未到）→ ready（ready 已过），随 runtime/status 变化", async () => {
+    try {
+      // idle：无模型在跑
+      let snapshot = await gateway.monitor("30m", undefined);
+      expect(snapshot.running).toBeNull();
+      expect(snapshot.phase).toBe("idle");
+
+      // starting：有模型在跑、readyAt 还没到（假面板 busy 缺席 → resolvePhase 走 ready 回退）
+      state.running = "qwen-small";
+      state.readyAt = Date.now() + 60_000;
+      snapshot = await gateway.monitor("30m", undefined);
+      expect(snapshot.running).toEqual({ name: "qwen-small", displayName: null });
+      expect(snapshot.phase).toBe("starting");
+      expect(monitorResultCodec.parse(snapshot)).toEqual(snapshot); // 新字段在真链路上过 codec
+
+      // ready：readyAt 已过
+      state.readyAt = Date.now() - 1;
+      snapshot = await gateway.monitor("30m", undefined);
+      expect(snapshot.running).toEqual({ name: "qwen-small", displayName: null });
+      expect(snapshot.phase).toBe("ready");
+      expect(monitorResultCodec.parse(snapshot)).toEqual(snapshot);
+    } finally {
+      // 恢复默认，别让后续用例（或同文件新增用例）拿到被改写的运行态
+      state.running = null;
+      state.readyAt = 0;
+    }
   });
 
   it("带 since 的 30m 增量：只回 ts > since 的新点、mode=delta（水位取自上次收到的点，同浏览器用法）", async () => {

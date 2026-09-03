@@ -9,6 +9,7 @@ import {
 import {
   PanelError,
   type PanelClient,
+  type PanelEffectiveConfig,
   type PanelEvent,
   type PanelRuntimeStatus,
   type StreamEventsHandler,
@@ -82,6 +83,8 @@ function fakePanel() {
     running: running ? { model: running } : null,
   }));
   const listModels = vi.fn(async () => models.map((m) => ({ ...m, status: m.name === running ? "running" : "stopped" })));
+  // vi.fn 化：fleetCache 的 runningContextWindow 半身要按用例改写它的返回/挂起行为
+  const getEffectiveConfig = vi.fn(async (): Promise<PanelEffectiveConfig | null> => null);
   const getEvents = vi.fn(async (): Promise<PanelEvent[]> => []);
   const streams: Array<{ handler: StreamEventsHandler; stopped: boolean }> = [];
   const streamEvents = vi.fn((handler: StreamEventsHandler) => {
@@ -95,7 +98,7 @@ function fakePanel() {
     baseUrl: "http://panel:8080",
     listModels,
     getModel: async () => null,
-    getEffectiveConfig: async () => null,
+    getEffectiveConfig,
     runtimeStatus,
     startModel: async () => {},
     stopModel: async () => ({ ok: true }),
@@ -108,7 +111,7 @@ function fakePanel() {
     streamEvents,
   };
   return {
-    client, runtimeStatus, listModels, getEvents, streamEvents, streams,
+    client, runtimeStatus, listModels, getEvents, getEffectiveConfig, streamEvents, streams,
     setRunning: (value: string | null) => {
       running = value;
     },
@@ -577,5 +580,88 @@ describe("startStatusWatch：卸载", () => {
     const timers = h.world.setTimeoutImpl.mock.calls.length;
     await h.world.fireAll();
     expect(h.world.setTimeoutImpl.mock.calls.length).toBe(timers);
+  });
+});
+
+describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词快照）", () => {
+  it("running 非空 → 探测追加一次 getEffectiveConfig(running)，ctx_size 落进缓存", async () => {
+    const h = startWatch({ running: "a" });
+    // 初始探测的 effective 调用发生在微任务里（allSettled 落地之后），startWatch
+    // 返回后再改 mock 仍然赶得上——但必须赶在 flush 之前
+    h.panel.getEffectiveConfig.mockResolvedValue({ merged: { docker: {}, server: { ctx_size: 131072 } } });
+    await h.world.flush();
+
+    expect(h.panel.getEffectiveConfig).toHaveBeenCalledWith("a");
+    expect(h.panel.getEffectiveConfig).toHaveBeenCalledTimes(1);
+    expect(h.fleetCache.get()).toMatchObject({ running: "a", runningContextWindow: 131072 });
+  });
+
+  it("getEffectiveConfig 失败 → catch 成 undefined（不写 ctx 字段），探测与缓存其余字段不受拖垮", async () => {
+    const h = startWatch({ running: "a" });
+    h.panel.getEffectiveConfig.mockRejectedValue(unreachable());
+    await h.world.flush();
+
+    expect(h.fleetCache.get()).toMatchObject({
+      running: "a",
+      models: expect.any(Array),
+      fetchedAt: expect.any(Number),
+    });
+    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.emit).not.toHaveBeenCalled(); // 探测本身没被拖垮（首轮只定基线）
+  });
+
+  it("getEffectiveConfig 回 404（null）或 merged 缺 ctx_size → 同样落 undefined，不猜数字", async () => {
+    const h = startWatch({ running: "a" });
+    h.panel.getEffectiveConfig.mockResolvedValueOnce(null);
+    await h.world.flush();
+    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.start"));
+    h.panel.getEffectiveConfig.mockResolvedValueOnce({ merged: { docker: {}, server: {} } });
+    await h.world.flush();
+    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+  });
+
+  it("docker.args_override 生效 → readCtxSize 判定 ctx_size 已失效，落 undefined（唯一权威判定，不复制）", async () => {
+    const h = startWatch({ running: "a" });
+    h.panel.getEffectiveConfig.mockResolvedValue({
+      merged: {
+        docker: { args_override: ["--ctx-size", "8192"] },
+        server: { ctx_size: 131072 },
+      },
+    });
+    await h.world.flush();
+
+    // args_override 非空时 server.* 整段被取代：131072 已经不是权威值，宁可不报
+    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+  });
+
+  it("running 为空 → 不发起 getEffectiveConfig（没有目标可查，省一次往返）", async () => {
+    const h = startWatch();
+    await h.world.flush();
+
+    expect(h.panel.getEffectiveConfig).not.toHaveBeenCalled();
+    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+  });
+
+  it("effective 在飞时新一轮探测已出发 → 旧探测整体丢弃，不把旧 ctx 配到新 running 上", async () => {
+    const h = startWatch({ running: "a" });
+    const pending: Array<(value: PanelEffectiveConfig | null) => void> = [];
+    h.panel.getEffectiveConfig.mockImplementation(() =>
+      new Promise<PanelEffectiveConfig | null>((resolve) => { pending.push(resolve); }));
+    await h.world.flush(); // 探测 A 挂在 effective("a") 上（pending[0] 未解）
+
+    h.panel.setRunning("b");
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.start")); // 探测 B 出发，seq 前进
+    await h.world.flush(); // B 也挂在 effective("b") 上（pending[1] 未解）
+
+    pending[0]!({ merged: { server: { ctx_size: 4096 } } }); // A 的结果先落地
+    await h.world.flush();
+    // A 落地时 seq 已变：整份丢弃（连 running/models 都不写），缓存里没有「b 配 4096」的串台
+    expect(h.fleetCache.get()).toBeNull();
+
+    pending[1]!({ merged: { server: { ctx_size: 8192 } } }); // B 落地：seq 一致，正常写
+    await h.world.flush();
+    expect(h.fleetCache.get()).toMatchObject({ running: "b", runningContextWindow: 8192 });
   });
 });

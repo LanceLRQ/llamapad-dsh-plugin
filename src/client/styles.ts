@@ -90,7 +90,9 @@ export function injectCardStyles(): void {
  * token 用法对齐既有体系：横幅同 __banner 的 error 配色，数值 tabular-nums 防轮询
  * 抖动；曲线 svg（__spark）块级铺满卡宽，viewBox 均匀缩放（高度按比例跟缩，末点
  * 圆不变形）。三卡两列网格与卡片的 __list 同构，断点放宽到 720px——整页栏宽比
- * 卡片列表宽，两列曲线更容易先挤。
+ * 卡片列表宽，两列曲线更容易先挤。运行状态行（__status）照抄卡片 __status 的做法：
+ * StateDot + secondary 文案横排；idle/unknown 两条提示复用 __hint 的三级灰，与
+ * 「卡片里 noModelRunning 也是灰字」的既有视觉口径一致。
  * ------------------------------------------------------------------ */
 export const MONITOR_STYLE_TAG_ID = "llamapad-dsh-plugin/monitor.css";
 
@@ -100,6 +102,7 @@ export const MONITOR_CSS = `
 .llamapad-monitor__title{margin:0;font-size:16px;font-weight:600;line-height:1.4}
 .llamapad-monitor__ranges{display:flex;gap:6px;margin-left:auto}
 .llamapad-monitor__banner{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-radius:8px;padding:8px 10px}
+.llamapad-monitor__status{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
 .llamapad-monitor__grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .llamapad-monitor__card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
 .llamapad-monitor__cardTitle{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:600}

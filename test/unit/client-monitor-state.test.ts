@@ -3,6 +3,7 @@
 // 纯函数上——与 Card.tsx / state.ts 的分工约定一致。
 import { describe, expect, it } from "vitest";
 import {
+  describeRunningView,
   formatGpuDeviceLine,
   formatMiB,
   formatMiBPair,
@@ -13,7 +14,9 @@ import {
   mergeSeries,
   nextSince,
   pollIntervalFor,
+  type RunningView,
 } from "../../src/client/monitor-state";
+import type { RuntimePhase } from "../../src/rpc-contract";
 import type { MetricPoint, MonitorMetricId, PanelGpuDevice } from "../../src/panel-client";
 
 function point(ts: number, value: number): MetricPoint {
@@ -178,5 +181,40 @@ describe("formatGpuDeviceLine", () => {
 
   it("分卡序号透传（多卡机器上区分行）", () => {
     expect(formatGpuDeviceLine(device({ index: 3 }))).toContain("GPU 3 ·");
+  });
+});
+
+describe("describeRunningView（监控页运行行：running + phase → 展示四态）", () => {
+  const running = (overrides: Partial<{ name: string; displayName: string | null }> = {}) =>
+    ({ name: "qwen3-32b", displayName: "Qwen3 32B", ...overrides });
+
+  it("phase=starting → loading，name 取 displayName ?? name", () => {
+    expect(describeRunningView(running(), "starting")).toEqual({ tone: "loading", name: "Qwen3 32B" });
+  });
+
+  it("phase=ready → running，name 取 displayName ?? name", () => {
+    expect(describeRunningView(running(), "ready")).toEqual({ tone: "running", name: "Qwen3 32B" });
+  });
+
+  it("displayName 为 null → 回落到 name 本身", () => {
+    expect(describeRunningView(running({ displayName: null }), "ready"))
+      .toEqual({ tone: "running", name: "qwen3-32b" } satisfies RunningView);
+    expect(describeRunningView(running({ displayName: null }), "starting"))
+      .toEqual({ tone: "loading", name: "qwen3-32b" } satisfies RunningView);
+  });
+
+  it("phase=idle → idle 且 name null（确认没有容器在跑，页面走「无运行容器」空态）", () => {
+    expect(describeRunningView(null, "idle")).toEqual({ tone: "idle", name: null });
+  });
+
+  it("phase=null → unknown（状态探测失败/不可知，不等于 idle）", () => {
+    expect(describeRunningView(null, null)).toEqual({ tone: "unknown", name: null });
+    // running 对象在场也救不了 unknown：phase null 时名字再具体也不能拿来当运行行展示
+    expect(describeRunningView(running(), null)).toEqual({ tone: "unknown", name: null });
+  });
+
+  it("running 为 null 但 phase 非 idle（理论上不该发生的组合）→ unknown 不猜", () => {
+    expect(describeRunningView(null, "starting")).toEqual({ tone: "unknown", name: null });
+    expect(describeRunningView(null, "ready")).toEqual({ tone: "unknown", name: null });
   });
 });
