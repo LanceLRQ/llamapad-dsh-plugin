@@ -3,6 +3,9 @@ import Schema from "@deepseek-ai/schemastery";
 // 仅为副作用引入：dsh-typert-registry 用 declare module 给 ctx.typert 补上 register()
 // 等方法，不引入这个模块 TS 就看不到 augmentation（运行时由宿主提供，不进产物）。
 import type {} from "@deepseek-ai/dsh-typert-registry";
+// 同上：dsh-system-prompt 用 declare module 给 ctx.systemPrompt 补上 section()
+// 等方法；type-only 引入不产生运行时代码，服务实例运行时由宿主 dsh 提供。
+import type {} from "@deepseek-ai/dsh-system-prompt";
 // 同上：dsh-attachment 用 declare module 给 ctx.attachments（AttachmentStore 服务）
 // 补上类型；下面 ImageAttachmentRef 的类型引入顺带把这份 augmentation 带进编译。
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
@@ -13,6 +16,7 @@ import {
   type ConnectionParams,
 } from "./connection";
 import { createEventRing, createFleetCache, startStatusWatch } from "./status-watch";
+import { renderFleetSnapshot } from "./fleet-snapshot";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
 import { PanelGateway, type PanelGatewayOptions } from "./panel-gateway";
 import { RPC_CONTRIBUTION, RPC_PACKAGE, SETTINGS_NAMESPACE } from "./rpc-contract";
@@ -38,6 +42,7 @@ export interface Config {
   defaultContextWindow?: number;
   statusRefreshMs: number;
   hideStoppedModels: boolean;
+  statusPromptSection: boolean;
 }
 
 export const Config: Schema<Partial<Config>, Config> = Schema.object({
@@ -72,6 +77,11 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   hideStoppedModels: Schema.boolean().default(false).description(
     "模型选择器只显示运行中的模型（默认关闭）。开启后没有模型在跑时选择器会是空的；"
     + "auto-switch 档下该开关被忽略——那一档要靠选中未启动的模型来触发自动启动",
+  ),
+  statusPromptSection: Schema.boolean().default(true).description(
+    "系统提示包含本地模型场快照（运行中模型 + 可启动清单，默认开启）。"
+    + "隐私考量：该状态会作为系统提示的一部分发给会话使用的 provider——"
+    + "会话走云端模型时等于把本地 GPU 上有什么模型告诉了云端，介意可关闭",
   ),
 });
 
@@ -191,6 +201,33 @@ export function apply(ctx: Context, config: Config) {
     fleetCache,
     eventRing,
   });
+
+  // M5 提示词快照：把 fleetCache 渲染成系统提示的一个分节。动态 inject 而非写进
+  // 静态 export const inject——静态注入要求服务启动期就位，缺席会阻塞本插件启动，
+  // 而 systemPrompt 是宿主聚合层的可选增强：它缺席只意味着这个功能不生效，适配器
+  // 与设置卡片照常工作（与上面 typert 的防御姿势同款）。
+  //
+  // text 是每次组装时同步求值的函数（PromptSection 的能力），所以注册一次就永远
+  // 反映 fleetCache 的最新状态——前提是 get() 同步可读，createFleetCache 正是。
+  // 回调返回 section 的 disposer，cordis 会把它挂到这条 inject fiber 的生命周期上。
+  //
+  // 热关：apply 时是 false 就整段不注册（本任务的约定）；apply 后 settings 层把
+  // 开关拨到 false 也要立即生效——text 里读 current()（三层合并后的当前值）而非
+  // 捕获 apply 时的 config，关闭时渲染空串，renderPrompt 丢弃空分节，效果等同
+  // 没注册。反向（false 启动后 settings 拨 true）仍需重载插件，属可接受的不对称。
+  if (config.statusPromptSection === true) {
+    ctx.inject(["systemPrompt"], (sctx) =>
+      sctx.systemPrompt.section({
+        name: "llamapad:local-fleet",
+        // persona(0) 之后、tool guidance(100-199) 之前：fleet 是环境事实，先于
+        // 工具用法交代；也不抢 harness identity(-100) 与 persona 的头排位置
+        order: 50,
+        text: () => (current().statusPromptSection === false
+          ? ""
+          : renderFleetSnapshot(fleetCache.get())),
+      }),
+    );
+  }
 
   // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
