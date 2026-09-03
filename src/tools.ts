@@ -69,6 +69,56 @@ export function apply(ctx: Context, config: Config) {
 
 // ---- llamapad_status ----
 
+/** presentResult 从 result.meta 读回的投影形状（execute 返回值经 JSON 持久化后的样子）。 */
+interface StatusProjection {
+  panelReachable: boolean;
+  running: boolean;
+  model?: string;
+  displayName?: string;
+  hostPort?: number;
+  inferring?: boolean;
+  slotsRunning?: number;
+}
+
+/**
+ * meta 随会话日志持久化，回放时可能来自旧版本 schema（字段缺席或多余），不能把
+ * unknown 直接断言成 execute 的返回类型——按字段逐个收窄，形状对不上就返回
+ * undefined，让呈现层回退默认卡而不是把编造的状态当真。
+ */
+function readStatusProjection(meta: unknown): StatusProjection | undefined {
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const { panelReachable, running, model, displayName, hostPort, inferring, slotsRunning } =
+    meta as Record<string, unknown>;
+  if (typeof panelReachable !== "boolean" || typeof running !== "boolean") return undefined;
+  return {
+    panelReachable,
+    running,
+    ...(typeof model === "string" ? { model } : {}),
+    ...(typeof displayName === "string" ? { displayName } : {}),
+    ...(typeof hostPort === "number" ? { hostPort } : {}),
+    ...(typeof inferring === "boolean" ? { inferring } : {}),
+    ...(typeof slotsRunning === "number" ? { slotsRunning } : {}),
+  };
+}
+
+/**
+ * 终端卡的输出。首行口径与 render() 一致（喂模型与人看的结论不该打架），往下再
+ * 分行列出 displayName / hostPort / slot 明细——终端卡有输出空间，人读的卡片可以
+ * 比喂模型的单行摘要更详细。
+ */
+function formatStatusOutput(status: StatusProjection): string {
+  if (!status.panelReachable) return "llamapad 面板不可达";
+  if (!status.running) return "当前没有模型在运行";
+  // busy 不可知（undefined）时不带后缀，也不列 slot 行——同 execute 的取舍，不伪造
+  const busySuffix = status.inferring === undefined ? "" : status.inferring ? "，正在推理" : "，空闲";
+  const nameSuffix = status.displayName === undefined ? "" : `（${status.displayName}）`;
+  return [
+    `运行中：${status.model}${nameSuffix}${busySuffix}`,
+    ...(status.hostPort === undefined ? [] : [`宿主机端口：${status.hostPort}`]),
+    ...(status.slotsRunning === undefined ? [] : [`处理中 slot：${status.slotsRunning}`]),
+  ].join("\n");
+}
+
 export function buildStatusTool(client: PanelClient): ToolDefinition {
   return defineTool({
     name: "llamapad_status",
@@ -76,6 +126,8 @@ export function buildStatusTool(client: PanelClient): ToolDefinition {
       "查看 llamapad 面板当前运行状态：是否有本地模型在跑、跑的是哪个、面板是否可达。只读，不做任何" +
       "变更。只影响本地 llamapad 面板管理的模型，不是通用 Docker 管理工具。",
     parameters: {},
+    // 只读：一次 runtimeStatus 查询，无进程内共享可变状态，可安全并入并行组
+    isConcurrencySafe: () => true,
     output: {
       schema: {
         type: "object",
@@ -96,6 +148,27 @@ export function buildStatusTool(client: PanelClient): ToolDefinition {
         const busySuffix = value.inferring === undefined ? "" : value.inferring ? "，正在推理" : "，空闲";
         return [{ type: "text", text: `运行中：${value.model}${busySuffix}` }];
       },
+      // 回放路径上 presentResult 只能从 meta 读回结构化投影（content 是喂模型的单行
+      // 摘要，多行终端输出无法从它无损重建），而 status 值本身就是 lossless JSON，
+      // 原样投影即可，不必再精选字段
+      presentationMeta: (_args, value) => value,
+    },
+    // 状态查询的语义等同一条 `llamapad status` 命令：有输出、有成败（面板可达与否
+    // 映射为 exitCode），terminal 卡让 UI 用退出状态徽标呈现「面板不可达」
+    presentCall: () => ({
+      card: "terminal",
+      title: "llamapad status",
+      description: "查询 llamapad 面板运行状态（只读）",
+    }),
+    presentResult: (_args, result) => {
+      const status = readStatusProjection(result.meta);
+      if (!status) return undefined;
+      return {
+        card: "terminal",
+        title: "llamapad status",
+        output: formatStatusOutput(status),
+        exitCode: status.panelReachable ? 0 : 1,
+      };
     },
     async execute() {
       let status;
@@ -130,6 +203,9 @@ export function buildListModelsTool(client: PanelClient): ToolDefinition {
       `列出 llamapad 面板管理的全部本地模型配置。最多返回 ${LIST_MODELS_LIMIT} 条（按名称升序），` +
       "超过时 truncated 为 true、total 为真实总数。只影响本地 llamapad 面板管理的模型。",
     parameters: {},
+    // 只读：一次列表查询，无副作用，可安全并入并行组。呈现保持默认卡——search 卡的
+    // 语义是文件路径列表，套在模型清单上会让 UI 误渲染
+    isConcurrencySafe: () => true,
     output: {
       schema: {
         type: "object",
@@ -206,6 +282,9 @@ export function buildStartModelTool(
       },
       timeoutMs: { type: "integer", description: "等待就绪的超时（毫秒），默认沿用插件配置的 startTimeoutMs" },
     },
+    // 启动经共享门（switching.ts）串行/合流：同目标并发 ensure 只触发一次 start，
+    // 不同目标按队列顺序在单模型运行时下收敛，不会互相插队——可安全并入并行组
+    isConcurrencySafe: () => true,
     output: {
       schema: {
         type: "object",
@@ -221,6 +300,9 @@ export function buildStartModelTool(
         text: `已启动 ${value.model}${value.waitedReady ? "（已就绪）" : "（未等待就绪，可能仍在加载）"}`,
       }],
     },
+    // 启停是改变面板运行状态的操作：kind:'execute' 让 UI 给执行类处理；模型名是
+    // 调用里唯一值得一眼看到的信息，已进标题，rawInput 不再重复整份参数
+    presentCall: (args) => ({ card: "generic", title: `启动模型 ${args.model}`, kind: "execute" }),
     async execute(args, exec) {
       const waitReady = args.waitReady ?? true;
       const drain = args.drain ?? true;
@@ -251,6 +333,9 @@ export function buildStopModelTool(client: PanelClient): ToolDefinition {
       drain: { type: "boolean", description: "停止前是否让服务端排空在途推理，默认 true" },
       drainTimeoutMs: { type: "integer", description: "排空等待的最长时间（毫秒），默认沿用服务端设置（60000）" },
     },
+    // 停止是幂等的终态操作：并发派发时后到者查到的多已是「没有模型在跑」，而
+    // stopped:false 本就是合法答案，终态收敛一致；进程内无共享可变状态——可并入并行组
+    isConcurrencySafe: () => true,
     output: {
       schema: {
         type: "object",
@@ -268,6 +353,9 @@ export function buildStopModelTool(client: PanelClient): ToolDefinition {
           : "当前没有模型在运行，无需停止",
       }],
     },
+    // 目标模型要等查询后才知道（stop 不带模型参数），标题固定描述操作本身；
+    // kind:'execute' 标示这是改变面板运行状态的操作
+    presentCall: () => ({ card: "generic", title: "停止当前模型", kind: "execute" }),
     async execute(args) {
       const status = await client.runtimeStatus();
       if (!status.running) return { stopped: false };

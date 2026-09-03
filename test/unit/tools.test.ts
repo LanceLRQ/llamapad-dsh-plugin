@@ -93,6 +93,72 @@ describe("llamapad_status", () => {
     const blocks = tool.output.render({}, { panelReachable: false, running: false });
     expect(blocks).toEqual([{ type: "text", text: "llamapad 面板不可达" }]);
   });
+
+  it("presentationMeta：原样投影 status 值，供 presentResult 在回放路径读回", () => {
+    const tool = buildStatusTool(fakeClient());
+    const value = {
+      panelReachable: true,
+      running: true,
+      model: "a",
+      displayName: "A",
+      hostPort: 18080,
+      inferring: true,
+      slotsRunning: 2,
+    };
+    expect(tool.output.presentationMeta?.({}, value)).toEqual(value);
+  });
+
+  it("presentCall：terminal 调用卡，标题为 llamapad status", () => {
+    const tool = buildStatusTool(fakeClient());
+    expect(tool.presentCall?.({})).toEqual({
+      card: "terminal",
+      title: "llamapad status",
+      description: "查询 llamapad 面板运行状态（只读）",
+    });
+  });
+
+  it("presentResult：面板可达且运行中 → 多行明细输出，exitCode 0", () => {
+    const tool = buildStatusTool(fakeClient());
+    const view = tool.presentResult?.({}, {
+      content: [],
+      isError: false,
+      meta: {
+        panelReachable: true,
+        running: true,
+        model: "a",
+        displayName: "A",
+        hostPort: 18080,
+        inferring: true,
+        slotsRunning: 2,
+      },
+    });
+    expect(view).toEqual({
+      card: "terminal",
+      title: "llamapad status",
+      output: "运行中：a（A），正在推理\n宿主机端口：18080\n处理中 slot：2",
+      exitCode: 0,
+    });
+  });
+
+  it("presentResult：面板不可达 → 不可达文案，exitCode 1", () => {
+    const tool = buildStatusTool(fakeClient());
+    const view = tool.presentResult?.({}, {
+      content: [],
+      isError: false,
+      meta: { panelReachable: false, running: false },
+    });
+    expect(view).toEqual({
+      card: "terminal",
+      title: "llamapad status",
+      output: "llamapad 面板不可达",
+      exitCode: 1,
+    });
+  });
+
+  it("presentResult：meta 缺失（嵌套调用不投影）→ 回退默认卡，不编造状态", () => {
+    const tool = buildStatusTool(fakeClient());
+    expect(tool.presentResult?.({}, { content: [], isError: false })).toBeUndefined();
+  });
 });
 
 describe("llamapad_list_models", () => {
@@ -211,6 +277,17 @@ describe("llamapad_start_model", () => {
     await tool.execute({ model: "a" }, fakeExec());
     expect(ensureSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("presentCall：generic 卡，标题插值模型名，kind 为 execute", () => {
+    const client = fakeClient();
+    const gate = createModelGate(client);
+    const tool = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000 });
+    expect(tool.presentCall?.({ model: "a" })).toEqual({
+      card: "generic",
+      title: "启动模型 a",
+      kind: "execute",
+    });
+  });
 });
 
 describe("llamapad_stop_model", () => {
@@ -254,5 +331,22 @@ describe("llamapad_stop_model", () => {
       },
     });
     await buildStopModelTool(client).execute({ drainTimeoutMs: 5000 }, fakeExec());
+  });
+
+  it("presentCall：generic 卡，标题固定为「停止当前模型」，kind 为 execute", () => {
+    const tool = buildStopModelTool(fakeClient());
+    expect(tool.presentCall?.({})).toEqual({ card: "generic", title: "停止当前模型", kind: "execute" });
+  });
+});
+
+describe("并发安全声明（isConcurrencySafe）", () => {
+  it("四个工具都允许并入并行组：查询只读，启停经共享门/幂等终态收敛", () => {
+    const client = fakeClient();
+    const gate = createModelGate(client);
+    const start = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000 });
+    expect(buildStatusTool(client).isConcurrencySafe?.({})).toBe(true);
+    expect(buildListModelsTool(client).isConcurrencySafe?.({})).toBe(true);
+    expect(start.isConcurrencySafe?.({ model: "a" })).toBe(true);
+    expect(buildStopModelTool(client).isConcurrencySafe?.({})).toBe(true);
   });
 });
