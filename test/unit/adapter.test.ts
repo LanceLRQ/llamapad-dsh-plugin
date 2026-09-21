@@ -43,34 +43,77 @@ describe("describeModel", () => {
   };
 
   it("ready → 不加任何标记", () => {
-    expect(describeModel({ ...base, status: "ready" })).toEqual({ name: "模型A", description: "main · Q4_K_M" });
+    expect(describeModel({ ...base, status: "ready" }, null)).toEqual({ name: "模型A", description: "main · Q4_K_M" });
   });
 
   it("missing-file → description 末尾追加「文件缺失（面板文件页可自动寻找）」，name 不加前缀", () => {
-    expect(describeModel({ ...base, status: "missing-file" })).toEqual({ name: "模型A", description: "main · Q4_K_M · 文件缺失（面板文件页可自动寻找）" });
+    expect(describeModel({ ...base, status: "missing-file" }, null)).toEqual({ name: "模型A", description: "main · Q4_K_M · 文件缺失（面板文件页可自动寻找）" });
   });
 
   it("missing-mmproj → description 末尾追加「mmproj 缺失（面板文件页可自动寻找）」", () => {
-    expect(describeModel({ ...base, status: "missing-mmproj" })).toEqual({ name: "模型A", description: "main · Q4_K_M · mmproj 缺失（面板文件页可自动寻找）" });
+    expect(describeModel({ ...base, status: "missing-mmproj" }, null)).toEqual({ name: "模型A", description: "main · Q4_K_M · mmproj 缺失（面板文件页可自动寻找）" });
   });
 
   it("displayName 缺失时用 name 兜底，前缀加在兜底名前", () => {
-    expect(describeModel({ ...base, displayName: "", status: "running" })).toEqual({ name: "▶︎ a", description: "main · Q4_K_M" });
+    expect(describeModel({ ...base, displayName: "", status: "running" }, null)).toEqual({ name: "▶︎ a", description: "main · Q4_K_M" });
   });
 
   it("running + configStale → ▶︎ 前缀之外追加「配置已改，重启后生效」", () => {
-    expect(describeModel({ ...base, status: "running", configStale: true })).toEqual({
+    expect(describeModel({ ...base, status: "running", configStale: true }, null)).toEqual({
       name: "▶︎ 模型A", description: "main · Q4_K_M · 配置已改，重启后生效",
     });
   });
 
   it("configStale 缺席（老面板）或为 false → 不追加", () => {
-    expect(describeModel({ ...base, status: "running" }).description).toBe("main · Q4_K_M");
-    expect(describeModel({ ...base, status: "running", configStale: false }).description).toBe("main · Q4_K_M");
+    expect(describeModel({ ...base, status: "running" }, null).description).toBe("main · Q4_K_M");
+    expect(describeModel({ ...base, status: "running", configStale: false }, null).description).toBe("main · Q4_K_M");
   });
 
   it("quant 为 null 时 description 不带量化分段", () => {
-    expect(describeModel({ ...base, quant: null, status: "ready" })).toEqual({ name: "模型A", description: "main" });
+    expect(describeModel({ ...base, quant: null, status: "ready" }, null)).toEqual({ name: "模型A", description: "main" });
+  });
+});
+
+describe("describeModel：默认模型标记（★，多模型面板新增）", () => {
+  const base: PanelModelView = {
+    name: "a", displayName: "模型A", namespace: "main", quant: "Q4_K_M", sizeBytes: 1, hostPort: 1, status: "ready",
+  };
+
+  it("运行中且非默认 → 只有 ▶︎，没有 ★（矩阵：运行中）", () => {
+    expect(describeModel({ ...base, status: "running" }, "other")).toEqual({
+      name: "▶︎ 模型A", description: "main · Q4_K_M",
+    });
+  });
+
+  it("默认但未运行 → 只有 ★，没有 ▶︎（矩阵：默认）", () => {
+    expect(describeModel({ ...base, status: "ready" }, "a")).toEqual({
+      name: "★ 模型A", description: "main · Q4_K_M · 默认（不指定模型的请求发给它）",
+    });
+  });
+
+  it("既运行中又默认 → ▶︎ 与 ★ 同时出现，运行标记在前（矩阵：两者）", () => {
+    expect(describeModel({ ...base, status: "running" }, "a")).toEqual({
+      name: "▶︎ ★ 模型A", description: "main · Q4_K_M · 默认（不指定模型的请求发给它）",
+    });
+  });
+
+  it("既非运行中也非默认 → 不加任何标记（矩阵：都不是）", () => {
+    expect(describeModel({ ...base, status: "ready" }, "other")).toEqual({
+      name: "模型A", description: "main · Q4_K_M",
+    });
+  });
+
+  it("defaultModel 为 null（拿不到状态）→ 不标记默认，即便模型名恰好相等也不误判", () => {
+    expect(describeModel({ ...base, status: "ready" }, null)).toEqual({
+      name: "模型A", description: "main · Q4_K_M",
+    });
+  });
+
+  it("默认标记与既有 missing-file 提示共存（互不吞掉）", () => {
+    expect(describeModel({ ...base, status: "missing-file" }, "a")).toEqual({
+      name: "★ 模型A",
+      description: "main · Q4_K_M · 文件缺失（面板文件页可自动寻找） · 默认（不指定模型的请求发给它）",
+    });
   });
 });
 
@@ -423,6 +466,29 @@ describe("LlamapadAdapter", () => {
       expect(url).toBe("http://gpu:18099/v1/chat/completions");
       expect(callCount).toBe(2);
     });
+
+    // P0-3 回归：面板多模型分支下 running 语义已变成"默认模型"，若 buildDirectUrl 仍直接
+    // 读 running.hostPort，请求非默认模型时会拼出默认模型的端口。这里默认模型 a 跑在
+    // 8000，目标模型 b 是另一个同时在跑的非默认模型、跑在 9000——必须按 findRunning(status,
+    // "b") 取到 9000，而不是误用 running（默认模型 a）的 8000。
+    it("direct：strict 档下目标是非默认模型时，按目标自己的 hostPort 拼端口，不误用默认模型的端口", async () => {
+      const client = {
+        baseUrl: "x", listModels: async () => [], getModel: async () => null,
+        runtimeStatus: async () => ({
+          running: { model: "a", hostPort: 8000, ready: true }, // 语义已是默认模型，不是"唯一在跑的"
+          models: [
+            { model: "a", hostPort: 8000, ready: true },
+            { model: "b", hostPort: 9000, ready: true },
+          ],
+        }),
+        startModel: async () => {}, llamaHealth: async () => true,
+      };
+      const { adapter, fetchImpl } = makeAdapter({
+        chatBehavior: "strict", mode: "direct", llamaBaseUrl: "http://gpu:18080", client,
+      });
+      await drain(adapter.stream(opts({ model: "b" })));
+      expect(fetchImpl.mock.calls[0]![0]).toBe("http://gpu:9000/v1/chat/completions");
+    });
   });
 
   it("strict 被拦时，报错文案用 displayName 而非配置 key", async () => {
@@ -550,6 +616,15 @@ describe("resolveModel：思考强度上报", () => {
     expect(resolved.context).toEqual({ contextWindow: 4096 });
   });
 
+  // A6：面板的 /v1/models 在多模型分支下是聚合列表，getReasoningInfo 必须知道问的是
+  // 哪个模型才能在 parseReasoningInfo 里按 id 精确匹配，否则只能瞎取聚合列表第一条。
+  it("resolveReasoning 把目标模型名传给 client.getReasoningInfo（供聚合列表按 id 精确匹配）", async () => {
+    const getReasoningInfo = vi.fn(async () => ({ supported: true, levels: ["low"] }));
+    const client = clientWith({ getReasoningInfo });
+    await build(client).resolveModel("llamapad", "a");
+    expect(getReasoningInfo).toHaveBeenCalledWith("a");
+  });
+
   it("proxy + 模型未运行 → 不去问面板（问了也是别人的档位），退回完整枚举", async () => {
     const getReasoningInfo = vi.fn(async () => ({ supported: true, levels: ["xhigh"] }));
     const client = clientWith({ runtimeStatus: async () => ({ running: { model: "b", ready: true } }), getReasoningInfo });
@@ -651,15 +726,15 @@ describe("filterModelsForSelector：选择器可见模型过滤", () => {
 
 describe("describeModel：运行标记用实心播放三角", () => {
   it("running → name 前缀为 ▶︎ 加一个空格", () => {
-    expect(describeModel(view("qwen3-4b", "running")).name).toBe("▶︎ qwen3-4b");
+    expect(describeModel(view("qwen3-4b", "running"), null).name).toBe("▶︎ qwen3-4b");
   });
 
   it("非 running 不加任何前缀", () => {
-    expect(describeModel(view("qwen3-4b", "ready")).name).toBe("qwen3-4b");
+    expect(describeModel(view("qwen3-4b", "ready"), null).name).toBe("qwen3-4b");
   });
 
   it("前缀带 U+FE0E 变体选择符，强制文本形态而非彩色 emoji", () => {
-    expect(describeModel(view("x", "running")).name.codePointAt(1)).toBe(0xfe0e);
+    expect(describeModel(view("x", "running"), null).name.codePointAt(1)).toBe(0xfe0e);
   });
 });
 

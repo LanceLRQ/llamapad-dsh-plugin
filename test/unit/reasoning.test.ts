@@ -40,6 +40,33 @@ describe("parseReasoningInfo：从面板增强过的 /v1/models 响应里取思�
   });
 });
 
+describe("parseReasoningInfo：多模型聚合列表按 id 精确匹配（A6）", () => {
+  const aggregated = (items: unknown[]) => ({ object: "list", data: items });
+  const entry = (id: string, levels: string[]) => (
+    { id, object: "model", x_llamapad: { reasoning_effort: { supported: true, levels } } }
+  );
+
+  it("传 model 且命中 → 取该项而非 data[0]", () => {
+    const body = aggregated([entry("a", ["low"]), entry("b", ["high"])]);
+    expect(parseReasoningInfo(body, "b")).toEqual({ supported: true, levels: ["high"] });
+  });
+
+  it("传 model 但聚合列表里没有这一项 → null（不可知），绝不回落 data[0] 报别人的值域", () => {
+    const body = aggregated([entry("a", ["low"]), entry("b", ["high"])]);
+    expect(parseReasoningInfo(body, "not-exist")).toBeNull();
+  });
+
+  it("model 缺省 → 行为与现状完全一致（不做任何匹配，直接取 data[0]）", () => {
+    const body = aggregated([entry("a", ["low"]), entry("b", ["high"])]);
+    expect(parseReasoningInfo(body)).toEqual({ supported: true, levels: ["low"] });
+  });
+
+  it("data[] 里混进非对象项不影响 id 匹配（先跳过再继续找）", () => {
+    const body = aggregated([null, 42, entry("b", ["high"])]);
+    expect(parseReasoningInfo(body, "b")).toEqual({ supported: true, levels: ["high"] });
+  });
+});
+
 describe("buildReasoningInfo：面板声明 → dsh LlmModelReasoningInfo", () => {
   it("supported + 已知值域 → 只列这几档，顺序照面板给的", () => {
     const info = buildReasoningInfo({ supported: true, levels: ["xhigh", "medium", "low"] });

@@ -1,7 +1,7 @@
 import { LlmAdapter, LlmError, attributionHeaders } from "@deepseek-ai/dsh-llm";
 import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, ModelModality, StreamChunk } from "@deepseek-ai/dsh-llm";
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
-import { DEFAULT_DRAIN_TIMEOUT_MS, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
+import { DEFAULT_DRAIN_TIMEOUT_MS, defaultModelOf, findRunning, isRunning, type PanelClient, type PanelModelView, type PanelRuntimeStatus } from "./panel-client";
 import { EnsureError, type ModelGate } from "./switching";
 import { decideRoute, type ChatBehavior, type RouteBlockReason } from "./routing";
 import { formatRouteBlock } from "./route-message";
@@ -51,10 +51,16 @@ export class LlamapadAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const models = await this.options.client.listModels();
+    // 默认模型标记是锦上添花的展示信息，查询失败不该拖垮整个选择器列表——失败就退回
+    // null，describeModel 在 defaultModel 为 null 时不给任何模型加 ★（见该函数注释）
+    const [models, status] = await Promise.all([
+      this.options.client.listModels(),
+      this.options.client.runtimeStatus().catch(() => null),
+    ]);
+    const defaultModel = status !== null ? defaultModelOf(status) : null;
     const visible = filterModelsForSelector(models, this.options.hideStoppedModels === true);
     return visible.map((m) => {
-      const { name, description } = describeModel(m);
+      const { name, description } = describeModel(m, defaultModel);
       // inputModalities 缺省 = 不可知（宿主类型契约），所以「老面板不可知」必须整个省略
       // 字段而不是上报空数组——空数组是「什么都吃不了」的能力声明，不是未知
       const inputModalities = inputModalitiesFor(m.mmprojFile, m.status);
@@ -98,16 +104,18 @@ export class LlamapadAdapter extends LlmAdapter {
   }
 
   /**
-   * 思考强度档位。面板的档位声明由中转层用**当前运行中容器的模型**组装，因此只有
-   * 「请求的就是运行中那个模型」时问才有意义——问别的模型拿回来的是运行中模型的值域，
-   * 比不问更糟。未运行时直接交给 buildReasoningInfo(null) 走完整枚举兜底。
+   * 思考强度档位。多模型面板下 `status.running` 只是默认模型，不能再拿它跟目标比较
+   * （那样非默认模型永远问不到档位）——门槛改用 isRunning(status, model) 判「目标
+   * 是否在跑」，跑着才问才有意义：面板的聚合列表按 id 精确匹配目标模型
+   * （getReasoningInfo 把 model 带下去，见 parseReasoningInfo 的 A6 匹配逻辑），
+   * 问不到 / 没在跑一律交给 buildReasoningInfo(null) 走完整枚举兜底。
    */
   private async resolveReasoning(
     model: string,
     status: PanelRuntimeStatus | null,
   ): Promise<LlmModelReasoningInfo | undefined> {
-    if (status?.running?.model !== model) return buildReasoningInfo(null);
-    return buildReasoningInfo(await this.options.client.getReasoningInfo().catch(() => null));
+    if (status === null || !isRunning(status, model)) return buildReasoningInfo(null);
+    return buildReasoningInfo(await this.options.client.getReasoningInfo(model).catch(() => null));
   }
 
   /**
@@ -131,11 +139,13 @@ export class LlamapadAdapter extends LlmAdapter {
     }
     const behavior = this.options.chatBehavior ?? "strict";
     let targetModel: string;
-    // direct 模式拼 URL 要用的运行态：proceed 分支用路由判定时读到的那份即可（没发生启停，
-    // 数据不会过期）；start 分支必须在 gate.ensure() 之后重新查一次——否则切到端口不同的
-    // 模型时，这里仍是切换前的旧运行态，direct URL 会拼出已经停掉的旧端口。
+    // direct 模式拼 URL 要用的运行态：整份 status（而非单个 running 项）——多模型面板下
+    // buildDirectUrl 内部要用 findRunning 按目标模型名去查它自己的 hostPort，不能只
+    // 传「默认模型」那一项（P0-3）。proceed 分支用路由判定时读到的那份即可（没发生
+    // 启停，数据不会过期）；start 分支必须在 gate.ensure() 之后重新查一次——否则切到
+    // 端口不同的模型时，这里仍是切换前的旧运行态，direct URL 会拼出已经停掉的旧端口。
     // proxy 模式压根不看 hostPort（走面板反代），那次重查纯属白跑，故按 mode 收口。
-    let runningForUrl: PanelRuntimeStatus["running"] = null;
+    let runningForUrl: PanelRuntimeStatus = { running: null };
     try {
       // busy=1 只有 strict/passthrough 的报错文案用得上；auto-switch 不会走到报错分支，省这次查询
       const status = await this.options.client.runtimeStatus(behavior === "auto-switch" ? undefined : { busy: true });
@@ -155,11 +165,11 @@ export class LlamapadAdapter extends LlmAdapter {
         });
         targetModel = decision.model;
         if (this.options.mode === "direct") {
-          runningForUrl = (await this.options.client.runtimeStatus()).running;
+          runningForUrl = await this.options.client.runtimeStatus();
         }
       } else {
         targetModel = decision.targetModel;
-        runningForUrl = status.running;
+        runningForUrl = status;
       }
     } catch (error) {
       throw mapEnsureError(error, options.signal?.aborted === true);
@@ -232,13 +242,23 @@ async function resolveImages(
 
 /**
  * direct 模式的请求地址：主机名固定取 llamaBaseUrl，端口按目标模型当前的 hostPort 动态拼接。
- * 拿不到 hostPort（未知运行态 / 运行的不是目标模型）时原样回落到静态 llamaBaseUrl——
- * 这也是 auto-switch 切到 host_port 不同的模型时不再指向旧容器的关键：port 永远读自
+ *
+ * 入参是整份 status 而非单个 running 项（修 P0-3）：面板多模型分支下 status.running
+ * 的语义已变成「默认模型」，直接读它在目标不是默认模型时会拼出默认模型的端口——必须
+ * 用 findRunning 按目标模型名在运行集合（models[]/兼容老面板的 running）里精确查
+ * 它自己的那一项。
+ *
+ * 只认 hostPort，不认 configuredHostPort：前者是面板**实际发布**的端口（起模型时端口
+ * 被占用会自动顺延），后者只是配置里写的端口，两者不同就说明已经被顺延过，拼后者会
+ * 打到一个没人监听的端口。
+ *
+ * 拿不到 hostPort（未知运行态 / 目标模型没在运行集合里）时原样回落到静态 llamaBaseUrl——
+ * 这也是 auto-switch 切到端口不同的模型时不再指向旧容器的关键：port 永远读自
  * 「即将请求的这个模型」当前的运行态，而不是构造适配器时写死的那一个。
  */
-function buildDirectUrl(llamaBaseUrl: string, running: PanelRuntimeStatus["running"], targetModel: string): string {
+function buildDirectUrl(llamaBaseUrl: string, status: PanelRuntimeStatus, targetModel: string): string {
   // 面板在模型行已被删时会给 hostPort: null，用 == null 一并挡掉 null 与缺席
-  const hostPort = running?.model === targetModel ? running.hostPort : undefined;
+  const hostPort = findRunning(status, targetModel)?.hostPort;
   if (hostPort == null) return `${llamaBaseUrl}/v1/chat/completions`;
   try {
     const parsed = new URL(llamaBaseUrl);
@@ -272,16 +292,28 @@ export function filterModelsForSelector(
  * listModels 的网络往返。
  * - running：name 前加 ▶︎ 前缀（实心播放三角，带 U+FE0E 变体选择符强制文本形态，
  *   避免被渲染成宽窄不一的彩色 emoji；不用空格占位对齐，选择器变宽字体对不齐更乱）
+ * - 默认模型（面板多模型分支起，`defaultModel` 与本行模型名相等）：name 再加 ★ 前缀
+ *   （与 ▶︎ 互不排斥、可同时出现，运行标记在前），description 末尾追加「默认（不指定
+ *   模型的请求发给它）」——这是不带 model 字段的请求实际会落到的模型，选择器上标出来
+ *   帮用户理解"直接发消息"会打给谁。`defaultModel` 为 null（拿不到状态，或确实没有
+ *   默认模型）时不标记任何一行，宁可不标也不要猜
  * - missing-file / missing-mmproj：description 末尾按既有的 " · " 分隔追加提示——
  *   选中这类模型必然在启动时 422，提前标出来省一次踩坑
  * - configStale：运行中且启动后配置又被保存过——容器参数不热更新，description 末尾提示需重启
- * - ready：不加任何标记
+ * - ready 且非默认：不加任何标记
  */
-export function describeModel(m: PanelModelView): { name: string; description: string } {
+export function describeModel(
+  m: PanelModelView,
+  defaultModel: string | null,
+): { name: string; description: string } {
   const baseName = m.displayName || m.name;
+  const isDefault = defaultModel !== null && m.name === defaultModel;
   // U+25B6 后面必须跟 U+FE0E（变体选择符-15）：裸 ▶ 在部分系统会被渲染成彩色 emoji，
   // 字宽随之突变，选择器里一行高矮不齐。加上它强制取文本形态。
-  const name = m.status === "running" ? `▶︎ ${baseName}` : baseName;
+  const prefixes: string[] = [];
+  if (m.status === "running") prefixes.push("▶︎");
+  if (isDefault) prefixes.push("★");
+  const name = prefixes.length > 0 ? `${prefixes.join(" ")} ${baseName}` : baseName;
   const baseDescription = `${m.namespace}${m.quant ? ` · ${m.quant}` : ""}`;
   // 三种提示互斥且有优先级：缺件是"起都起不来"，最要紧；configStale 只在 running 时
   // 由面板置真，与缺件天然不同时出现，放末位不会被吃掉
@@ -289,7 +321,10 @@ export function describeModel(m: PanelModelView): { name: string; description: s
     : m.status === "missing-mmproj" ? " · mmproj 缺失（面板文件页可自动寻找）"
     : m.configStale === true ? " · 配置已改，重启后生效"
     : "";
-  return { name, description: `${baseDescription}${suffix}` };
+  // 默认标记与上面三种提示是两件独立的事（一个讲能不能启动/要不要重启，一个讲请求会
+  // 落到谁），不互斥、直接追加在最后
+  const defaultSuffix = isDefault ? " · 默认（不指定模型的请求发给它）" : "";
+  return { name, description: `${baseDescription}${suffix}${defaultSuffix}` };
 }
 
 /**

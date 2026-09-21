@@ -35,12 +35,21 @@ const EFFORT_LABELS: Record<string, string> = {
  * 从面板增强过的 `/v1/models` 响应里取出思考强度声明。
  * 形状不符（老面板没有 x_llamapad、JSON 结构意外、data 为空）一律返回 null——
  * 这是「没问到」而非「不支持」，两者在 buildReasoningInfo 里的处理刻意不同。
+ *
+ * `model` 可选：多模型面板下这份 `data[]` 是**聚合列表**（同时列出全部在跑模型各自
+ * 的声明），不按 id 精确匹配就只能瞎取第一条——目标模型未必排在第一位。`item.id`
+ * 强制为面板模型名（面板 `src/lib/models-list.ts:47`）。指定了 model 却没匹配到时
+ * 返回 null（「没问到」），**刻意不回落 data[0]**：那会把别的模型的值域报给用户，
+ * 用户据此选出的档位目标模型未必支持，比老老实实说「不可知」再走完整枚举兜底更糟。
+ * `model` 缺省时行为与老版完全一致（老面板本就只返回一条，取哪个都一样）。
  */
-export function parseReasoningInfo(body: unknown): PanelReasoningInfo | null {
+export function parseReasoningInfo(body: unknown, model?: string): PanelReasoningInfo | null {
   if (typeof body !== "object" || body === null) return null;
   const data = (body as { data?: unknown }).data;
   if (!Array.isArray(data)) return null;
-  const first = data[0];
+  const first = model !== undefined
+    ? data.find((item) => typeof item === "object" && item !== null && (item as { id?: unknown }).id === model)
+    : data[0];
   if (typeof first !== "object" || first === null) return null;
   const extra = (first as { x_llamapad?: unknown }).x_llamapad;
   if (typeof extra !== "object" || extra === null) return null;
