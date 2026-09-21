@@ -226,6 +226,16 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
           （收到过至少一份快照）才说得出口。 */}
       {receivedOnce ? <RunningRow view={describeRunningView(running, phase)} t={t} /> : null}
 
+      {/* 归属标注（A7，任务 8）：面板采集器只跟随默认模型，这是面板自身的实现约束，
+          插件改不了，只能如实告知——不加这句用户很容易把"切换默认模型后曲线突变"
+          读成 bug。只在确实有默认模型时才展示：running 为 null 时（idle/unknown）
+          本就没有数据可归属，说了反而是噪音。 */}
+      {running !== null ? (
+        <p className="llamapad-monitor__hint">
+          {t("monitorAttributionNote", { name: running.displayName ?? running.name })}
+        </p>
+      ) : null}
+
       {panelError !== null ? (
         <div className="llamapad-monitor__banner" role="alert">
           <IconWarningOutline16 />
@@ -266,6 +276,10 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
           <span className="llamapad-monitor__cardTitle">{t("monitorCardGpu")}</span>
           {gpu !== null && gpu.devices.length > 0 ? (
             <>
+              {/* 整卡口径说明（A7）：与是否有模型在跑无关，只要卡还在就适用——
+                  多模型同卡时 nvidia-smi 只报得出整卡读数，插件没有"哪段显存/
+                  利用率属于哪个模型"的数据源，不能假装能拆分 */}
+              <p className="llamapad-monitor__hint">{t("monitorGpuAttributionNote")}</p>
               <MetricBlock
                 label={t("monitorGpuMem")}
                 valueText={metricText(series["gpu.mem_used_mib"], formatMiB, noData)}

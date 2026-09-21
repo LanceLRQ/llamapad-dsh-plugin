@@ -56,9 +56,21 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   保证请求一定不失败；`/v1/models` 的响应带 `x_llamapad.reasoning_effort.{supported,levels}` 声明。
   插件只读声明、只透传取值（`src/reasoning.ts`）。**direct 模式绕过这一层**，值域外的取值会被 jinja
   打成 HTTP 500，因此 direct 下 `resolveModel` 不上报 `reasoning`、`stream` 明确拒绝
-- 单模型运行时：切换 = start 自带停旧起新，**但是否触发切换由 `chatBehavior` 三档决定**
-  （`strict` 默认/`passthrough`/`auto-switch`，见 `docs/design/chat-vs-lifecycle-decoupling.md`）；
-  只有 `auto-switch` 档会调用 start，插件侧用串行门 + 同目标合流防并发抖动
+- **面板运行时语义已是多模型的**（本插件提前适配面板尚未合并进 dev/main 的
+  `feature/multi-model` 分支——面板解除了"同一时刻只运行一个模型"的约束，详见
+  `docs/plans/2026-09-21-multi-model-adapt.md` 背景一节）：`GET /api/v1/runtime/status`
+  的 `running` 字段还在，但语义已从"唯一在跑的模型"变成**默认模型**（不带 model 字段的
+  请求会打给它）；真正的运行集合在 `models[]`（每项自带 `ready`/`hostPort`），老面板没有
+  这个字段时由 `running` 合成单元素数组。全仓库判定"某模型是否在跑/该查谁的 ready"一律走
+  `panel-client.ts` 的 `runningModels()`/`findRunning()`/`isRunning()`/`defaultModelOf()`
+  四个归一函数，不直接读 `status.running`——直接读会在多模型面板上把默认模型之外的
+  模型全部误判成"未运行"（这正是适配前的 P0-1/P0-2 两处生产级 bug 的根因）。切换默认
+  模型走独立的 `GET/PUT /api/v1/runtime/default-model`（老面板没有这条路由，404 折成
+  `PanelError` 的 `UNSUPPORTED` 码）。`chatBehavior` 三档在此基础上决定是否触发 start
+  （`strict` 默认/`passthrough`/`auto-switch`，见 `docs/design/chat-vs-lifecycle-decoupling.md`）：
+  只有 `auto-switch` 档会调用 start，且**只保证目标模型在跑，绝不为了它停掉别的在跑
+  模型**（贴合插件"只做连接与调度，不接管服务端"的用户边界）；插件侧仍用串行门 + 同
+  目标合流防并发抖动
 - 用户边界：**不做空闲自动停**（插件只做连接与模型调度，不接管服务端）；等待期不注入提示文本
   （会污染历史上下文，依据见 docs/research §5）
 - E2E 用假面板（Node http 假服务器），逻辑正确性不依赖真实环境；**API 层真机校准已于 2026-08-25
@@ -100,7 +112,9 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
 `docs/manual-smoke.md`「真机冒烟结果」。全部测试 111 单测 + 9 假面板 E2E 全绿。
 
 **模型选择器运行状态标记已实施**（2026-08-27）：`listModels` 按面板 `status` 字段给运行中模型加
-`●` 前缀、给 `missing-file`/`missing-mmproj` 追加提示（纯函数 `describeModel`，`adapter.ts`）；
+`▶︎`（U+25B6 + 变体选择符 U+FE0E，强制文本形态、防止被渲染成宽窄不一的彩色 emoji）前缀、
+给 `missing-file`/`missing-mmproj` 追加提示（纯函数 `describeModel`，`adapter.ts`）——多模型
+适配（见下）额外给默认模型加了 `★` 前缀，两个标记互不排斥、可同时出现；
 新增 `directory-refresh.ts` 轮询面板运行状态，仅在运行中模型变化时 `ctx.emit("llm/adapters-updated")`
 触发浏览器侧目录重拉，间隔由新增 Config 字段 `statusRefreshMs`（默认 5000ms，0 关闭）控制
 （directory-refresh 已于 2026-09-03 被 `status-watch.ts` 吸收替代，见「关键约束」）。
@@ -137,6 +151,23 @@ A/B 双入口组合树正确、完整对话流式走通（冷启动首字 10.5s�
   系统提示发给远端 provider）；补钉 `dsh-system-prompt` 0.1.1-rc.2
 
 全部测试 497 单测 + 31 假面板 E2E 全绿；真机冒烟清单已记入 `docs/manual-smoke.md`（待执行）。
+
+**多模型并行适配已全部实施**（2026-09-21，方案见
+`docs/plans/2026-09-21-multi-model-adapt.md`）：提前适配面板尚未合并进 dev/main 的
+`feature/multi-model` 分支（解除"同一时刻只运行一个模型"约束），修掉适配前会静默发生的
+六处错配，其中最贵的两处是生产级 bug——P0-1（auto-switch 请求非默认模型时 100% 假超时、
+留下幽灵实例占显存）与 P0-2（strict 把在跑的非默认模型误判成"未运行"）。八个任务：
+`panel-client.ts` 的多模型契约层与四个归一函数（任务 1）→ routing/route-message 按目标
+模型判定（任务 2）→ switching 就绪轮询按目标模型查（任务 3，修 P0-1）→ adapter 的 direct
+URL/reasoning 精确匹配/选择器 `★` 默认标记（任务 4，修 P0-3）→ status-watch/fleet-snapshot
+运行集合感知（任务 5）→ 卡片运行列表 + 「设为默认」（任务 6）→ 新增
+`llamapad_set_default_model` 工具（任务 7）→ 监控页归属标注 + 假面板多模型能力 + 本轮文档
+（任务 8）。收尾时另补一处计划遗漏：`llamapad_stop_model` 原本无 `model` 参数、一律停
+`status.running`，多模型下用户说"停掉 B"会把默认的 A 停掉（**停错模型比停不了更糟**），
+已加可选 `model` 参数，不传仍停默认模型，目标没在跑则回 `stopped:false` 而不退而求其次停别的。
+全部测试 622 单测 + 36 假面板 E2E 全绿（含假面板"老面板模式"双向兼容回归）；
+真机冒烟需等面板 `feature/multi-model` 分支合并后才能执行，清单已记入
+`docs/manual-smoke.md`（只记清单，未打勾）。
 
 待办：
 - 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）

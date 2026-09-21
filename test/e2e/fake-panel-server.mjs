@@ -5,6 +5,23 @@ import { createServer } from "node:http";
  * （metrics 窗口 / GPU 快照）+ llama.cpp 反代（health + chat SSE）。状态机：start 置
  * running + readyAt；health 在 readyAt 前回 503。start/stop 路由会像真实面板一样写
  * model.* 事件并推给挂着的 SSE 订阅者。
+ *
+ * `multiModel` 开关（默认 false = 老面板模式）：本插件是在面板 `feature/multi-model`
+ * 分支尚未合并进 dev/main 前提前适配的（见 docs/plans/2026-09-21-multi-model-adapt.md
+ * 背景一节），假面板因此要能演出两种面板的差异，供 E2E 做双向兼容回归：
+ * - false（老面板模式，也是默认值——不改这个默认，才能保证本文件其余既有 E2E
+ *   用例（adapter-e2e / tools-e2e / status-watch-e2e）不动一行代码继续通过）：
+ *   `runtime/status` 只回 `running` 单值（无 `models[]`/`defaultModel`），
+ *   start 对已有运行模型是"停旧起新"（同一时刻只有一个 running），
+ *   default-model 路由整条不存在（落到文件尾的通用 404），
+ *   `/v1/models` 反代只回一条（`id` = 当前唯一运行的模型）。
+ * - true（新面板/多模型模式）：`state.runtime`（Map，键为模型名）记录全部运行中
+ *   模型各自的就绪时刻/端口/启动时刻，start 只新增不驱逐（面板解除了"同一时刻
+ *   只运行一个模型"的约束，正是本次适配要修的六处错配的根源）；`state.defaultModel`
+ *   独立维护——只有"当前没有任何默认模型"时 start 才会顺手把新模型设成默认
+ *   （对齐面板"起第一个模型就会有默认"的实际行为），此后只能通过
+ *   `PUT default-model` 显式切换，stop 掉默认模型会把默认清空而不是自动顶替下一个
+ *   （面板真实语义含糊，取最简单、最不会误导测试的假设）。
  */
 
 /** 各窗口时长（毫秒），与真实面板 window.ts 的 RANGE_DEFS 同值——from 计算要用 */
@@ -13,11 +30,21 @@ const RANGE_DEFS = { "30m": 30 * 60_000, "2h": 2 * 3_600_000, "24h": 24 * 3_600_
 /** 与真实面板 resolutionForRange 同款：≤2h 走 5s ring、更长走 15min 聚合桶 */
 const resolutionForRange = (range) => (range === "30m" || range === "2h" ? "5s" : "15m");
 
-export function createFakePanel({ loadMs = 100 } = {}) {
+export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
   const seedNow = Date.now();
   const state = {
     running: null, readyAt: 0, starts: [], stops: [], chatRequests: [], busy: null,
     events: [], eventStreams: new Set(), eventConnections: 0,
+    /** 老面板模式(false，默认)/多模型模式(true) 开关，见文件头注释；只读，创建后不切档 */
+    multiModel,
+    /**
+     * 多模型模式专用：全部运行中模型各自的运行态（键=模型名）。`running`/`readyAt`
+     * 两个老字段在多模型模式下不再被这里的逻辑写入——两套状态分轨保存，不混着用
+     * 一份字段，免得「哪个字段在哪种模式下是权威的」变成要记忆的隐性规则。
+     */
+    runtime: new Map(),
+    /** 多模型模式专用：不带 model 字段的请求会打给谁；一个模型都没跑时为 null */
+    defaultModel: null,
     // ---- 监控端点的假件 ----
     /** metrics 窗口请求的留痕（range 原样 + since 原始字符串），断言 query 拼装用 */
     metricsRequests: [],
@@ -64,8 +91,18 @@ export function createFakePanel({ loadMs = 100 } = {}) {
   };
   const MODELS = [
     { name: "qwen-small", displayName: "Qwen 小", namespace: "main", ggufFile: "main/a.gguf", mmprojFile: null, status: "stopped", quant: "Q4_K_M", sizeBytes: 100, fileCount: 1, hostPort: 18080 },
-    { name: "qwen-big", displayName: "Qwen 大", namespace: "main", ggufFile: "main/b.gguf", mmprojFile: null, status: "stopped", quant: "Q8_0", sizeBytes: 200, fileCount: 1, hostPort: 18080 },
+    { name: "qwen-big", displayName: "Qwen 大", namespace: "main", ggufFile: "main/b.gguf", mmprojFile: null, status: "stopped", quant: "Q8_0", sizeBytes: 200, fileCount: 1, hostPort: 18081 },
   ];
+  /**
+   * 多模型模式下 `/v1/models` 反代按模型分别声明思考强度值域（面板 A6 决策要求
+   * 按 `id` 精确匹配到目标模型自己的声明）。两个模型给出不同的 levels/rounding——
+   * 纯粹是为了让 E2E 断言"确实取的是目标模型自己的声明，不是随手把聚合列表第一条
+   * 拿来用"，不代表真实面板对不同模型的声明差异有什么规律。
+   */
+  const REASONING_DECLARATIONS = {
+    "qwen-small": { levels: ["xhigh", "medium", "low"], rounding: "down" },
+    "qwen-big": { levels: ["high", "medium", "low", "minimal"], rounding: "nearest" },
+  };
   const server = createServer((req, res) => {
     const json = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (!/^Bearer lp_/.test(req.headers.authorization ?? "")) return json(401, { error: "unauthorized" });
@@ -80,8 +117,33 @@ export function createFakePanel({ loadMs = 100 } = {}) {
       return json(200, { defaults: {}, merged: { docker: {}, server: { ctx_size: 131072 } }, params: {}, overriddenKeys: [] });
     }
     if (req.method === "GET" && url.pathname === "/api/v1/runtime/status") {
-      // ready 与下面 /health 的判定同源（都看 readyAt），这样 loadMs 这一个参数就同时
-      // 控制两条路径，不会出现「health 说没好、status 说好了」的自相矛盾
+      if (state.multiModel) {
+        // 多模型模式：models[] 是全部在跑模型各自的运行态；running 仍然给出（兼容
+        // 字段），但只反映 defaultModel 那一项——这正是插件要适配的新语义本身
+        // （见 panel-client.ts PanelRuntimeStatus.running 的注释）。
+        const models = [...state.runtime.entries()].map(([model, info]) => ({
+          model, hostPort: info.hostPort, ready: Date.now() >= info.readyAt, startedAt: info.startedAt,
+        }));
+        const defaultEntry = state.defaultModel !== null
+          ? models.find((m) => m.model === state.defaultModel) ?? null
+          : null;
+        const body = {
+          running: defaultEntry,
+          models,
+          defaultModel: state.defaultModel,
+        };
+        // ?model= 只用于精确 busy 探测（A3 决策）：老面板忽略这个参数、只探
+        // running 那一项；这里同样只探一项——传了 model 探目标模型，没传探默认模型，
+        // 两者都探不到（模型没在跑/没有默认）时 busy 是「不可知」而非「不忙」
+        if (url.searchParams.get("busy") === "1") {
+          const busyTarget = url.searchParams.get("model") ?? state.defaultModel;
+          body.busy = busyTarget !== null && state.runtime.has(busyTarget) ? state.busy : null;
+        }
+        return json(200, body);
+      }
+      // 老面板模式（默认）：ready 与下面 /health 的判定同源（都看 readyAt），这样
+      // loadMs 这一个参数就同时控制两条路径，不会出现「health 说没好、status 说好了」
+      // 的自相矛盾。这条分支保持原样字节不动——本文件其余既有 E2E 用例的前提
       const body = {
         running: state.running
           ? { model: state.running, hostPort: 18080, ready: Date.now() >= state.readyAt }
@@ -89,6 +151,32 @@ export function createFakePanel({ loadMs = 100 } = {}) {
       };
       if (url.searchParams.get("busy") === "1") body.busy = state.busy;
       return json(200, body);
+    }
+    if (url.pathname === "/api/v1/runtime/default-model") {
+      // 老面板模式下这条路由整个不存在（面板多模型分支才有），落到文件尾的通用
+      // 404——不用专门分支表达"不存在"，缺席即不存在才是最贴近真实老面板的写法
+      if (!state.multiModel) return json(404, { error: "not found" });
+      if (req.method === "GET") {
+        return json(200, { defaultModel: state.defaultModel, models: [...state.runtime.keys()] });
+      }
+      if (req.method === "PUT") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          let parsed = {};
+          try { parsed = body ? JSON.parse(body) : {}; } catch { parsed = {}; }
+          const model = parsed.model;
+          // 409（不是 404）：路由本身存在，只是目标模型没在运行——与
+          // panel-client.ts defaultModelError 的 409→RUNTIME_BUSY 映射对应
+          if (typeof model !== "string" || !state.runtime.has(model)) {
+            return json(409, { error: `模型未在运行，无法设为默认: ${model}` });
+          }
+          state.defaultModel = model;
+          return json(200, {});
+        });
+        return;
+      }
+      return json(404, { error: "not found" });
     }
     const startMatch = /^\/api\/v1\/models\/([^/]+)\/start$/.exec(url.pathname);
     if (req.method === "POST" && startMatch) {
@@ -100,8 +188,25 @@ export function createFakePanel({ loadMs = 100 } = {}) {
         let drainReq = {};
         try { drainReq = body ? JSON.parse(body) : {}; } catch { drainReq = {}; }
         state.starts.push(name);
-        state.running = name;
-        state.readyAt = Date.now() + loadMs;
+        if (state.multiModel) {
+          // 多模型模式的核心行为（P0-1 的根因所在）：start 只新增这一个模型的
+          // 运行态，绝不驱逐 state.runtime 里已有的其它模型——面板解除了「同一
+          // 时刻只运行一个模型」的约束，旧「停旧起新」的假设不再成立
+          const configuredHostPort = MODELS.find((m) => m.name === name)?.hostPort ?? 18080;
+          state.runtime.set(name, {
+            hostPort: configuredHostPort,
+            readyAt: Date.now() + loadMs,
+            startedAt: new Date().toISOString(),
+          });
+          // 只有「当前没有任何默认模型」时才顺手把新模型设成默认——对齐面板
+          // 「起第一个模型就会有默认」的实际行为；此后只能靠 PUT default-model
+          // 显式切换，不能被后续的 start 悄悄改掉（否则测不出 P0-1/P0-2 想验证的
+          // 「目标不是默认也该正常工作」）
+          if (state.defaultModel === null) state.defaultModel = name;
+        } else {
+          state.running = name;
+          state.readyAt = Date.now() + loadMs;
+        }
         emitEvent("model.start", `启动 ${name}`);
         const resBody = { id: `cid-${state.starts.length}` };
         if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
@@ -123,9 +228,17 @@ export function createFakePanel({ loadMs = 100 } = {}) {
         let drainReq = {};
         try { drainReq = body ? JSON.parse(body) : {}; } catch { drainReq = {}; }
         state.stops.push(name);
-        // stopModel 对无容器幂等成功（服务端语义），假面板同样不校验"是不是当前运行的那个"
-        state.running = null;
-        state.readyAt = 0;
+        if (state.multiModel) {
+          // 只摘掉这一个模型，不牵连其它在跑模型（stop 的多模型对称语义）。
+          // 停掉的恰好是默认模型时清空默认而不是自动顶替下一个——面板真实语义
+          // 含糊，取最简单、最不会诱导测试写出错误期望的假设
+          state.runtime.delete(name);
+          if (state.defaultModel === name) state.defaultModel = null;
+        } else {
+          // stopModel 对无容器幂等成功（服务端语义），假面板同样不校验"是不是当前运行的那个"
+          state.running = null;
+          state.readyAt = 0;
+        }
         emitEvent("model.stop", `停止 ${name}`);
         const resBody = { ok: true };
         if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
@@ -208,6 +321,24 @@ export function createFakePanel({ loadMs = 100 } = {}) {
     // 面板中转层给 /v1/models 注入的思考强度声明（llamapad lib/proxy-rewrite.ts 的
     // enhanceModelsResponse）。无模型在跑时面板回 503，这里照做
     if (req.method === "GET" && url.pathname === "/api/v1/proxy/llama/v1/models") {
+      if (state.multiModel) {
+        // 多模型模式：聚合列表按运行集合逐条给出，id = 模型名（面板
+        // src/lib/models-list.ts 的契约）——插件按 id 精确匹配到目标模型自己的
+        // 声明（A6），不再是"运行中只有一个、随便拿第一条就是它"
+        const names = [...state.runtime.keys()];
+        if (names.length === 0) return json(503, { error: "没有运行中的模型", hint: "/models" });
+        return json(200, {
+          object: "list",
+          data: names.map((name) => ({
+            id: name,
+            object: "model",
+            supported_parameters: ["reasoning_effort"],
+            x_llamapad: {
+              reasoning_effort: { supported: true, aliases: {}, ...REASONING_DECLARATIONS[name] },
+            },
+          })),
+        });
+      }
       if (!state.running) return json(503, { error: "没有运行中的模型", hint: "/models" });
       return json(200, {
         object: "list",
@@ -222,6 +353,12 @@ export function createFakePanel({ loadMs = 100 } = {}) {
       });
     }
     if (req.method === "GET" && url.pathname === "/api/v1/proxy/llama/health") {
+      if (state.multiModel) {
+        // 多模型模式下 probeReady 不会回退到这条端点（models[] 的 ready 字段
+        // 一直在场），这里只需给个不撒谎的最小实现：只要有任意模型就绪即可
+        const anyReady = [...state.runtime.values()].some((info) => Date.now() >= info.readyAt);
+        return anyReady ? json(200, { status: "ok" }) : json(503, { status: "loading" });
+      }
       return Date.now() >= state.readyAt && state.running ? json(200, { status: "ok" }) : json(503, { status: "loading" });
     }
     if (req.method === "POST" && url.pathname === "/api/v1/proxy/llama/v1/chat/completions") {
@@ -230,7 +367,12 @@ export function createFakePanel({ loadMs = 100 } = {}) {
       req.on("end", () => {
         const parsed = JSON.parse(body);
         state.chatRequests.push(parsed);
-        if (parsed.model !== state.running) return json(409, { error: `running=${state.running}` });
+        // 多模型模式：只要目标模型在运行集合里就放行，不再要求它恰好是"唯一在
+        // 跑的那个"（这正是 P0-2 要验证的——strict 档请求非默认但在跑的模型）
+        const notRunning = state.multiModel
+          ? !state.runtime.has(parsed.model)
+          : parsed.model !== state.running;
+        if (notRunning) return json(409, { error: `running=${state.multiModel ? [...state.runtime.keys()].join(",") : state.running}` });
         const frames = [
           `{"choices":[{"delta":{"reasoning_content":"思考"}}]}`,
           `{"choices":[{"delta":{"content":"你好"}}]}`,

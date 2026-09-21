@@ -8,13 +8,29 @@ export interface FakePanelEvent {
   message: string;
 }
 
+/** 多模型模式（multiModel:true）下 state.runtime 的单个条目形状——见 FakePanelState.runtime */
+export interface FakePanelRuntimeEntry {
+  hostPort: number;
+  readyAt: number;
+  startedAt: string;
+}
+
 export interface FakePanelState {
+  /** 老面板模式（默认）下的唯一运行态；多模型模式下不再被 start/stop 逻辑写入，
+   *  一律为初始值——运行态改看 runtime/defaultModel，见二者注释 */
   running: string | null;
   readyAt: number;
   starts: string[];
   stops: string[];
   chatRequests: Array<Record<string, unknown>>;
   busy: { inferring: boolean; slotsRunning: number } | null;
+  /** 老面板模式(false，默认)/多模型模式(true) 开关；createFakePanel 的 multiModel
+   *  选项直接落地在这里，创建后不可切档（只读，测试不应改写） */
+  readonly multiModel: boolean;
+  /** 多模型模式专用：全部运行中模型各自的运行态，键为模型名。老面板模式下恒为空 Map */
+  runtime: Map<string, FakePanelRuntimeEntry>;
+  /** 多模型模式专用：不带 model 字段的请求会打给谁；老面板模式下恒为 null */
+  defaultModel: string | null;
   /** 事件表（时间升序追加）；start/stop 路由会照真实面板的样子写入 model.* 事件 */
   events: FakePanelEvent[];
   /** 当前挂着的 SSE 连接数（res 对象集合），测试用它等「订阅已建立」 */
@@ -47,4 +63,4 @@ export interface FakePanel {
   state: FakePanelState;
 }
 
-export function createFakePanel(options?: { loadMs?: number }): FakePanel;
+export function createFakePanel(options?: { loadMs?: number; multiModel?: boolean }): FakePanel;
