@@ -75,16 +75,21 @@ function fakeWorld() {
  */
 function fakePanel() {
   let running: string | null = null;
+  // 新面板的 models[]/defaultModel 字段：不设置时按老面板路径由 running 合成单元素
+  // 数组（见 runningModels() 归一逻辑），多模型用例通过 setStatusExtra 直接给整份新字段
+  let extraStatus: Partial<PanelRuntimeStatus> = {};
   const models = [
     { name: "a", displayName: "A", namespace: "main", quant: null, sizeBytes: 1, hostPort: 1, status: "stopped" },
     { name: "b", displayName: "B", namespace: "main", quant: "Q4", sizeBytes: 2, hostPort: 1, status: "stopped" },
   ];
   const runtimeStatus = vi.fn(async (): Promise<PanelRuntimeStatus> => ({
     running: running ? { model: running } : null,
+    ...extraStatus,
   }));
   const listModels = vi.fn(async () => models.map((m) => ({ ...m, status: m.name === running ? "running" : "stopped" })));
-  // vi.fn 化：fleetCache 的 runningContextWindow 半身要按用例改写它的返回/挂起行为
-  const getEffectiveConfig = vi.fn(async (): Promise<PanelEffectiveConfig | null> => null);
+  // vi.fn 化：fleetCache 的 contextWindows 半身要按用例改写它的返回/挂起行为；参数带
+  // 上模型名，好让多模型用例按名字分别答复（区分「谁的 ctx 查询失败/成功」）
+  const getEffectiveConfig = vi.fn(async (_name: string): Promise<PanelEffectiveConfig | null> => null);
   const getEvents = vi.fn(async (): Promise<PanelEvent[]> => []);
   const streams: Array<{ handler: StreamEventsHandler; stopped: boolean }> = [];
   const streamEvents = vi.fn((handler: StreamEventsHandler) => {
@@ -102,6 +107,9 @@ function fakePanel() {
     runtimeStatus,
     startModel: async () => {},
     stopModel: async () => ({ ok: true }),
+    // 默认模型两个端点与监控读路径同类：status-watch 用不到，给占位满足接口即可
+    getDefaultModel: async () => { throw unreachable(); },
+    setDefaultModel: async () => { throw unreachable(); },
     getReasoningInfo: async () => null,
     llamaHealth: async () => true,
     getEvents,
@@ -114,6 +122,10 @@ function fakePanel() {
     client, runtimeStatus, listModels, getEvents, getEffectiveConfig, streamEvents, streams,
     setRunning: (value: string | null) => {
       running = value;
+    },
+    /** 多模型用例专用：直接扣入新面板才有的 models[]/defaultModel 字段。 */
+    setStatusExtra: (patch: Partial<PanelRuntimeStatus>) => {
+      extraStatus = patch;
     },
   };
 }
@@ -130,6 +142,7 @@ const evt = (id: number, kind = "model.stop"): PanelEvent =>
 function startWatch(overrides: {
   intervalMs?: number;
   running?: string | null;
+  statusExtra?: Partial<PanelRuntimeStatus>;
   getEvents?: PanelEvent[];
   getEventsRejects?: boolean;
   client?: () => PanelClient;
@@ -138,6 +151,7 @@ function startWatch(overrides: {
   const world = fakeWorld();
   const panel = fakePanel();
   if (overrides.running !== undefined) panel.setRunning(overrides.running);
+  if (overrides.statusExtra !== undefined) panel.setStatusExtra(overrides.statusExtra);
   if (overrides.getEvents !== undefined) panel.getEvents.mockResolvedValue(overrides.getEvents);
   if (overrides.getEventsRejects === true) panel.getEvents.mockRejectedValue(unreachable());
   const eventRing: EventRing = createEventRing();
@@ -202,14 +216,15 @@ describe("createFleetCache", () => {
     const cache = createFleetCache();
     expect(cache.get()).toBeNull();
     const patch = {
-      running: "a",
+      running: ["a"],
+      defaultModel: "a",
       models: [{ name: "a", displayName: "A", quant: null }],
       fetchedAt: 123,
     };
     cache.update(patch);
     expect(cache.get()).toEqual(patch);
-    cache.update({ running: null, models: [], fetchedAt: 456 });
-    expect(cache.get()).toEqual({ running: null, models: [], fetchedAt: 456 });
+    cache.update({ running: [], defaultModel: null, models: [], fetchedAt: 456 });
+    expect(cache.get()).toEqual({ running: [], defaultModel: null, models: [], fetchedAt: 456 });
   });
 });
 
@@ -244,7 +259,8 @@ describe("startStatusWatch：开关与启动", () => {
     expect(h.panel.streamEvents).toHaveBeenCalledTimes(1);
     expect(h.panel.getEvents).toHaveBeenCalledWith({ limit: 1 }); // 启动对表
     expect(h.fleetCache.get()).toEqual({
-      running: "a",
+      running: ["a"],
+      defaultModel: "a",
       // models 投影只取三字段（M5 消费者要的形状），status/namespace 等被裁掉
       models: [
         { name: "a", displayName: "A", quant: null },
@@ -268,7 +284,7 @@ describe("startStatusWatch：SSE 事件驱动", () => {
     expect(h.emit).toHaveBeenCalledTimes(1);
     expect(h.emit).toHaveBeenCalledWith("llm/adapters-updated");
     expect(h.eventRing.snapshot().map((e) => e.id)).toEqual([1]);
-    expect(h.fleetCache.get()?.running).toBe("b");
+    expect(h.fleetCache.get()?.running).toEqual(["b"]);
   });
 
   it("model.* 新事件但运行模型未变 → 探测照做（缓存刷新），不 emit", async () => {
@@ -352,6 +368,61 @@ describe("startStatusWatch：SSE 事件驱动", () => {
   });
 });
 
+describe("startStatusWatch：多模型运行集合与默认模型（修 P1-5）", () => {
+  it("非默认模型停止也要 emit（老实现只比较默认模型这一个值，会悄悄吞掉这次变化）", async () => {
+    const h = startWatch({
+      statusExtra: { models: [{ model: "a" }, { model: "b" }], defaultModel: "a" },
+    });
+    await h.world.flush(); // 基线：{a,b} / 默认 a
+
+    h.panel.setStatusExtra({ models: [{ model: "a" }], defaultModel: "a" }); // b 停了，默认模型仍是 a
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.stop"));
+    await h.world.flush();
+
+    expect(h.emit).toHaveBeenCalledTimes(1);
+    expect(h.fleetCache.get()?.running).toEqual(["a"]);
+  });
+
+  it("运行集合不变但默认模型切换也要 emit", async () => {
+    const h = startWatch({
+      statusExtra: { models: [{ model: "a" }, { model: "b" }], defaultModel: "a" },
+    });
+    await h.world.flush();
+
+    h.panel.setStatusExtra({ models: [{ model: "a" }, { model: "b" }], defaultModel: "b" });
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.start"));
+    await h.world.flush();
+
+    expect(h.emit).toHaveBeenCalledTimes(1);
+    expect(h.fleetCache.get()?.defaultModel).toBe("b");
+  });
+
+  it("运行集合与默认模型都未变、仅上报顺序不同 → 不 emit（签名排序后比较，不看上报顺序）", async () => {
+    const h = startWatch({
+      statusExtra: { models: [{ model: "a" }, { model: "b" }], defaultModel: "a" },
+    });
+    await h.world.flush();
+
+    h.panel.setStatusExtra({ models: [{ model: "b" }, { model: "a" }], defaultModel: "a" });
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.start"));
+    await h.world.flush();
+
+    expect(h.emit).not.toHaveBeenCalled();
+    // 缓存本身保留面板给的顺序，不做二次排序——排序只用于比较，不改写存储值
+    expect(h.fleetCache.get()?.running).toEqual(["b", "a"]);
+  });
+
+  it("一个都没跑 → 两个都没跑（集合与默认模型皆不变）：不 emit", async () => {
+    const h = startWatch({ statusExtra: { models: [], defaultModel: null } });
+    await h.world.flush();
+
+    h.panel.streams[0]!.handler.onEvent(evt(1, "model.stop"));
+    await h.world.flush();
+
+    expect(h.emit).not.toHaveBeenCalled();
+  });
+});
+
 describe("startStatusWatch：降级轮询", () => {
   it("onError 连续 3 次（期间无成功事件）→ 降级轮询：探测变化 emit、缓存更新；前两次按 2s/5s 退避重连", async () => {
     const h = startWatch({ running: "a" });
@@ -372,7 +443,7 @@ describe("startStatusWatch：降级轮询", () => {
     h.panel.setRunning("b");
     await h.world.fireAll(); // 第 1 轮轮询：探测 + SSE 恢复试探（出第 4 条流）
     expect(h.emit).toHaveBeenCalledTimes(1);
-    expect(h.fleetCache.get()?.running).toBe("b");
+    expect(h.fleetCache.get()?.running).toEqual(["b"]);
     expect(h.panel.streamEvents).toHaveBeenCalledTimes(4);
   });
 
@@ -401,7 +472,7 @@ describe("startStatusWatch：降级轮询", () => {
     h.panel.runtimeStatus.mockRejectedValueOnce(unreachable()); // 第 2 次探测失败
     await h.world.fireAll();
     expect(h.emit).not.toHaveBeenCalled();
-    expect(h.fleetCache.get()?.running).toBe("a"); // 缓存保持上一份完整快照
+    expect(h.fleetCache.get()?.running).toEqual(["a"]); // 缓存保持上一份完整快照
 
     h.panel.setRunning("b");
     await h.world.fireAll(); // 失败那轮没动基线，本轮 b ≠ a → emit
@@ -519,7 +590,7 @@ describe("startStatusWatch：看门狗（断流检测）", () => {
     h.panel.setRunning("b");
     await h.world.fireAll(); // 轮询第 1 轮
     expect(h.emit).toHaveBeenCalledTimes(1);
-    expect(h.fleetCache.get()?.running).toBe("b");
+    expect(h.fleetCache.get()?.running).toEqual(["b"]);
   });
 
   it("看门狗链的 ABA 防护：tick 挂起期间降级又切回，旧看门狗链不复活（不会双倍探针）", async () => {
@@ -583,8 +654,8 @@ describe("startStatusWatch：卸载", () => {
   });
 });
 
-describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词快照）", () => {
-  it("running 非空 → 探测追加一次 getEffectiveConfig(running)，ctx_size 落进缓存", async () => {
+describe("startStatusWatch：fleetCache 的 contextWindows（F1 提示词快照）", () => {
+  it("running 非空 → 探测追加一次 getEffectiveConfig(running)，ctx_size 按模型名落进缓存", async () => {
     const h = startWatch({ running: "a" });
     // 初始探测的 effective 调用发生在微任务里（allSettled 落地之后），startWatch
     // 返回后再改 mock 仍然赶得上——但必须赶在 flush 之前
@@ -593,36 +664,36 @@ describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词�
 
     expect(h.panel.getEffectiveConfig).toHaveBeenCalledWith("a");
     expect(h.panel.getEffectiveConfig).toHaveBeenCalledTimes(1);
-    expect(h.fleetCache.get()).toMatchObject({ running: "a", runningContextWindow: 131072 });
+    expect(h.fleetCache.get()).toMatchObject({ running: ["a"], contextWindows: { a: 131072 } });
   });
 
-  it("getEffectiveConfig 失败 → catch 成 undefined（不写 ctx 字段），探测与缓存其余字段不受拖垮", async () => {
+  it("getEffectiveConfig 失败 → 该模型键缺席（不写整个字段的一部分），探测与缓存其余字段不受拖垮", async () => {
     const h = startWatch({ running: "a" });
     h.panel.getEffectiveConfig.mockRejectedValue(unreachable());
     await h.world.flush();
 
     expect(h.fleetCache.get()).toMatchObject({
-      running: "a",
+      running: ["a"],
       models: expect.any(Array),
       fetchedAt: expect.any(Number),
     });
-    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.fleetCache.get()?.contextWindows).toBeUndefined();
     expect(h.emit).not.toHaveBeenCalled(); // 探测本身没被拖垮（首轮只定基线）
   });
 
-  it("getEffectiveConfig 回 404（null）或 merged 缺 ctx_size → 同样落 undefined，不猜数字", async () => {
+  it("getEffectiveConfig 回 404（null）或 merged 缺 ctx_size → 同样落缺席，不猜数字", async () => {
     const h = startWatch({ running: "a" });
     h.panel.getEffectiveConfig.mockResolvedValueOnce(null);
     await h.world.flush();
-    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.fleetCache.get()?.contextWindows).toBeUndefined();
 
     h.panel.streams[0]!.handler.onEvent(evt(1, "model.start"));
     h.panel.getEffectiveConfig.mockResolvedValueOnce({ merged: { docker: {}, server: {} } });
     await h.world.flush();
-    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.fleetCache.get()?.contextWindows).toBeUndefined();
   });
 
-  it("docker.args_override 生效 → readCtxSize 判定 ctx_size 已失效，落 undefined（唯一权威判定，不复制）", async () => {
+  it("docker.args_override 生效 → readCtxSize 判定 ctx_size 已失效，该模型键缺席（唯一权威判定，不复制）", async () => {
     const h = startWatch({ running: "a" });
     h.panel.getEffectiveConfig.mockResolvedValue({
       merged: {
@@ -633,7 +704,7 @@ describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词�
     await h.world.flush();
 
     // args_override 非空时 server.* 整段被取代：131072 已经不是权威值，宁可不报
-    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.fleetCache.get()?.contextWindows).toBeUndefined();
   });
 
   it("running 为空 → 不发起 getEffectiveConfig（没有目标可查，省一次往返）", async () => {
@@ -641,7 +712,7 @@ describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词�
     await h.world.flush();
 
     expect(h.panel.getEffectiveConfig).not.toHaveBeenCalled();
-    expect(h.fleetCache.get()?.runningContextWindow).toBeUndefined();
+    expect(h.fleetCache.get()?.contextWindows).toBeUndefined();
   });
 
   it("effective 在飞时新一轮探测已出发 → 旧探测整体丢弃，不把旧 ctx 配到新 running 上", async () => {
@@ -662,6 +733,48 @@ describe("startStatusWatch：fleetCache 的 runningContextWindow（F1 提示词�
 
     pending[1]!({ merged: { server: { ctx_size: 8192 } } }); // B 落地：seq 一致，正常写
     await h.world.flush();
-    expect(h.fleetCache.get()).toMatchObject({ running: "b", runningContextWindow: 8192 });
+    expect(h.fleetCache.get()).toMatchObject({ running: ["b"], contextWindows: { b: 8192 } });
+  });
+
+  it("并发查询上限为 3：超出上限的在跑模型不查，其 context 键缺席（避免放大请求量）", async () => {
+    const h = startWatch({
+      statusExtra: {
+        models: [{ model: "a" }, { model: "b" }, { model: "c" }, { model: "d" }],
+        defaultModel: "a",
+      },
+    });
+    const ctxByName: Record<string, number> = { a: 1000, b: 2000, c: 3000, d: 4000 };
+    h.panel.getEffectiveConfig.mockImplementation(async (name: string) =>
+      ({ merged: { server: { ctx_size: ctxByName[name] } } }));
+    await h.world.flush();
+
+    expect(h.panel.getEffectiveConfig).toHaveBeenCalledTimes(3);
+    expect(h.panel.getEffectiveConfig).toHaveBeenNthCalledWith(1, "a");
+    expect(h.panel.getEffectiveConfig).toHaveBeenNthCalledWith(2, "b");
+    expect(h.panel.getEffectiveConfig).toHaveBeenNthCalledWith(3, "c");
+    expect(h.fleetCache.get()).toMatchObject({
+      running: ["a", "b", "c", "d"],
+      defaultModel: "a",
+      contextWindows: { a: 1000, b: 2000, c: 3000 },
+    });
+    expect(h.fleetCache.get()?.contextWindows).not.toHaveProperty("d");
+  });
+
+  it("单个在跑模型的 ctx 查询失败只影响它自己的键，不牵连其余模型、也不整份丢弃这次探测", async () => {
+    const h = startWatch({
+      statusExtra: { models: [{ model: "a" }, { model: "b" }], defaultModel: "a" },
+    });
+    h.panel.getEffectiveConfig.mockImplementation(async (name: string) => {
+      if (name === "a") throw unreachable();
+      return { merged: { server: { ctx_size: 2000 } } };
+    });
+    await h.world.flush();
+
+    expect(h.fleetCache.get()).toMatchObject({
+      running: ["a", "b"],
+      defaultModel: "a",
+      contextWindows: { b: 2000 },
+    });
+    expect(h.fleetCache.get()?.contextWindows).not.toHaveProperty("a");
   });
 });

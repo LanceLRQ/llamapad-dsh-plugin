@@ -57,12 +57,12 @@ describe("status-watch E2E（假面板 + 真 SSE）", () => {
     try {
       await w.waitForSubscription();
       // 冷启动基线探测落地：基线 = qwen-small，只定基线不 emit
-      await vi.waitFor(() => expect(w.fleetCache.get()?.running).toBe("qwen-small"));
+      await vi.waitFor(() => expect(w.fleetCache.get()?.running).toEqual(["qwen-small"]));
       expect(w.emit).not.toHaveBeenCalled();
 
       await client.stopModel("qwen-small"); // 面板侧停止 → model.stop 事件 → SSE 推送
       await vi.waitFor(() => expect(w.emit).toHaveBeenCalledWith("llm/adapters-updated"));
-      expect(w.fleetCache.get()?.running).toBeNull();
+      expect(w.fleetCache.get()?.running).toEqual([]);
       expect(w.eventRing.snapshot().map((e) => e.kind)).toContain("model.stop");
     } finally {
       w.dispose();
@@ -74,12 +74,12 @@ describe("status-watch E2E（假面板 + 真 SSE）", () => {
     const w = watch(150);
     try {
       await w.waitForSubscription();
-      await vi.waitFor(() => expect(w.fleetCache.get()?.running).toBeNull());
+      await vi.waitFor(() => expect(w.fleetCache.get()?.running).toEqual([]));
       expect(w.emit).not.toHaveBeenCalled();
 
       await client.startModel("qwen-small");
       await vi.waitFor(() => expect(w.emit).toHaveBeenCalledWith("llm/adapters-updated"));
-      expect(w.fleetCache.get()?.running).toBe("qwen-small");
+      expect(w.fleetCache.get()?.running).toEqual(["qwen-small"]);
       expect(w.eventRing.snapshot().map((e) => e.kind)).toContain("model.start");
     } finally {
       w.dispose();

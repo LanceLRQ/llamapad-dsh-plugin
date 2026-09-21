@@ -27,21 +27,26 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { readCtxSize } from "./adapter";
-import type { PanelClient, PanelEvent } from "./panel-client";
+import { defaultModelOf, runningModels, type PanelClient, type PanelEvent } from "./panel-client";
 
 /**
- * 面板舰队状态的同步可读缓存（M5「提示词快照」的数据源，本任务暂无消费者）。
- * 每次状态探测（SSE 事件触发或降级轮询）后写入，两模式语义完全一致。
+ * 面板舰队状态的同步可读缓存（M5「提示词快照」的数据源）。每次状态探测（SSE 事件
+ * 触发或降级轮询）后写入，两模式语义完全一致。
  */
 export interface FleetCache {
-  running: string | null;
+  /** 全部在跑的模型名，按面板给的启动时间升序（与 runningModels() 的顺序一致，
+   *  本层不做二次排序）；空数组 = 一个都没跑。 */
+  running: string[];
+  /** 不带 model 字段的请求会打给谁；一个都没跑、或面板没有默认模型时为 null */
+  defaultModel: string | null;
   /**
-   * 运行中模型的 contextWindow（token 数，来自 /effective merged 的 ctx_size）。
-   * undefined = 未知：端点读取失败 / 面板没配 ctx_size / args_override 使其失效——
-   * F1 快照对这三种情况一视同仁地省略 context 段，绝不能用 defaultContextWindow
-   * 之类凑数（那是聊天适配器的兜底，不是面板权威值）。
+   * 在跑模型的 contextWindow（token 数，来自 /effective merged 的 ctx_size），按
+   * 模型名索引。键缺席 = 未知：端点读取失败 / 面板没配 ctx_size / args_override
+   * 使其失效 / 超出并发查询上限没有被查询——F1 快照对这些情况一视同仁地省略该
+   * 模型的 context 段，绝不能用 defaultContextWindow 之类凑数（那是聊天适配器的
+   * 兜底，不是面板权威值）。
    */
-  runningContextWindow?: number;
+  contextWindows?: Record<string, number>;
   models: { name: string; displayName: string; quant: string | null }[];
   /** 写入时刻（毫秒时间戳），消费者用它判断缓存新鲜度 */
   fetchedAt: number;
@@ -103,6 +108,21 @@ const RECONNECT_BACKOFF_MS: readonly number[] = [2_000, 5_000, 15_000];
  */
 const RECOVERY_GRACE_MS = 30_000;
 
+/**
+ * 运行集合 + 默认模型的比较用签名：先排序再拼接，让「同一批模型换了个上报顺序」
+ * 不会被误判成变化——只有集合成员或默认模型真的变了，签名才会跟着变。
+ */
+function fleetSignature(names: readonly string[], defaultModel: string | null): string {
+  return JSON.stringify([[...names].sort(), defaultModel]);
+}
+
+/**
+ * 并发查询 ctx_size 的在跑模型数量上限。本地机器同时跑不少模型不稀奇，逐个查询
+ * 会把一次探测放大成等量的面板请求；超出上限的模型 context 段直接省略，与
+ * 「查询失败」同等对待（都是「这次没查到」，snapshot 不区分原因）。
+ */
+const MAX_CONTEXT_PROBES = 3;
+
 export interface StatusWatchOptions {
   ctx: Context;
   /**
@@ -140,9 +160,10 @@ export function startStatusWatch(options: StatusWatchOptions): void {
 
   ctx.effect(() => {
     let stopped = false;
-    // undefined = 尚未探测过；首轮只定基线不 emit——插件刚起目录本来就会加载一次，
-    // 这里再 emit 纯属多余空转（沿用 directory-refresh 语义）。
-    let baseline: string | null | undefined;
+    // 运行集合 + 默认模型的签名（fleetSignature 的返回值）。undefined = 尚未探测
+    // 过；首轮只定基线不 emit——插件刚起目录本来就会加载一次，这里再 emit 纯属
+    // 多余空转（沿用 directory-refresh 语义）。
+    let baseline: string | undefined;
     // 探测序号：事件与轮询可能并发触发多次探测，旧结果落地时若已有新一轮在飞，
     // 直接丢弃——否则慢的旧结果会把新基线倒写回去
     let probeSeq = 0;
@@ -174,9 +195,11 @@ export function startStatusWatch(options: StatusWatchOptions): void {
     let recoveryDeadline = 0;
 
     /**
-     * 一次状态探测：runtimeStatus 与 listModels 并发取，更新 fleetCache，运行中模型
-     * 变化才 emit。SSE 事件触发与降级轮询共用这一份逻辑，两模式的 fleetCache 与
-     * 「变化才 emit」语义因此完全一致。
+     * 一次状态探测：runtimeStatus 与 listModels 并发取，更新 fleetCache，运行集合
+     * 或默认模型任一变化都触发 emit。判定改走运行集合而非单个 running.model
+     * （修 P1-5：老实现只比较「默认模型是谁」这一个值，多模型面板下非默认模型的
+     * 启停会被悄悄吞掉，浏览器侧目录不刷新）。SSE 事件触发与降级轮询共用这一份
+     * 逻辑，两模式的 fleetCache 与「变化才 emit」语义因此完全一致。
      */
     async function probe(): Promise<void> {
       const seq = ++probeSeq;
@@ -188,41 +211,66 @@ export function startStatusWatch(options: StatusWatchOptions): void {
       // 「卸载与到期擦肩而过」的竞态——ctx 已释放，不该再往上面 emit
       if (stopped || seq !== probeSeq) return;
       if (statusResult.status === "fulfilled") {
-        const current = statusResult.value.running?.model ?? null;
+        const names = runningModels(statusResult.value).map((m) => m.model);
+        const defaultModel = defaultModelOf(statusResult.value);
+        const signature = fleetSignature(names, defaultModel);
         if (baseline === undefined) {
-          baseline = current;
-        } else if (current !== baseline) {
-          baseline = current;
+          baseline = signature;
+        } else if (signature !== baseline) {
+          baseline = signature;
           ctx.emit("llm/adapters-updated");
         }
       }
       // fleetCache 只在两半都成功时写入：models 失败时硬写会向消费者谎报「没有模型」，
       // 不如保持上一份完整快照（get 返回 null 的初始态由消费者按「不可知」处理）
       if (statusResult.status === "fulfilled" && modelsResult.status === "fulfilled") {
-        const running = statusResult.value.running?.model ?? null;
-        // F1 提示词快照要 contextWindow：对运行中模型追加一次 /effective 读取。
-        // 放在缓存写入之前而不是并行发——目标模型名只有 status 落地后才知道；
-        // running 为空时干脆不发（没有目标可查，省一次往返）。读取失败 catch 成
-        // undefined（context 段整个省略），绝不因这个锦上添花的字段拖垮探测本身。
-        let runningContextWindow: number | undefined;
-        if (running !== null) {
-          try {
+        const running = runningModels(statusResult.value).map((m) => m.model);
+        const defaultModel = defaultModelOf(statusResult.value);
+        // F1 提示词快照要 contextWindow：对在跑模型并发追加 /effective 读取，但设
+        // 上限 MAX_CONTEXT_PROBES——超出上限的模型直接不查，其 context 段与
+        // 「查询失败」同等省略。放在缓存写入之前而不是与 status/models 并行发——
+        // 目标模型名只有 status 落地后才知道；一个都没跑时干脆不发（没有目标可查，
+        // 省一次往返）。
+        // 默认模型排查询队首：它是「不指定模型时的落点」，快照里最该带上 context
+        // 的一行。按启动时间原序截断的话，用户手动把默认改成启动较晚的那个之后，
+        // 默认模型反而会被 MAX_CONTEXT_PROBES 挡在外面
+        const probeOrder = defaultModel !== null && running.includes(defaultModel)
+          ? [defaultModel, ...running.filter((name) => name !== defaultModel)]
+          : running;
+        const probedNames = probeOrder.slice(0, MAX_CONTEXT_PROBES);
+        let contextWindows: Record<string, number> | undefined;
+        if (probedNames.length > 0) {
+          const results = await Promise.allSettled(
+            // 回调标 async：client().getEffectiveConfig(name) 同步抛出（比如老面板/
+            // 测试假件压根没实现这个方法）也会被 JS 自动折成 rejected promise，而不是
+            // 在 .map() 期间直接同步抛出砸穿 probe()——allSettled 才接得住、按下标
+            // 隔离到对应模型的失败，不牵连其余在跑模型
+            probedNames.map(async (name) => client().getEffectiveConfig(name)),
+          );
+          // 过期守卫：这次 await 期间同样可能有新一轮探测出发（或已卸载）。整份
+          // 丢弃而不是只挑几个 ctx 落地——旧探测的 running/models 也一并过期了，
+          // 硬写会把旧基线倒写回缓存。这与下面「单个模型查询失败」是两回事：
+          // 过期丢的是整轮探测，单个失败只丢那一个模型的键
+          if (stopped || seq !== probeSeq) return;
+          const record: Record<string, number> = {};
+          results.forEach((result, index) => {
+            // 单个模型查询失败：只是这一个键缺席（未知），不牵连其余模型，也不
+            // 影响本轮探测整体落地。按下标而不是共享变量取名字，保证失败模型的
+            // 位置空出来后不会被后面的结果错配到别的模型名下
+            if (result.status !== "fulfilled") return;
             // readCtxSize 是 ctx_size 的唯一权威读取（含 args_override 失效判定），
             // 见 adapter.ts 的导出注释——这里绝不另写一份判定
-            runningContextWindow = readCtxSize((await client().getEffectiveConfig(running))?.merged);
-          } catch {
-            runningContextWindow = undefined;
-          }
-          // 第二道过期守卫：这次 await 期间同样可能有新一轮探测出发（或已卸载）。
-          // 整份丢弃而不是只丢 ctx——旧探测的 running/models 也一并过期了，硬写
-          // 会把旧 ctx 配到新 running 上（串台），或把旧基线倒写进缓存
-          if (stopped || seq !== probeSeq) return;
+            const ctxSize = readCtxSize(result.value?.merged);
+            if (ctxSize !== undefined) record[probedNames[index]!] = ctxSize;
+          });
+          if (Object.keys(record).length > 0) contextWindows = record;
         }
         fleetCache?.update({
           running,
-          // undefined（未知）时省略字段而不是写 undefined——让缓存形状与
+          defaultModel,
+          // 一个能查到的都没有时省略整个字段而不是写 {}——让缓存形状与
           // renderFleetSnapshot 的「缺席即不渲染 context」语义天然对齐
-          ...(runningContextWindow !== undefined ? { runningContextWindow } : {}),
+          ...(contextWindows !== undefined ? { contextWindows } : {}),
           models: modelsResult.value.map((m) => ({
             name: m.name, displayName: m.displayName, quant: m.quant,
           })),

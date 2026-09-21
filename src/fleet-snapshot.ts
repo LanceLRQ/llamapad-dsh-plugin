@@ -40,34 +40,45 @@ function formatContext(tokens: number): string {
 export function renderFleetSnapshot(cache: FleetCache | null): string {
   // null = 尚未成功探测过（面板不可达/未配置）：宁可沉默也不谎报「没有本地模型」
   if (cache === null) return "";
-  if (cache.running === null && cache.models.length === 0) return "";
+  if (cache.running.length === 0 && cache.models.length === 0) return "";
 
   const lines: string[] = ["## Local model fleet (llamapad)", ""];
 
-  // running 只是个名字，quant 要回 models 清单里查；查不到（面板清单与运行态
+  // running 只是个名字集合，quant 要回 models 清单里查；查不到（面板清单与运行态
   // 脱节的罕见窗口）就只报名字，不编造量化信息。contextWindow 来自 status-watch
-  // 探测时的 /effective 读取（undefined = 未知/读取失败/args_override 失效），
-  // 同样缺席即省略——编一个 context 数字比不报更糟
-  if (cache.running !== null) {
-    const runningModel = cache.models.find((m) => m.name === cache.running);
-    // 括号注解按「quant, context」拼：quant 缺省跳过它，context 缺省跳过它，
-    // 两者皆缺则整个括号不要——绝不输出 "(null)" 或空括号
-    const annotations = [
-      ...(runningModel?.quant != null ? [runningModel.quant] : []),
-      ...(cache.runningContextWindow !== undefined
-        ? [`${formatContext(cache.runningContextWindow)} context`]
-        : []),
-    ];
-    lines.push(annotations.length > 0
-      ? `Running: ${cache.running} (${annotations.join(", ")})`
-      : `Running: ${cache.running}`);
+  // 探测时的 /effective 读取（键缺席 = 未知/读取失败/args_override 失效/超出并发
+  // 查询上限），同样缺席即省略——编一个 context 数字比不报更糟。
+  //
+  // 只有多于一个模型在跑时才标注 (default)：只跑一个模型时它显然就是请求的落点，
+  // 标注纯属提示词预算的噪音（系统提示随每个请求整段重发）；同理，「不带模型名的
+  // 请求会落到谁」这句解释性的话，也只在真的存在歧义（>1 个在跑）时才值得占位。
+  if (cache.running.length > 0) {
+    const multi = cache.running.length > 1;
+    const runningEntries = cache.running.map((name) => {
+      const runningModel = cache.models.find((m) => m.name === name);
+      // 括号注解按「quant, context, default」拼：任一缺省就跳过它，全缺则整个
+      // 括号不要——绝不输出 "(null)" 或空括号
+      const annotations = [
+        ...(runningModel?.quant != null ? [runningModel.quant] : []),
+        ...(cache.contextWindows?.[name] !== undefined
+          ? [`${formatContext(cache.contextWindows[name]!)} context`]
+          : []),
+        ...(multi && name === cache.defaultModel ? ["default"] : []),
+      ];
+      return annotations.length > 0 ? `${name} (${annotations.join(", ")})` : name;
+    });
+    lines.push(`Running: ${runningEntries.join(", ")}`);
+    if (multi && cache.defaultModel !== null) {
+      lines.push("", `Requests without an explicit model go to: ${cache.defaultModel}`);
+    }
   } else {
     lines.push("No model is currently running.");
   }
 
-  // 正在跑的模型从「可启动」剔除：它在跑，不是可启动；说成可启动会诱导模型
-  // 对它调用 start（面板语义：对运行中模型 start 会重建容器，代价不小）
-  const startable = cache.models.filter((m) => m.name !== cache.running);
+  // 全部在跑的模型都从「可启动」剔除，而不只是默认那一个（修 P1-4：老实现只挡
+  // 掉 cache.running 这一个名字，多模型面板下非默认的在跑模型会被诱导 start——
+  // 面板语义里对运行中模型 start 会重建容器，代价不小）
+  const startable = cache.models.filter((m) => !cache.running.includes(m.name));
   if (startable.length > 0) {
     const shown = startable.slice(0, MAX_STARTABLE).map(entry);
     const rest = startable.length - shown.length;
