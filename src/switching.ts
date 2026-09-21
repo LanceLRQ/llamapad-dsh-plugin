@@ -1,8 +1,10 @@
-import type { PanelClient } from "./panel-client";
+import { findRunning, isRunning, runningModels, type PanelClient } from "./panel-client";
 
 /**
  * 切换门：把「确保某模型在跑」收敛为进程内串行队列。
- * - llamapad 是单模型运行时：start 自带停旧起新，这里不感知旧模型
+ * - 面板多模型分支下 start 只保证目标模型在跑，不会替这里停掉别的模型——这与插件
+ *   既有用户边界一致（只做连接与调度，不接管服务端），显存不够时的收拾交给用户自己
+ *   去面板操作（见 START_TIMEOUT 文案）
  * - 同目标并发 ensure 合流到进行中的那一次（两把请求只触发一次 start）
  * - 前序失败不阻断后续排队者（tail 永远吞错续链）
  * - abort 取消「等待就绪」与在途的 start POST（客户端 fetch 层面掐断等待）；
@@ -45,14 +47,41 @@ export interface ModelGate {
  * 一轮就绪判定：优先读 runtime/status 的 ready（面板 12cfd84 起返回，面板侧带 2s 缓存
  * 与防惊群，比插件自己打一次 /health 更省），字段缺席（老面板）才回退 llamaHealth()。
  *
- * 判定的是「目标模型是否已就绪」而不只是「有没有东西就绪」：运行的不是目标模型时一律
- * 未就绪——这时候就绪的是别人，继续等自己的。
+ * 踩坑记录（P0-1）：面板多模型分支下 `running` 字段是**默认模型**，不是「唯一在跑的
+ * 模型」——请求的是非默认模型时，`running` 全程指向别人，永远对不上目标。必须在
+ * 运行集合（findRunning，兼容新旧两种面板形状）里按名字找目标项，否则会把明明已经
+ * 起来的目标误判成「未就绪」，一路轮询到 startTimeoutMs 才假超时，而目标其实早就在
+ * 跑、还占着显存。
  */
 async function probeReady(client: PanelClient, model: string): Promise<boolean> {
-  const running = (await client.runtimeStatus()).running;
-  if (running?.model !== model) return false;
-  if (running.ready === undefined) return client.llamaHealth();
-  return running.ready;
+  const target = findRunning(await client.runtimeStatus(), model);
+  if (target === undefined) return false;
+  if (target.ready === undefined) return client.llamaHealth();
+  return target.ready;
+}
+
+/**
+ * START_TIMEOUT 文案的唯一出处，抽成纯函数便于单测两种形态。多模型面板下超时大多
+ * 不是「模型坏了」而是「显存不够、目标一直没被调度起来」，把当前还占着资源的模型
+ * 点出来，比一句干巴巴的超时更能指路——但这只是提示，绝不代为停掉它们（见文件头）。
+ */
+export function formatStartTimeoutMessage(model: string, timeoutMs: number, otherRunning: string[]): string {
+  const base = `等待 ${model} 就绪超时（${timeoutMs}ms）`;
+  if (otherRunning.length === 0) return base;
+  return `${base}。当前面板还在运行：${otherRunning.join("、")}；显存不足时可在面板停掉不用的模型再试`;
+}
+
+/** 超时文案要点名「别人」，得再查一次状态；这次查询只是为了把话说清楚，不是主流程
+ *  的一部分——查询本身失败时吞掉，退回不带后半句的基础文案，不能让「查文案用的请求
+ *  失败」盖过真正的错误（START_TIMEOUT）。 */
+async function otherRunningModels(client: PanelClient, model: string): Promise<string[]> {
+  try {
+    return runningModels(await client.runtimeStatus())
+      .map((m) => m.model)
+      .filter((name) => name !== model);
+  } catch {
+    return [];
+  }
 }
 
 export function createModelGate(client: PanelClient): ModelGate {
@@ -62,7 +91,7 @@ export function createModelGate(client: PanelClient): ModelGate {
 
   async function ensureOnce(model: string, options: EnsureOptions): Promise<void> {
     const status = await client.runtimeStatus();
-    if (status.running?.model === model) return;
+    if (isRunning(status, model)) return;
     // signal 并进 startModel 的 options：取消手势要能掐断在途 POST 本身（排空等待
     // 最长 60s+），而不只是后面的就绪轮询——否则「取消」之后还得干等请求自己回来。
     // 与 drain 字段同住一个对象：两者都缺席时保持第二参数 undefined（向后兼容）。
@@ -102,7 +131,10 @@ export function createModelGate(client: PanelClient): ModelGate {
     for (;;) {
       if (options.signal?.aborted) throw new EnsureError(`等待 ${model} 就绪时被取消`, "ABORTED");
       if (await probeReady(client, model)) return;
-      if (Date.now() + pollMs > deadline) throw new EnsureError(`等待 ${model} 就绪超时（${timeoutMs}ms）`, "START_TIMEOUT");
+      if (Date.now() + pollMs > deadline) {
+        const others = await otherRunningModels(client, model);
+        throw new EnsureError(formatStartTimeoutMessage(model, timeoutMs, others), "START_TIMEOUT");
+      }
       await sleep(pollMs, options.signal);
     }
   }

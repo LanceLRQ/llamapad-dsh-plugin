@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createModelGate, EnsureError, sharedModelGate } from "../../src/switching";
+import { createModelGate, EnsureError, formatStartTimeoutMessage, sharedModelGate } from "../../src/switching";
 import type { PanelClient } from "../../src/panel-client";
 
 function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient & {
@@ -213,6 +213,90 @@ describe("createModelGate", () => {
     const gate = createModelGate(client);
     await gate.ensure("a", { pollIntervalMs: 1 });
     expect(llamaHealth).toHaveBeenCalled();
+  });
+
+  it("目标是非默认模型时仍能判定就绪（P0-1 回归：running 是默认模型，不是唯一在跑的模型）", async () => {
+    let statusCalls = 0;
+    const llamaHealth = vi.fn(async () => true);
+    const client = {
+      baseUrl: "http://panel:8080",
+      runtimeStatus: async () => {
+        statusCalls += 1;
+        // 默认模型 a 全程在跑、running/defaultModel 恒为 a；目标 b 在第 1 次前置检查时
+        // 还没起（models 里没有它），此后才出现在运行集合里且逐步变 ready——
+        // 旧实现按 running.model !== "b" 判定会永远为 true，一直轮询到超时
+        if (statusCalls === 1) {
+          return { running: { model: "a" }, defaultModel: "a", models: [{ model: "a", ready: true }] };
+        }
+        return {
+          running: { model: "a" },
+          defaultModel: "a",
+          models: [{ model: "a", ready: true }, { model: "b", ready: statusCalls >= 3 }],
+        };
+      },
+      startModel: async () => {},
+      llamaHealth,
+    } as any;
+    const gate = createModelGate(client);
+    await gate.ensure("b", { pollIntervalMs: 1 });
+    expect(llamaHealth).not.toHaveBeenCalled();
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("超时错误文案列出当前其他在跑模型", async () => {
+    const client = {
+      baseUrl: "http://panel:8080",
+      // 目标 b 从未出现在运行集合里：前置检查、就绪轮询、超时后的补查全部走这一份数据
+      runtimeStatus: async () => ({
+        running: { model: "a" },
+        defaultModel: "a",
+        models: [{ model: "a", ready: true }, { model: "c", ready: true }],
+      }),
+      startModel: async () => {},
+      llamaHealth: async () => false,
+    } as any;
+    const gate = createModelGate(client);
+    await expect(
+      gate.ensure("b", { timeoutMs: 0, pollIntervalMs: 10 }),
+    ).rejects.toMatchObject({
+      code: "START_TIMEOUT",
+      message: "等待 b 就绪超时（0ms）。当前面板还在运行：a、c；显存不足时可在面板停掉不用的模型再试",
+    });
+  });
+
+  it("超时后补查其他在跑模型失败时，退回不带后半句的基础文案", async () => {
+    let statusCalls = 0;
+    const client = {
+      baseUrl: "http://panel:8080",
+      runtimeStatus: async () => {
+        statusCalls += 1;
+        // 第 1 次前置检查、第 2 次就绪轮询都正常返回；第 3 次是超时后为了成文而补查
+        // 「当前其他在跑模型」的那一次，模拟这次补查本身失败
+        if (statusCalls <= 2) return { running: { model: "a" }, defaultModel: "a", models: [{ model: "a", ready: true }] };
+        throw new Error("面板连不上");
+      },
+      startModel: async () => {},
+      llamaHealth: async () => false,
+    } as any;
+    const gate = createModelGate(client);
+    await expect(
+      gate.ensure("b", { timeoutMs: 0, pollIntervalMs: 10 }),
+    ).rejects.toMatchObject({
+      code: "START_TIMEOUT",
+      message: "等待 b 就绪超时（0ms）",
+    });
+  });
+});
+
+describe("formatStartTimeoutMessage", () => {
+  it("有其他在跑模型时，基础文案后附上列表与显存提示", () => {
+    expect(formatStartTimeoutMessage("b", 300_000, ["a", "c"])).toBe(
+      "等待 b 就绪超时（300000ms）。当前面板还在运行：a、c；显存不足时可在面板停掉不用的模型再试",
+    );
+  });
+
+  it("没有其他在跑模型时，只返回基础文案", () => {
+    expect(formatStartTimeoutMessage("b", 300_000, [])).toBe("等待 b 就绪超时（300000ms）");
   });
 });
 
