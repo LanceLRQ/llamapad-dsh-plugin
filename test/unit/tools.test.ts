@@ -3,6 +3,7 @@ import {
   apply,
   buildEventsTool,
   buildListModelsTool,
+  buildSetDefaultModelTool,
   buildStartModelTool,
   buildStatusTool,
   buildStopModelTool,
@@ -44,6 +45,7 @@ function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient {
     runtimeStatus: async () => ({ running: running === null ? null : { model: running, ready: true } }),
     startModel: async (name: string) => { running = name; },
     stopModel: async () => { running = null; return { ok: true }; },
+    setDefaultModel: async () => {},
     llamaHealth: async () => true,
     getEvents: async () => [],
     ...overrides,
@@ -70,7 +72,7 @@ describe("llamapad_status", () => {
     expect(value).toEqual({ panelReachable: true, running: false });
   });
 
-  it("运行中 + busy 已知 → 带 inferring/slotsRunning", async () => {
+  it("单模型在跑（老面板形状）+ busy 已知 → models 单项且为默认，带 inferring/slotsRunning", async () => {
     const client = fakeClient({
       runtimeStatus: async () => ({
         running: { model: "a", displayName: "A", hostPort: 18080 },
@@ -81,6 +83,7 @@ describe("llamapad_status", () => {
     expect(value).toEqual({
       panelReachable: true,
       running: true,
+      models: [{ model: "a", displayName: "A", isDefault: true }],
       model: "a",
       displayName: "A",
       hostPort: 18080,
@@ -89,12 +92,37 @@ describe("llamapad_status", () => {
     });
   });
 
+  it("两个模型在跑、其一默认 → models 按面板顺序列出，各自 ready/isDefault", async () => {
+    const client = fakeClient({
+      runtimeStatus: async () => ({
+        running: { model: "b", ready: true },
+        models: [
+          { model: "a", ready: false },
+          { model: "b", ready: true },
+        ],
+        defaultModel: "b",
+      }),
+    });
+    const value: any = await buildStatusTool(client).execute({}, fakeExec());
+    expect(value.models).toEqual([
+      { model: "a", ready: false, isDefault: false },
+      { model: "b", ready: true, isDefault: true },
+    ]);
+    // 扁平字段（model/displayName/hostPort）仍指向默认模型那一项，兼容老调用点
+    expect(value.model).toBe("b");
+  });
+
   it("busy 为 null（不可知）→ 不渲染 inferring/slotsRunning，不伪造成 false", async () => {
     const client = fakeClient({
       runtimeStatus: async () => ({ running: { model: "a" }, busy: null }),
     });
     const value: any = await buildStatusTool(client).execute({}, fakeExec());
-    expect(value).toEqual({ panelReachable: true, running: true, model: "a" });
+    expect(value).toEqual({
+      panelReachable: true,
+      running: true,
+      models: [{ model: "a", isDefault: true }],
+      model: "a",
+    });
     expect("inferring" in value).toBe(false);
     expect("slotsRunning" in value).toBe(false);
   });
@@ -105,11 +133,47 @@ describe("llamapad_status", () => {
     expect(blocks).toEqual([{ type: "text", text: "llamapad 面板不可达" }]);
   });
 
+  it("render：无模型在跑", () => {
+    const tool = buildStatusTool(fakeClient());
+    const blocks = tool.output.render({}, { panelReachable: true, running: false });
+    expect(blocks).toEqual([{ type: "text", text: "当前没有模型在运行" }]);
+  });
+
+  it("render：两个模型在跑、其一默认 → 每行 ● 名字 · ready/loading · (默认)，并注明 busy 探测范围", () => {
+    const tool = buildStatusTool(fakeClient());
+    const blocks = tool.output.render({}, {
+      panelReachable: true,
+      running: true,
+      models: [
+        { model: "a", isDefault: false, ready: false },
+        { model: "b", isDefault: true, ready: true },
+      ],
+      model: "b",
+      inferring: true,
+    });
+    expect(blocks).toEqual([{
+      type: "text",
+      text: "● a · loading\n● b · ready · (默认)\nbusy 探测仅针对默认模型：正在推理",
+    }]);
+  });
+
+  it("render：ready 不可知（老面板缺该字段）时按 loading 处理，不冒充已就绪", () => {
+    const tool = buildStatusTool(fakeClient());
+    const blocks = tool.output.render({}, {
+      panelReachable: true,
+      running: true,
+      models: [{ model: "a", isDefault: true }],
+      model: "a",
+    });
+    expect(blocks).toEqual([{ type: "text", text: "● a · loading · (默认)" }]);
+  });
+
   it("presentationMeta：原样投影 status 值，供 presentResult 在回放路径读回", () => {
     const tool = buildStatusTool(fakeClient());
     const value = {
       panelReachable: true,
       running: true,
+      models: [{ model: "a", displayName: "A", isDefault: true, ready: true }],
       model: "a",
       displayName: "A",
       hostPort: 18080,
@@ -128,7 +192,7 @@ describe("llamapad_status", () => {
     });
   });
 
-  it("presentResult：面板可达且运行中 → 多行明细输出，exitCode 0", () => {
+  it("presentResult：两个模型在跑、其一默认 → 每行明细 + 默认模型端口/slot 明细，exitCode 0", () => {
     const tool = buildStatusTool(fakeClient());
     const view = tool.presentResult?.({}, {
       content: [],
@@ -136,8 +200,12 @@ describe("llamapad_status", () => {
       meta: {
         panelReachable: true,
         running: true,
-        model: "a",
-        displayName: "A",
+        models: [
+          { model: "a", isDefault: false, ready: false },
+          { model: "b", displayName: "B", isDefault: true, ready: true },
+        ],
+        model: "b",
+        displayName: "B",
         hostPort: 18080,
         inferring: true,
         slotsRunning: 2,
@@ -146,7 +214,8 @@ describe("llamapad_status", () => {
     expect(view).toEqual({
       card: "terminal",
       title: "llamapad status",
-      output: "运行中：a（A），正在推理\n宿主机端口：18080\n处理中 slot：2",
+      output: "● a · loading\n● b（B） · ready · (默认)\nbusy 探测仅针对默认模型：正在推理\n"
+        + "默认模型宿主机端口：18080\n默认模型处理中 slot：2",
       exitCode: 0,
     });
   });
@@ -448,6 +517,53 @@ describe("llamapad_start_model", () => {
 });
 
 describe("llamapad_stop_model", () => {
+  it("带 model 参数 → 停指定的那个，而不是默认模型", async () => {
+    const client = fakeClient({
+      runtimeStatus: async () => ({
+        running: { model: "a" },
+        models: [{ model: "a" }, { model: "b" }],
+        defaultModel: "a",
+      }),
+      stopModel: async (name: string) => {
+        expect(name).toBe("b");
+        return { ok: true };
+      },
+    });
+    const value = await buildStopModelTool(client).execute({ model: "b" }, fakeExec());
+    expect(value).toEqual({ stopped: true, model: "b" });
+  });
+
+  it("带 model 参数但该模型没在跑 → stopped:false（终态语义，不误停默认模型）", async () => {
+    const client = fakeClient({
+      runtimeStatus: async () => ({
+        running: { model: "a" },
+        models: [{ model: "a" }],
+        defaultModel: "a",
+      }),
+      stopModel: async () => {
+        throw new Error("不该停任何模型");
+      },
+    });
+    const value = await buildStopModelTool(client).execute({ model: "b" }, fakeExec());
+    expect(value).toEqual({ stopped: false });
+  });
+
+  it("不带 model 参数 → 停默认模型（老行为不变）", async () => {
+    const client = fakeClient({
+      runtimeStatus: async () => ({
+        running: { model: "a" },
+        models: [{ model: "a" }, { model: "b" }],
+        defaultModel: "a",
+      }),
+      stopModel: async (name: string) => {
+        expect(name).toBe("a");
+        return { ok: true };
+      },
+    });
+    const value = await buildStopModelTool(client).execute({}, fakeExec());
+    expect(value).toEqual({ stopped: true, model: "a" });
+  });
+
   it("没有模型在跑 → stopped:false，不抛错", async () => {
     const client = fakeClient({ runtimeStatus: async () => ({ running: null }) });
     const value = await buildStopModelTool(client).execute({}, fakeExec());
@@ -490,9 +606,65 @@ describe("llamapad_stop_model", () => {
     await buildStopModelTool(client).execute({ drainTimeoutMs: 5000 }, fakeExec());
   });
 
-  it("presentCall：generic 卡，标题固定为「停止当前模型」，kind 为 execute", () => {
+  it("presentCall：不带 model 时标题说「默认模型」，kind 为 execute", () => {
     const tool = buildStopModelTool(fakeClient());
-    expect(tool.presentCall?.({})).toEqual({ card: "generic", title: "停止当前模型", kind: "execute" });
+    expect(tool.presentCall?.({})).toEqual({ card: "generic", title: "停止默认模型", kind: "execute" });
+  });
+
+  it("presentCall：带 model 时点名目标——确认框里要看得见停的是谁", () => {
+    const tool = buildStopModelTool(fakeClient());
+    expect(tool.presentCall?.({ model: "b" })).toEqual({ card: "generic", title: "停止 b", kind: "execute" });
+  });
+});
+
+describe("llamapad_set_default_model", () => {
+  it("成功切换 → switched:true，透传目标模型名给面板", async () => {
+    const setDefaultModel = vi.fn(async () => {});
+    const client = fakeClient({ setDefaultModel });
+    const value = await buildSetDefaultModelTool(client).execute({ model: "b" }, fakeExec());
+    expect(setDefaultModel).toHaveBeenCalledWith("b");
+    expect(value).toEqual({ switched: true, model: "b" });
+  });
+
+  it("目标模型没在跑（面板 409）→ 照抛，原样透传面板说明", async () => {
+    const client = fakeClient({
+      setDefaultModel: async () => { throw new PanelError("目标模型 b 未在运行", "RUNTIME_BUSY", 409); },
+    });
+    await expect(buildSetDefaultModelTool(client).execute({ model: "b" }, fakeExec()))
+      .rejects.toMatchObject({ code: "RUNTIME_BUSY", message: "目标模型 b 未在运行" });
+  });
+
+  it("老面板不支持（404/UNSUPPORTED）→ 换成面向切换场景的明确说明", async () => {
+    const client = fakeClient({
+      setDefaultModel: async () => {
+        throw new PanelError("面板不支持默认模型接口（需要面板多模型版本）", "UNSUPPORTED", 404);
+      },
+    });
+    await expect(buildSetDefaultModelTool(client).execute({ model: "b" }, fakeExec()))
+      .rejects.toMatchObject({
+        code: "UNSUPPORTED",
+        message: "当前面板版本不支持默认模型切换（需要面板多模型版本）",
+      });
+  });
+
+  it("render：切换成功文案", () => {
+    const tool = buildSetDefaultModelTool(fakeClient());
+    const blocks = tool.output.render({ model: "b" }, { switched: true, model: "b" });
+    expect(blocks).toEqual([{ type: "text", text: "已将默认模型切换为 b" }]);
+  });
+
+  it("presentCall：generic 卡，标题插值模型名，kind 为 execute", () => {
+    const tool = buildSetDefaultModelTool(fakeClient());
+    expect(tool.presentCall?.({ model: "b" })).toEqual({
+      card: "generic",
+      title: "切换默认模型为 b",
+      kind: "execute",
+    });
+  });
+
+  it("不声明 isConcurrencySafe：默认排除并行组（改变路由目标，是写操作）", () => {
+    const tool = buildSetDefaultModelTool(fakeClient());
+    expect(tool.isConcurrencySafe?.({ model: "b" })).not.toBe(true);
   });
 });
 
@@ -547,7 +719,7 @@ describe("B 形态 apply：toolApproval 配置", () => {
     const ctx = fakeToolsCtx();
     apply(ctx, Config(toolsValid) as any);
     expect(ctx.on).not.toHaveBeenCalled();
-    expect(ctx.tools.register).toHaveBeenCalledTimes(5);
+    expect(ctx.tools.register).toHaveBeenCalledTimes(6);
   });
 });
 
@@ -565,7 +737,7 @@ describe("B 形态 apply：ask 档审批门（tools/pre-execute waterfall）", (
     const { ctx, listener } = captureListener();
     expect(ctx.on).toHaveBeenCalledTimes(1);
     expect(typeof listener).toBe("function");
-    expect(ctx.tools.register).toHaveBeenCalledTimes(5);
+    expect(ctx.tools.register).toHaveBeenCalledTimes(6);
   });
 
   it("start 工具 + 下游 allow → 升级为 ask（带原因文案）", async () => {
@@ -576,7 +748,7 @@ describe("B 形态 apply：ask 档审批门（tools/pre-execute waterfall）", (
     );
     expect(decision).toEqual({
       kind: "ask",
-      reason: "llamapad 模型启停需要用户确认（toolApproval: ask）",
+      reason: "llamapad 模型启停/切换默认模型需要用户确认（toolApproval: ask）",
     });
   });
 
@@ -584,6 +756,15 @@ describe("B 形态 apply：ask 档审批门（tools/pre-execute waterfall）", (
     const { listener } = captureListener();
     const decision = await listener(
       { name: "llamapad_stop_model" },
+      () => Promise.resolve({ kind: "allow" }),
+    );
+    expect(decision).toMatchObject({ kind: "ask" });
+  });
+
+  it("set_default_model 工具 + 下游 allow → 同样升级为 ask（与 start/stop 同一条升级路径）", async () => {
+    const { listener } = captureListener();
+    const decision = await listener(
+      { name: "llamapad_set_default_model" },
       () => Promise.resolve({ kind: "allow" }),
     );
     expect(decision).toMatchObject({ kind: "ask" });
