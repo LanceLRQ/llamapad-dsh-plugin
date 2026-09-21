@@ -73,6 +73,8 @@ export function createUnconfiguredClient(): PanelClient {
     runtimeStatus: async () => unconfigured(),
     startModel: async () => unconfigured(),
     stopModel: async () => unconfigured(),
+    getDefaultModel: async () => unconfigured(),
+    setDefaultModel: async () => unconfigured(),
     getReasoningInfo: async () => null,
     llamaHealth: async () => false,
     getEvents: async () => unconfigured(),

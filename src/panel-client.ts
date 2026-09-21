@@ -49,26 +49,89 @@ export interface PanelEffectiveConfig {
   merged?: unknown;
 }
 
+/** GET /api/v1/runtime/status 里单个运行中模型的形状（面板多模型分支的 models[] 每项，
+ *  以及老面板 running 单值，都是这个形状——从 PanelRuntimeStatus.running 提取出来
+ *  单独命名，供 models[] 复用）。 */
+export interface PanelRunningModel {
+  model: string;
+  displayName?: string;
+  /** 容器名 */
+  container?: string;
+  hostPort?: number | null;
+  /**
+   * 面板多模型分支起：这是**实际发布端口**（起模型时端口被占用会自动顺延），
+   * 配置端口在 configuredHostPort。两者不同就说明被顺延了——direct 模式拼 URL
+   * 只认 hostPort，不认 configuredHostPort（见 adapter.ts buildDirectUrl 的坑）。
+   * 老面板没有这个区分，字段缺席
+   */
+  configuredHostPort?: number | null;
+  /** startedAt 是运行中容器的启动时刻（ISO 8601），面板一直有返回 */
+  startedAt?: string | null;
+  /**
+   * llama-server 是否已开始监听。**容器在跑 ≠ 模型可用**：面板 readiness.ts 实测
+   * 27B 冷启动有 35 秒「容器已起、端口未监听」的窗口。面板 12cfd84 起返回；
+   * 老面板缺席时为 undefined，一律按「不可知」处理，绝不当作 false（见 routing.ts）
+   */
+  ready?: boolean;
+  /** 启动后模型行又被保存过 */
+  configStale?: boolean;
+  /**
+   * 是否为面板当前默认模型（不带 model 字段的请求打给它）。面板本身不直接给这个
+   * 字段——由 runningModels() 归一时按 defaultModelOf() 的结果统一回填，单独拿到
+   * 某一项（比如面板原始 JSON）时这里是 undefined，不要自己猜，一律走
+   * runningModels()/findRunning()
+   */
+  isDefault?: boolean;
+}
+
 export interface PanelRuntimeStatus {
-  running: {
-    model: string;
-    displayName?: string;
-    /** 容器名 */
-    container?: string;
-    hostPort?: number | null;
-    /** startedAt 是运行中容器的启动时刻（ISO 8601），面板一直有返回 */
-    startedAt?: string | null;
-    /**
-     * llama-server 是否已开始监听。**容器在跑 ≠ 模型可用**：面板 readiness.ts 实测
-     * 27B 冷启动有 35 秒「容器已起、端口未监听」的窗口。面板 12cfd84 起返回；
-     * 老面板缺席时为 undefined，一律按「不可知」处理，绝不当作 false（见 routing.ts）
-     */
-    ready?: boolean;
-    /** 启动后模型行又被保存过 */
-    configStale?: boolean;
-  } | null;
+  /**
+   * 语义已变：面板解除「同一时刻只运行一个模型」的约束后，这个字段实际是
+   * **默认模型**（面板 modelsView.ts/runtime.ts 特意保留它就是为了兼容本插件），
+   * 不再是「唯一在跑的模型」。保留这个字段只为兼容老面板与既有调用点，新代码一律
+   * 走 runningModels() 取运行集合，不要直接读它判断「某模型是否在跑」
+   */
+  running: PanelRunningModel | null;
+  /** 全部运行中模型（按启动时间升序），面板多模型分支新增字段；老面板缺席时由
+   *  running 合成，取值一律走 runningModels()，不要直接读这个字段（可能是 undefined） */
+  models?: PanelRunningModel[];
+  /** 不带 model 字段的请求会打给谁；老面板缺席时回落 running?.model，取值一律走
+   *  defaultModelOf() */
+  defaultModel?: string | null;
   /** 仅 runtimeStatus({ busy: true }) 时返回；null 代表"不可知"，不代表"不忙" */
   busy?: { inferring: boolean; slotsRunning: number } | null;
+}
+
+/**
+ * 全部在跑模型的归一出处——全仓库唯一判定「运行集合」的地方。新面板给 models[]
+ * 直接用；老面板没有这个字段时用 running 合成单元素数组，这样上层逻辑永远只面对
+ * 一种形状，不必到处判断「新面板/老面板」。isDefault 由这里统一按 defaultModelOf()
+ * 回填（面板不直接给这个字段）。
+ */
+export function runningModels(status: PanelRuntimeStatus): PanelRunningModel[] {
+  const list = status.models ?? (status.running ? [status.running] : []);
+  const defaultModel = defaultModelOf(status);
+  return list.map((m) => ({ ...m, isDefault: m.model === defaultModel }));
+}
+
+/** 按模型名在运行集合里查找一项；找不到返回 undefined（「目标还没起来」，不是错误） */
+export function findRunning(status: PanelRuntimeStatus, model: string): PanelRunningModel | undefined {
+  return runningModels(status).find((m) => m.model === model);
+}
+
+/** 目标模型是否在运行集合里——只看在不在跑，不看 ready；就绪判定另见 switching.ts */
+export function isRunning(status: PanelRuntimeStatus, model: string): boolean {
+  return findRunning(status, model) !== undefined;
+}
+
+/**
+ * 不带 model 字段的请求会打给谁。defaultModel 字段只要在场就直接用它——哪怕值是
+ * null（明确「没有默认模型」），这与「老面板没有这个字段」是两码事，只有后者才
+ * 回落到 running
+ */
+export function defaultModelOf(status: PanelRuntimeStatus): string | null {
+  if (status.defaultModel !== undefined) return status.defaultModel;
+  return status.running?.model ?? null;
 }
 
 /** 面板 events 表行的插件侧投影：GET /api/v1/events 响应行与 SSE snapshot/event 帧
@@ -244,14 +307,33 @@ export interface PanelClient {
   getEffectiveConfig(name: string): Promise<PanelEffectiveConfig | null>;
   /**
    * 运行状态查询。busy:true 时响应附带 busy 字段（null 代表"不可知"，不代表"不忙"）；
-   * signal 是调用方取消手势（监控页 monitor 的第三条拉取带它——切页/切档时与
-   * metrics/gpu 两条一起取消在途，语义同 getMetricsWindow/getGpuStats 的 signal）。
+   * model 只用在需要精确 busy 探测的场景——面板的 busy=1 只探 running 那一项，带上
+   * model 才能问到目标模型自己的忙闲（老面板忽略这个查询参数、照样回给唯一模型，
+   * 那一档下唯一模型必然就是目标，安全）；signal 是调用方取消手势（监控页 monitor
+   * 的第三条拉取带它——切页/切档时与 metrics/gpu 两条一起取消在途，语义同
+   * getMetricsWindow/getGpuStats 的 signal）。
    */
-  runtimeStatus(options?: { busy?: boolean; signal?: AbortSignal }): Promise<PanelRuntimeStatus>;
+  runtimeStatus(options?: { model?: string; busy?: boolean; signal?: AbortSignal }): Promise<PanelRuntimeStatus>;
   startModel(name: string, options?: StartModelOptions): Promise<void>;
   stopModel(name: string, options?: StopModelOptions): Promise<StopModelResult>;
-  /** 读当前运行模型的思考强度声明；端点不可用 / 无模型在跑 / 老面板一律 null（不可知） */
-  getReasoningInfo(): Promise<PanelReasoningInfo | null>;
+  /**
+   * 查询默认模型（不带 model 字段的请求会打给谁）。老面板没有这个路由，404 折成
+   * PanelError(..., "UNSUPPORTED", 404)——调用方要能区分「面板太老不支持这个功能」
+   * 与「模型没在跑」，两者不该走同一个错误码
+   */
+  getDefaultModel(): Promise<{ defaultModel: string | null; models: string[] }>;
+  /**
+   * 切换默认模型。404 同 getDefaultModel 的 UNSUPPORTED 语义；409（目标模型没在跑/
+   * 运行时正忙）沿用 startModel/stopModel 既有的 RUNTIME_BUSY 映射
+   */
+  setDefaultModel(name: string): Promise<void>;
+  /**
+   * 读思考强度声明；端点不可用 / 无模型在跑 / 老面板一律 null（不可知）。
+   * `model` 可选：多模型面板下 `/v1/models` 是聚合列表（同时列出全部在跑模型），
+   * 传了才能按 id 精确匹配到目标模型自己的声明（见 parseReasoningInfo 的 A6 匹配
+   * 逻辑）；缺省时行为与老面板单模型场景一致，直接取列表第一条。
+   */
+  getReasoningInfo(model?: string): Promise<PanelReasoningInfo | null>;
   llamaHealth(): Promise<boolean>;
   /** 查询最近事件（ts 毫秒倒序）；limit/kind 缺省时不发参数，服务端默认 20 条 */
   getEvents(options?: { limit?: number; kind?: string }): Promise<PanelEvent[]>;
@@ -531,6 +613,20 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
     return new PanelError(`${action}失败: ${message}`, "PANEL_HTTP", res.status);
   }
 
+  /**
+   * 默认模型两个端点共用的失败映射。404 单独折成 UNSUPPORTED——这条路由是面板
+   * 多模型分支才有的，老面板 404 不代表「模型不存在」而是「这个功能压根不存在」，
+   * 调用方（工具审批门、卡片按钮）要能把这两种情况分开提示用户。409 沿用
+   * RUNTIME_BUSY（目标模型没在跑/运行时正忙），其余走既有 codeFor 映射。
+   */
+  async function defaultModelError(res: Response): Promise<PanelError> {
+    if (res.status === 404) {
+      return new PanelError("面板不支持默认模型接口（需要面板多模型版本）", "UNSUPPORTED", 404);
+    }
+    if (res.status === 409) return new PanelError(await readError(res), "RUNTIME_BUSY", 409);
+    return new PanelError(await readError(res), codeFor(res), res.status);
+  }
+
   return {
     baseUrl: base,
     async listModels() {
@@ -570,8 +666,14 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       return (await res.json()) as PanelEffectiveConfig;
     },
     async runtimeStatus(options) {
+      const params = new URLSearchParams();
+      // 空模型名不拼进查询串：面板拿 ?model= 会把空串当查询目标，找不到就回 running:null，
+      // 于是「模型名没传对」被读成「一个模型都没在跑」——宁可退回不带参数的整体状态
+      if (options?.model) params.set("model", options.model);
+      if (options?.busy) params.set("busy", "1");
+      const qs = params.toString();
       const res = await request(
-        `/api/v1/runtime/status${options?.busy ? "?busy=1" : ""}`,
+        `/api/v1/runtime/status${qs ? `?${qs}` : ""}`,
         {},
         undefined,
         options?.signal,
@@ -601,7 +703,19 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       if (res.ok) return (await res.json()) as StopModelResult;
       throw await startStopError(res, name, "停止");
     },
-    async getReasoningInfo() {
+    async getDefaultModel() {
+      const res = await request("/api/v1/runtime/default-model");
+      if (!res.ok) throw await defaultModelError(res);
+      return (await res.json()) as { defaultModel: string | null; models: string[] };
+    },
+    async setDefaultModel(name) {
+      const res = await request("/api/v1/runtime/default-model", {
+        method: "PUT",
+        body: JSON.stringify({ model: name }),
+      });
+      if (!res.ok) throw await defaultModelError(res);
+    },
+    async getReasoningInfo(model) {
       // 走中转层：面板在这条路径上给 /v1/models 的响应注入了 x_llamapad 声明。
       // 无模型在跑时面板回 503、老面板没有注入逻辑——两种情况都归 null（不可知），
       // 不抛错：这是一次锦上添花的能力探测，失败不该让 resolveModel 整个失败。
@@ -615,7 +729,7 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         return null;
       }
       if (!res.ok) return null;
-      return parseReasoningInfo(await res.json().catch(() => null));
+      return parseReasoningInfo(await res.json().catch(() => null), model);
     },
     async llamaHealth() {
       try {

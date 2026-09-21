@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPanelClient,
   createSseFrameParser,
+  defaultModelOf,
+  findRunning,
+  isRunning,
   PanelError,
+  runningModels,
   type PanelEvent,
+  type PanelRuntimeStatus,
 } from "../../src/panel-client";
 
 /** 记录型 fetch 替身：按序返回预设响应 */
@@ -118,6 +123,20 @@ describe("createPanelClient", () => {
     const result = await client.runtimeStatus({ busy: true });
     expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/status?busy=1");
     expect(result.busy).toEqual({ inferring: true, slotsRunning: 2 });
+  });
+
+  it("runtimeStatus({model}) 追加 ?model=<name>（精确探测目标模型的 busy）", async () => {
+    const { fn, calls } = fakeFetch([{ body: { running: null } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await client.runtimeStatus({ model: "qwen3" });
+    expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/status?model=qwen3");
+  });
+
+  it("runtimeStatus({model, busy}) 两个参数可同时出现", async () => {
+    const { fn, calls } = fakeFetch([{ body: { running: null } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any });
+    await client.runtimeStatus({ model: "qwen3", busy: true });
+    expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/status?model=qwen3&busy=1");
   });
 
   it("startModel 不带 drain 选项时不发请求体（向后兼容旧假面板）", async () => {
@@ -713,6 +732,95 @@ describe("createPanelClient", () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(fn).not.toHaveBeenCalled();
     });
+  });
+
+  describe("getDefaultModel / setDefaultModel", () => {
+    it("getDefaultModel 透传 { defaultModel, models }", async () => {
+      const { fn, calls } = fakeFetch([{ body: { defaultModel: "a", models: ["a", "b"] } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.getDefaultModel()).resolves.toEqual({ defaultModel: "a", models: ["a", "b"] });
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/default-model");
+    });
+
+    it("getDefaultModel 404 → UNSUPPORTED（老面板没有这个路由，与「模型没在跑」要能区分）", async () => {
+      const { fn } = fakeFetch([{ status: 404, body: { error: "not found" } }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.getDefaultModel()).rejects.toMatchObject({ code: "UNSUPPORTED", status: 404 });
+    });
+
+    it("setDefaultModel 成功路径：PUT 带 { model } 请求体", async () => {
+      const { fn, calls } = fakeFetch([{ body: {} }]);
+      const client = createPanelClient({ ...base, fetch: fn as any });
+      await expect(client.setDefaultModel("b")).resolves.toBeUndefined();
+      expect(calls[0]!.url).toBe("http://panel:8080/api/v1/runtime/default-model");
+      expect(calls[0]!.init.method).toBe("PUT");
+      expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ model: "b" });
+      expect((calls[0]!.init.headers as any)["content-type"]).toBe("application/json");
+    });
+
+    it("setDefaultModel 404 → UNSUPPORTED，409 → RUNTIME_BUSY（沿用既有映射）", async () => {
+      const missing = fakeFetch([{ status: 404, body: { error: "not found" } }]);
+      await expect(createPanelClient({ ...base, fetch: missing.fn as any }).setDefaultModel("b"))
+        .rejects.toMatchObject({ code: "UNSUPPORTED", status: 404 });
+      const busy = fakeFetch([{ status: 409, body: { error: "模型 b 没有在运行" } }]);
+      await expect(createPanelClient({ ...base, fetch: busy.fn as any }).setDefaultModel("b"))
+        .rejects.toMatchObject({ code: "RUNTIME_BUSY", status: 409 });
+    });
+
+    it("setDefaultModel 401 → AUTH（沿用既有 codeFor 映射）", async () => {
+      const { fn } = fakeFetch([{ status: 401, body: { error: "unauthorized" } }]);
+      await expect(createPanelClient({ ...base, fetch: fn as any }).setDefaultModel("b"))
+        .rejects.toMatchObject({ code: "AUTH", status: 401 });
+    });
+  });
+});
+
+describe("归一函数：runningModels / findRunning / isRunning / defaultModelOf", () => {
+  it("runningModels：新面板走 models[]，按 defaultModel 回填 isDefault", () => {
+    const status: PanelRuntimeStatus = {
+      running: { model: "a" },
+      models: [{ model: "a", ready: true }, { model: "b", ready: false }],
+      defaultModel: "a",
+    };
+    expect(runningModels(status)).toEqual([
+      { model: "a", ready: true, isDefault: true },
+      { model: "b", ready: false, isDefault: false },
+    ]);
+  });
+
+  it("runningModels：老面板没有 models 字段时由 running 合成单元素数组", () => {
+    const status: PanelRuntimeStatus = { running: { model: "a", ready: true } };
+    expect(runningModels(status)).toEqual([{ model: "a", ready: true, isDefault: true }]);
+  });
+
+  it("runningModels：一个都没跑时返回空数组", () => {
+    expect(runningModels({ running: null })).toEqual([]);
+  });
+
+  it("findRunning：命中返回该项，落空返回 undefined", () => {
+    const status: PanelRuntimeStatus = {
+      running: { model: "a" },
+      models: [{ model: "a" }, { model: "b" }],
+      defaultModel: "a",
+    };
+    expect(findRunning(status, "b")).toMatchObject({ model: "b" });
+    expect(findRunning(status, "c")).toBeUndefined();
+  });
+
+  it("isRunning：只看在不在运行集合里，不看 ready", () => {
+    const status: PanelRuntimeStatus = {
+      running: { model: "a" },
+      models: [{ model: "a" }, { model: "b", ready: false }],
+    };
+    expect(isRunning(status, "b")).toBe(true);
+    expect(isRunning(status, "c")).toBe(false);
+  });
+
+  it("defaultModelOf：defaultModel 在场（含显式 null）即用，缺席才回落 running", () => {
+    expect(defaultModelOf({ running: { model: "a" }, defaultModel: "b" })).toBe("b");
+    expect(defaultModelOf({ running: { model: "a" }, defaultModel: null })).toBeNull();
+    expect(defaultModelOf({ running: { model: "a" } })).toBe("a");
+    expect(defaultModelOf({ running: null })).toBeNull();
   });
 });
 
