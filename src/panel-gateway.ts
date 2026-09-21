@@ -13,8 +13,17 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardSnapshot, type MonitorSnapshot, type RuntimePhase } from "./rpc-contract";
-import { PanelError, type MetricsRange, type PanelClient, type PanelModelView, type PanelEvent } from "./panel-client";
+import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardRunningModel, type CardSnapshot, type MonitorSnapshot, type RuntimePhase } from "./rpc-contract";
+import {
+  defaultModelOf,
+  PanelError,
+  runningModels,
+  type MetricsRange,
+  type PanelClient,
+  type PanelModelView,
+  type PanelEvent,
+  type PanelRunningModel,
+} from "./panel-client";
 import type { ModelGate } from "./switching";
 
 /**
@@ -128,6 +137,21 @@ export class PanelGateway extends TypertRemoteService {
     return this.buildSnapshot();
   }
 
+  /**
+   * 方法名须与描述符的 method 一致，理由同 start()。不带 signal——它是一次性 PUT
+   * 请求，不像 start/stop 有排空等待，没有「取消在途」的必要（见 rpc-contract.ts
+   * RPC_CONTRIBUTION 上方对 setDefaultModel 的注释）。
+   */
+  async setDefaultModel(model: string): Promise<CardSnapshot> {
+    if (!model) throw new TypeError("llamapad 设置卡片: model 不能为空");
+    try {
+      await this.options.client.setDefaultModel(model);
+    } catch (error) {
+      return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
+    }
+    return this.buildSnapshot();
+  }
+
   /** 方法名须与描述符的 method 一致，理由同 start()；末位 signal 语义亦同。 */
   async monitor(range: string, since: number | undefined, signal?: AbortSignal): Promise<MonitorSnapshot> {
     // range 非法属于「根本无法执行」的输入，对齐 model 为空串直接抛的先例——描述符
@@ -203,11 +227,22 @@ export class PanelGateway extends TypertRemoteService {
       this.options.client.runtimeStatus({ busy: true }),
     ]);
     const models = modelsResult.status === "fulfilled" ? modelsResult.value.map(toCardModel) : [];
-    const running = statusResult.status === "fulfilled" ? statusResult.value.running?.model ?? null : null;
-    const startedAt = statusResult.status === "fulfilled" ? statusResult.value.running?.startedAt ?? null : null;
+    const status = statusResult.status === "fulfilled" ? statusResult.value : null;
+    // 全部在跑模型经 panel-client 的 runningModels() 归一（老面板由 running 合成单元素
+    // 数组，isDefault 由该函数统一按 defaultModelOf() 回填），再投影成 CardRunningModel。
+    // status 为 null（runtimeStatus 探测失败）时归一为空数组，与既有「探测失败不外抛，
+    // 尽量填」的降级路径一致。
+    const runningModelsList = status !== null ? runningModels(status).map(toCardRunningModel) : [];
+    const defaultModel = status !== null ? defaultModelOf(status) : null;
+    // running/startedAt 是「默认模型那一项」（不是 defaultModel 本身）：默认模型配了
+    // 但没在跑时这里落 null，defaultModel 字段仍原样报告配置的目标——两者语义不同，
+    // 见 rpc-contract.ts CardSnapshot.running/defaultModel 的注释。
+    const defaultEntry = runningModelsList.find((item) => item.isDefault) ?? null;
+    const running = defaultEntry?.name ?? null;
+    const startedAt = defaultEntry?.startedAt ?? null;
     // busy 是 runtimeStatus({busy:true}) 才会填的字段，undefined（面板未按此模式响应）
     // 归一到 null，与"探测失败/不可知"同等对待，phase 判定只关心它是不是 null。
-    const busy = statusResult.status === "fulfilled" ? statusResult.value.busy ?? null : null;
+    const busy = status?.busy ?? null;
     const inferring = busy?.inferring ?? null;
     const phase = await this.resolvePhase(running, busy);
     const panelError = modelsResult.status === "rejected"
@@ -221,6 +256,8 @@ export class PanelGateway extends TypertRemoteService {
       phase,
       startedAt,
       inferring,
+      runningModels: runningModelsList,
+      defaultModel,
       openUrl: this.options.panelPublicUrl || this.options.panelUrl,
       panelError,
       connection: {
@@ -242,6 +279,11 @@ export class PanelGateway extends TypertRemoteService {
    *
    * busy 不可知有两种成因——面板没按 busy 模式响应、或 runtimeStatus 本身失败——
    * 到这里已经统一折算成 null，处理方式相同。
+   *
+   * 多模型改造后：入参 running 是 buildSnapshot 传来的「默认模型那一项」的 name
+   * （不是任意某个在跑模型），所以这里判定的是整卡片的「默认模型阶段」，不代表别的
+   * 非默认模型也处于同一阶段——它们各自的 ready 状态在 CardSnapshot.runningModels
+   * 里，不经过 resolvePhase。这条方法本身不需要因此改逻辑，只是入参含义变窄了。
    */
   private async resolvePhase(
     running: string | null,
@@ -273,6 +315,22 @@ function toCardModel(model: PanelModelView): CardModel {
 }
 
 /**
+ * PanelRunningModel（panel-client 的 runningModels() 归一结果单项）→ CardRunningModel
+ * 的投影。缺席字段一律归一成 null（displayName/startedAt/ready 在 PanelRunningModel
+ * 上都是可选的，wire 契约要求显式 null，见 rpc-contract.ts CardRunningModel 注释）；
+ * isDefault 由 runningModels() 保证不缺席，这里仍用 `=== true` 兜一道，不信任上游。
+ */
+function toCardRunningModel(model: PanelRunningModel): CardRunningModel {
+  return {
+    name: model.model,
+    displayName: model.displayName ?? null,
+    startedAt: model.startedAt ?? null,
+    ready: model.ready ?? null,
+    isDefault: model.isDefault === true,
+  };
+}
+
+/**
  * 把异常折算成卡片直接可显示的一句话。
  *
  * 不能无脑透传 message：panel-client 的 startModel/stopModel 抛的是中文说明，但
@@ -282,6 +340,11 @@ function toCardModel(model: PanelModelView): CardModel {
 function describePanelError(error: unknown): string {
   if (error instanceof PanelError) {
     if (error.code === "AUTH") return "llamapad token 无效或未授权，请检查插件配置里的 token";
+    // UNSUPPORTED 只可能来自 setDefaultModel（老面板没有默认模型路由，404 折成这个码，
+    // 见 panel-client.ts 的 defaultModelError）。这里换一句面向「切换」场景的说明，
+    // 不用 panel-client 那句面向端点本身的措辞——两处读者不同，卡片用户只关心
+    // 「这个按钮为什么用不了」。
+    if (error.code === "UNSUPPORTED") return "当前面板版本不支持默认模型切换（需要面板多模型版本）";
     // 这三个码的 message 本身就是完整的中文说明（面板不可达的地址、"运行时忙：正在启动
     // 模型 X，请等待…"、面板对拒绝启动的解释），套上"面板请求失败"的壳只会自相矛盾——
     // RUNTIME_BUSY 时面板并没有失败，只是忙。其余码仍需兜一层：listModels/runtimeStatus

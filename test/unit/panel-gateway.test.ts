@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@deepseek-ai/cordis";
 import { PanelGateway, type PanelGatewayOptions } from "../../src/panel-gateway";
-import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_WIRE_MODEL, RPC_WIRE_RANGE, RPC_WIRE_SINCE, type MonitorSnapshot } from "../../src/rpc-contract";
+import { RPC_CONTRIBUTION, RPC_METHOD, RPC_NAMESPACE, RPC_PACKAGE, RPC_WIRE_MODEL, RPC_WIRE_RANGE, RPC_WIRE_SINCE, type MonitorSnapshot } from "../../src/rpc-contract";
 import { PanelError, type PanelClient, type PanelModelView, type PanelEvent } from "../../src/panel-client";
 import { EnsureError, type ModelGate } from "../../src/switching";
 
@@ -26,6 +26,8 @@ function fakeClient(overrides: Partial<PanelClient> = {}): PanelClient {
     runtimeStatus: async () => ({ running: null, busy: null }),
     startModel: async () => {},
     stopModel: async () => ({ ok: true }),
+    // 默认无害占位：只有 setDefaultModel 专属用例才会覆盖它。
+    setDefaultModel: async () => {},
     llamaHealth: async () => true,
     getMetricsWindow: async () => ({ range: "30m", from: 0, resolution: "5s", series: {}, mode: "full" }),
     getGpuStats: async () => ({ available: false, status: "unavailable", devices: [], totals: null }),
@@ -79,6 +81,12 @@ describe("PanelGateway", () => {
         phase: "ready",
         startedAt: null,
         inferring: true,
+        // 老面板没有 models[]/defaultModel：runningModels(status) 由 running 合成单元素
+        // 数组，defaultModelOf 回落 running.model，故这一项 isDefault 恒为 true。
+        runningModels: [
+          { name: "a", displayName: null, startedAt: null, ready: null, isDefault: true },
+        ],
+        defaultModel: "a",
         openUrl: "http://panel:8080",
         panelError: null,
         connection: { panelUrl: "http://panel:8080", tokenConfigured: false },
@@ -207,6 +215,82 @@ describe("PanelGateway", () => {
       const snapshot = await gateway.snapshot();
 
       expect(snapshot.startedAt).toBe("2026-08-28T01:23:45.000Z");
+    });
+  });
+
+  describe("buildSnapshot：多模型运行集合（任务 6，走 panel-client 的 runningModels 归一）", () => {
+    it("models[] 与 defaultModel 都在场：runningModels 逐项带 isDefault，running/startedAt 取默认模型那一项", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: { model: "a" }, // 老字段仍在，新代码不应再依赖它做判定
+            models: [
+              { model: "a", displayName: "模型 A", startedAt: "2026-09-21T00:00:00.000Z", ready: true },
+              { model: "b", displayName: "模型 B", startedAt: "2026-09-21T00:05:00.000Z", ready: false },
+            ],
+            defaultModel: "b",
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.runningModels).toEqual([
+        { name: "a", displayName: "模型 A", startedAt: "2026-09-21T00:00:00.000Z", ready: true, isDefault: false },
+        { name: "b", displayName: "模型 B", startedAt: "2026-09-21T00:05:00.000Z", ready: false, isDefault: true },
+      ]);
+      expect(snapshot.defaultModel).toBe("b");
+      // running/startedAt 是「默认模型那一项」，不再是老 running 字段的原样透传
+      expect(snapshot.running).toBe("b");
+      expect(snapshot.startedAt).toBe("2026-09-21T00:05:00.000Z");
+    });
+
+    it("默认模型配置了但没在跑：runningModels 里没有任何一项 isDefault，running/startedAt 兜底 null，defaultModel 仍原样报告", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: null,
+            models: [{ model: "a", startedAt: "2026-09-21T00:00:00.000Z", ready: true }],
+            defaultModel: "c", // 配置的默认模型压根没在运行集合里
+            busy: null,
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.runningModels).toEqual([
+        { name: "a", displayName: null, startedAt: "2026-09-21T00:00:00.000Z", ready: true, isDefault: false },
+      ]);
+      expect(snapshot.defaultModel).toBe("c");
+      expect(snapshot.running).toBeNull();
+      expect(snapshot.startedAt).toBeNull();
+    });
+
+    it("一个模型都没在跑：runningModels 为空数组，defaultModel/running 均为 null", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({ runtimeStatus: async () => ({ running: null, busy: null }) }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.runningModels).toEqual([]);
+      expect(snapshot.defaultModel).toBeNull();
+      expect(snapshot.running).toBeNull();
+    });
+
+    it("runtimeStatus 探测失败：runningModels 兜底空数组，defaultModel 兜底 null（不外抛，与既有 panelError 降级路径一致）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => { throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE"); },
+        }),
+      });
+
+      const snapshot = await gateway.snapshot();
+
+      expect(snapshot.runningModels).toEqual([]);
+      expect(snapshot.defaultModel).toBeNull();
     });
   });
 
@@ -399,6 +483,70 @@ describe("PanelGateway", () => {
       const snapshot = await gateway.stop("a");
 
       expect(snapshot.panelError).toBe("运行时忙：正在启动模型 qwen3，请等待当前操作完成后再试");
+    });
+  });
+
+  describe("setDefaultModel（任务 6：卡片「设为默认」按钮的 host 半身）", () => {
+    it("成功：调用 client.setDefaultModel 并返回新 snapshot，不带 panelError", async () => {
+      const setDefaultModel = vi.fn(async () => {});
+      const { gateway } = makeGateway({ client: fakeClient({ setDefaultModel }) });
+
+      const snapshot = await gateway.setDefaultModel("b");
+
+      expect(setDefaultModel).toHaveBeenCalledWith("b");
+      expect(snapshot.panelError).toBeNull();
+    });
+
+    it("model 为空串：属于编程错误，直接抛而不是塞进 panelError（对齐 start/stop 的先例）", async () => {
+      const { gateway } = makeGateway();
+      await expect(gateway.setDefaultModel("")).rejects.toThrow();
+    });
+
+    it("老面板不支持（404 → UNSUPPORTED）：折成中文说明，不外抛", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          setDefaultModel: async () => {
+            throw new PanelError("面板不支持默认模型接口（需要面板多模型版本）", "UNSUPPORTED", 404);
+          },
+        }),
+      });
+
+      const snapshot = await gateway.setDefaultModel("b");
+
+      expect(snapshot.panelError).toBe("当前面板版本不支持默认模型切换（需要面板多模型版本）");
+    });
+
+    it("目标模型没在跑（409 → RUNTIME_BUSY）：透传面板原文，不套壳", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          setDefaultModel: async () => {
+            throw new PanelError("目标模型未运行，无法设为默认", "RUNTIME_BUSY", 409);
+          },
+        }),
+      });
+
+      const snapshot = await gateway.setDefaultModel("b");
+
+      expect(snapshot.panelError).toBe("目标模型未运行，无法设为默认");
+    });
+
+    it("成功路径 snapshot 带上正确的 runningModels/defaultModel（复用 buildSnapshot，未被裁剪）", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          setDefaultModel: async () => {},
+          runtimeStatus: async () => ({
+            running: { model: "b" },
+            models: [{ model: "a" }, { model: "b" }],
+            defaultModel: "b",
+            busy: { inferring: false, slotsRunning: 0 },
+          }),
+        }),
+      });
+
+      const snapshot = await gateway.setDefaultModel("b");
+
+      expect(snapshot.defaultModel).toBe("b");
+      expect(snapshot.runningModels.map((m) => m.isDefault)).toEqual([false, true]);
     });
   });
 
@@ -645,6 +793,89 @@ describe("PanelGateway", () => {
       expect(monitor!.cancellation).toEqual({ parameter: "signal" });
       // 与其余四个方法不同：monitor 的返回值是 MonitorSnapshot，不是 CardSnapshot
       expect(monitor!.result.typeSymbol).toBe("llamapad-dsh-plugin#MonitorSnapshot");
+    });
+
+    it("setDefaultModel 描述符：复用 model 形参、不带取消通道、result 回落默认的 CardSnapshot codec", () => {
+      const setDefaultModel = RPC_CONTRIBUTION.descriptors.find((d) => d.method === RPC_METHOD.setDefaultModel);
+      expect(setDefaultModel).toBeDefined();
+      expect(setDefaultModel!.parameters.map((p) => p.wire)).toEqual([RPC_WIRE_MODEL]);
+      // 一问一答的快速写操作，不像 start/stop 那样有 60s+ 的排空等待，不需要取消通道
+      expect(setDefaultModel!.cancellation).toBeUndefined();
+      expect(setDefaultModel!.result.typeSymbol).toBe(`${RPC_PACKAGE}#CardSnapshot`);
+    });
+  });
+
+  describe("snapshot codec（经描述符暴露的 strict 校验，浏览器产物用同一份；任务 6 新增 runningModels/defaultModel）", () => {
+    const snapshotDescriptor = RPC_CONTRIBUTION.descriptors.find((d) => d.method === RPC_METHOD.snapshot)!;
+    const resultCodec = snapshotDescriptor.result.schema;
+
+    const baseSnapshot = {
+      models: [],
+      running: null,
+      phase: "idle" as const,
+      startedAt: null,
+      inferring: null,
+      runningModels: [],
+      defaultModel: null,
+      openUrl: "http://panel:8080",
+      panelError: null,
+      connection: { panelUrl: "http://panel:8080", tokenConfigured: false },
+      events: [],
+    };
+
+    it("完整快照（含多模型运行列表与默认模型）逐字段收窄通过，往返不丢字段", () => {
+      const snapshot = {
+        ...baseSnapshot,
+        running: "a",
+        phase: "ready" as const,
+        startedAt: "2026-09-21T00:00:00.000Z",
+        inferring: true,
+        runningModels: [
+          { name: "a", displayName: "模型 A", startedAt: "2026-09-21T00:00:00.000Z", ready: true, isDefault: true },
+          { name: "b", displayName: null, startedAt: null, ready: null, isDefault: false },
+        ],
+        defaultModel: "a",
+      };
+      expect(resultCodec.parse(snapshot)).toEqual(snapshot);
+    });
+
+    it("runningModels 缺席即拒绝（strict codec 不容忍新字段缺席，防止漏改一处就运行期 400）", () => {
+      const { runningModels: _drop, ...withoutRunningModels } = baseSnapshot;
+      expect(() => resultCodec.parse(withoutRunningModels)).toThrow(TypeError);
+    });
+
+    it("defaultModel 缺席即拒绝，非 string/null 也拒绝", () => {
+      const { defaultModel: _drop, ...withoutDefaultModel } = baseSnapshot;
+      expect(() => resultCodec.parse(withoutDefaultModel)).toThrow(TypeError);
+      expect(() => resultCodec.parse({ ...baseSnapshot, defaultModel: 1 })).toThrow(TypeError);
+      expect(resultCodec.parse({ ...baseSnapshot, defaultModel: "a" })).toMatchObject({ defaultModel: "a" });
+    });
+
+    it("runningModels 不是数组即拒绝", () => {
+      expect(() => resultCodec.parse({ ...baseSnapshot, runningModels: "not-array" })).toThrow(TypeError);
+    });
+
+    it("runningModels 单项逐字段坏形状拒绝（name/displayName/startedAt/ready/isDefault）", () => {
+      const row = { name: "a", displayName: null, startedAt: null, ready: null, isDefault: false };
+      for (const bad of [
+        { ...row, name: 1 },
+        { ...row, displayName: 1 },
+        { ...row, startedAt: 1 },
+        { ...row, ready: "yes" },
+        { ...row, isDefault: "no" },
+      ]) {
+        expect(() => resultCodec.parse({ ...baseSnapshot, runningModels: [bad] })).toThrow(TypeError);
+      }
+    });
+
+    it("runningModels 单项：displayName/startedAt/ready 缺席（undefined）也拒绝——契约要求显式 null，不是可选字段", () => {
+      const row: Record<string, unknown> = { name: "a", isDefault: false };
+      expect(() => resultCodec.parse({ ...baseSnapshot, runningModels: [row] })).toThrow(TypeError);
+    });
+
+    it("runningModels 单项：isDefault 缺席也拒绝（不是可选字段）", () => {
+      const row = { name: "a", displayName: null, startedAt: null, ready: null };
+      expect(() => resultCodec.parse({ ...baseSnapshot, runningModels: [row] })).toThrow(TypeError);
     });
   });
 

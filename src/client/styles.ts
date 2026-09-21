@@ -45,6 +45,10 @@ export const CARD_CSS = `
 .llamapad-card__hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
 .llamapad-card__banner{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-radius:8px;padding:8px 10px}
 .llamapad-card__status{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
+.llamapad-card__runningList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;width:100%}
+.llamapad-card__runningRow{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
+.llamapad-card__runningName{flex:1;min-width:0;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.llamapad-card__runningMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;flex:none}
 .llamapad-card__actionError{margin:0;color:var(--dsw-alias-state-error-primary)}
 .llamapad-card__list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:320px;overflow-y:auto;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2) transparent}
 .llamapad-card__list::-webkit-scrollbar{width:8px}

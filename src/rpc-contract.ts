@@ -47,6 +47,7 @@ export const RPC_METHOD = {
   stop: "stop",
   saveConnection: "saveConnection",
   monitor: "monitor",
+  setDefaultModel: "setDefaultModel",
 } as const;
 
 /** start / stop 的形参名——必须与 panel-gateway.ts 里方法签名的形参逐字一致。 */
@@ -83,6 +84,10 @@ export interface CardModel {
  *
  * 与 inferring 的关系：`starting` 时 /slots 必然探不到，所以 inferring 必为 null。
  * 卡片在这一阶段不要画「推理状态未知」——那句话在加载中是纯噪音。
+ *
+ * 多模型改造后的含义收窄：这三态只描述**默认模型**这一项的加载进度（`idle` 是「默认
+ * 模型没在跑」，不是「一个模型都没在跑」——别的非默认模型可能正在运行，要看全部在跑
+ * 模型请走 CardSnapshot.runningModels，每一项各自的 ready 字段才是它自己的就绪状态）。
  */
 export type RuntimePhase = "idle" | "starting" | "ready";
 
@@ -112,21 +117,63 @@ export function toCardEvent(event: PanelEvent): CardEvent {
   return { id: event.id, ts: event.ts, kind: event.kind, message: event.message };
 }
 
+/**
+ * 多模型运行列表里的一行（面板 panel-client.ts 的 `runningModels(status)` 归一结果的
+ * 投影）。字段与 CardEvent 同理独立声明：wire 契约只认这一份形状，panel-client 的
+ * PanelRunningModel 将来加字段不会顺着泄漏进浏览器产物。
+ *
+ * displayName/startedAt/ready 统一用 null 表达「面板没给 / 不可知」——不用 undefined，
+ * 因为 codec 是 strict 的，缺席字段会在 parseCardSnapshot 里直接被拒收，必须显式写 null
+ * 才能通过运行期校验，也逼着 gateway 组装时不会漏填。
+ */
+export interface CardRunningModel {
+  /** 面板模型名，即 PanelRunningModel.model；改叫 name 是为了跟 CardModel 的字段对齐 */
+  name: string;
+  /** 面板没给展示名、或该模型配置已被删除但容器还在跑时为 null，卡片退回用 name */
+  displayName: string | null;
+  /** 语义同 CardSnapshot.startedAt：运行中容器的启动时刻（ISO 8601），面板没给为 null */
+  startedAt: string | null;
+  /** true=已就绪、false=容器已起仍在加载、null=不可知（老面板没有这个字段） */
+  ready: boolean | null;
+  /** 是否为面板当前默认模型（不带 model 字段的请求会打给它）；由 gateway 按
+   *  panel-client 的 runningModels() 归一结果统一回填，不会缺席 */
+  isDefault: boolean;
+}
+
 /** 卡片一次轮询拿到的全部内容：列表 + 运行状态 + 打开面板用的地址。 */
 export interface CardSnapshot {
   models: CardModel[];
-  /** 运行中模型的 name；无模型在跑为 null */
+  /**
+   * 默认模型的 name；无模型在跑、或默认模型配置了但没在跑，均为 null。
+   * 语义收窄为「默认模型那一项」是刻意的（详见 panel-gateway.ts buildSnapshot 注释）：
+   * 这个字段与 startedAt 是多模型改造前就有的老字段，只保留给不关心多模型、只想知道
+   * 「面板默认会用哪个模型服务」的既有渲染路径；要看全部在跑模型请走 runningModels。
+   */
   running: string | null;
-  /** 运行阶段，三态语义见 RuntimePhase */
+  /** 运行阶段，三态语义见 RuntimePhase（多模型下的含义见该类型注释） */
   phase: RuntimePhase;
   /**
    * 运行中容器的启动时刻（ISO 8601 字符串）；无模型在跑、或面板没给为 null。
    * 卡片用它算「已加载 N 秒」——传绝对时刻而不是让卡片自己按住秒表，
    * 这样轮询抖动、组件重挂载、以及「模型是别的客户端启动的」三种情况下都还准。
+   * 语义同 running：只对应默认模型那一项，全部在跑模型各自的启动时刻在 runningModels 里。
    */
   startedAt: string | null;
   /** true=正在推理，false=空闲，null=不可知（面板没给或探测失败），不等于「不忙」 */
   inferring: boolean | null;
+  /**
+   * 全部运行中模型（按启动时间升序，与面板 panel-client.ts 的 runningModels() 同序）。
+   * 卡片的运行区在这个列表长度 >1 时切换成多行列表渲染，每行标出是否默认、能否
+   * 「设为默认」；长度 <=1 时沿用 running/startedAt/phase 的既有单行渲染，不因为
+   * 多模型改造而改变单模型场景下的视觉（见 Card.tsx）。
+   */
+  runningModels: CardRunningModel[];
+  /**
+   * 不带 model 字段的请求会打给谁；没有默认模型（面板没给且也没有任何模型在跑）为
+   * null。与 running 的区别：这个字段原样反映面板配置的默认目标，即便该模型当前
+   * 没有在跑（running 这种情况下会是 null）；running 才是「默认模型那一项」。
+   */
+  defaultModel: string | null;
   /** 浏览器可见的面板地址，供「用浏览器打开」按钮使用（host 侧的 panelUrl 未必可达） */
   openUrl: string;
   /**
@@ -224,6 +271,17 @@ function asNullableString(value: unknown, field: string): string | null {
   return asString(value, field);
 }
 
+function asNullableBoolean(value: unknown, field: string): boolean | null {
+  if (value === null) return null;
+  if (typeof value !== "boolean") fail(field, "boolean | null");
+  return value;
+}
+
+function asBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") fail(field, "boolean");
+  return value;
+}
+
 function asRecord(value: unknown, field: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail(field, "object");
   return value as Record<string, unknown>;
@@ -247,6 +305,17 @@ function parseCardConnection(value: unknown): CardConnection {
   return { panelUrl: asString(row["panelUrl"], "snapshot.connection.panelUrl"), tokenConfigured };
 }
 
+function parseCardRunningModel(value: unknown, field: string): CardRunningModel {
+  const row = asRecord(value, field);
+  return {
+    name: asString(row["name"], `${field}.name`),
+    displayName: asNullableString(row["displayName"], `${field}.displayName`),
+    startedAt: asNullableString(row["startedAt"], `${field}.startedAt`),
+    ready: asNullableBoolean(row["ready"], `${field}.ready`),
+    isDefault: asBoolean(row["isDefault"], `${field}.isDefault`),
+  };
+}
+
 function parseCardEvent(value: unknown, field: string): CardEvent {
   const row = asRecord(value, field);
   return {
@@ -263,6 +332,8 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
   if (!Array.isArray(models)) fail("snapshot.models", "array");
   const events = row["events"];
   if (!Array.isArray(events)) fail("snapshot.events", "array");
+  const runningModels = row["runningModels"];
+  if (!Array.isArray(runningModels)) fail("snapshot.runningModels", "array");
   const inferring = row["inferring"];
   if (inferring !== null && typeof inferring !== "boolean") fail("snapshot.inferring", "boolean | null");
   const phase = row["phase"];
@@ -275,6 +346,8 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
     phase,
     startedAt: asNullableString(row["startedAt"], "snapshot.startedAt"),
     inferring,
+    runningModels: runningModels.map((item, index) => parseCardRunningModel(item, `snapshot.runningModels[${index}]`)),
+    defaultModel: asNullableString(row["defaultModel"], "snapshot.defaultModel"),
     openUrl: asString(row["openUrl"], "snapshot.openUrl"),
     panelError: asNullableString(row["panelError"], "snapshot.panelError"),
     connection: parseCardConnection(row["connection"]),
@@ -528,6 +601,10 @@ const SINCE_PARAM = {
  * monitor 是监控页的轮询方法，返回 MonitorSnapshot、同样声明 cancellation：
  * 生成方法暴露为 `monitor(range, since?, signal?)`——切页/切 range 时浏览器取消
  * 在途（24h/7d 窗口的响应大，不取消会白白占着连接），since 可选（首次全量不带）。
+ *
+ * setDefaultModel 复用 start/stop 的 model 参数（同一个 MODEL_PARAM 常量），返回值仍是
+ * CardSnapshot（走完切换顺带回传最新状态，理由同前四个方法）；不声明 cancellation——
+ * 它是一次性的 PUT 请求，不像 start/stop 有 60s+ 的排空等待，没有「取消在途」的必要。
  */
 export const RPC_CONTRIBUTION = {
   package: RPC_PACKAGE,
@@ -537,5 +614,6 @@ export const RPC_CONTRIBUTION = {
     descriptor(RPC_METHOD.stop, [MODEL_PARAM], SIGNAL_CANCELLATION),
     descriptor(RPC_METHOD.saveConnection, [PANEL_URL_PARAM, TOKEN_PARAM]),
     descriptor(RPC_METHOD.monitor, [RANGE_PARAM, SINCE_PARAM], SIGNAL_CANCELLATION, MONITOR_CODEC),
+    descriptor(RPC_METHOD.setDefaultModel, [MODEL_PARAM]),
   ],
 } as const;

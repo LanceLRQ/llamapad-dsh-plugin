@@ -44,6 +44,12 @@ export const zh = {
   // 面板侧事件 message 本身就是中文人类可读文本（「模型 xxx 已启动」），逐 kind
   // 翻译会随面板事件表无界膨胀，en 环境下宁可原样显示也不维护一份必然滞后的映射。
   eventsTitle: "最近事件",
+  // ── 多模型运行列表（>1 个模型同时在跑时的卡片运行区）──
+  runningElapsedSeconds: "已加载 {sec} 秒",
+  runningElapsedMinutes: "已加载 {min} 分 {sec} 秒",
+  defaultBadge: "默认",
+  setDefault: "设为默认",
+  settingDefault: "设置中…",
   // ── 监控页（settings.section 整页）──
   // 导航条目文案：注册时以 thunk 形式声明（index.tsx 里 bind 本命名空间），宿主
   // 每次 read 都重新解析，语言切换后无需重新注册。
@@ -62,6 +68,15 @@ export const zh = {
   // idle 的页面级提示：notice 行而非整页替换——GPU host 级指标与分卡明细照画
   monitorNoContainer: "无运行容器——推理与容器指标为空，主机与 GPU 指标仍可用。",
   monitorStatusUnknown: "运行状态未知",
+  // 归属标注（A7，任务 8）：面板采集器只跟随默认模型这件事插件改不了（面板
+  // src/server/locators.ts 的实现），只能如实告知——切换默认模型时曲线会在切换点
+  // 直接拼接新模型的数据，没有边界标记，容易被误读成"这条曲线全程都是同一个模型"。
+  // 只在确实有默认模型在跑时才显示（running 为 null 时本就没有数据可归属，见
+  // MonitorPage.tsx 的渲染条件）。
+  monitorAttributionNote: "容器与推理指标来自默认模型 {name}；切换默认模型后，曲线会在切换点直接拼接新模型的数据，没有边界标记。",
+  // GPU 卡的口径说明：与是否有模型在跑无关，只要有 GPU 明细就显示——多模型同卡
+  // 时 nvidia-smi 只能报整卡读数，插件拿不到"这段显存/利用率是哪个模型占的"
+  monitorGpuAttributionNote: "整卡口径：多个模型共享同一张卡时，GPU 指标无法拆分归因到具体模型。",
   monitorCardInfer: "推理",
   monitorCardGpu: "GPU",
   monitorCardContainer: "容器",
@@ -114,6 +129,12 @@ export const en = {
   connSaved: "Saved. Reconnecting with the new settings.",
   // Toast text intentionally bypasses this dictionary; see the zh entry's comment.
   eventsTitle: "Recent activity",
+  // ── Multi-model running list (card status area when >1 model is running) ──
+  runningElapsedSeconds: "Loaded {sec}s ago",
+  runningElapsedMinutes: "Loaded {min}m{sec}s ago",
+  defaultBadge: "Default",
+  setDefault: "Set as default",
+  settingDefault: "Setting…",
   // ── Monitor page (settings.section full page) ──
   monitorTitle: "llamapad Monitor",
   monitorClose: "Close",
@@ -131,6 +152,18 @@ export const en = {
   // metrics and per-device details keep rendering
   monitorNoContainer: "No running container — inference and container metrics are empty; host and GPU metrics are still available.",
   monitorStatusUnknown: "Runtime status unknown",
+  // Attribution note (A7, task 8): the panel's collector only follows the default
+  // model (panel src/server/locators.ts) — the plugin cannot change that, only
+  // disclose it. Switching the default model makes the curve splice in the new
+  // model's data right at the switch point with no boundary marker, which is easy
+  // to misread as "this curve is one model the whole time". Only shown while a
+  // default model is actually running (see the render condition in MonitorPage.tsx).
+  monitorAttributionNote: "Container and inference metrics are from the default model {name}; after switching the default model, the curve splices in the new model's data right at the switch point with no boundary marker.",
+  // GPU card scope note: independent of whether any model is running, shown
+  // whenever there is GPU detail — when multiple models share one card,
+  // nvidia-smi only reports whole-card readings; the plugin cannot attribute a
+  // slice of memory/utilization to a specific model.
+  monitorGpuAttributionNote: "Whole-card scope: when multiple models share the same GPU, its metrics cannot be attributed to a specific model.",
   monitorCardInfer: "Inference",
   monitorCardGpu: "GPU",
   monitorCardContainer: "Container",

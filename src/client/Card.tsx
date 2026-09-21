@@ -24,6 +24,8 @@ import {
   describeLoadingElapsed,
   formatEventTime,
   inferringDotState,
+  runningModelDisplayName,
+  runningRowDotState,
   selectNotifiableEvents,
   type ConnectionDraft,
   type EventTone,
@@ -214,6 +216,20 @@ export function Card({ api, t }: CardProps) {
     return () => clearInterval(tick);
   }, [isStarting, open]);
 
+  // 「设为默认」在途状态：只记模型名（不像 start/stop 那样区分动作种类，setDefaultModel
+  // 只有一种动作），非 null 时多模型运行列表里的全部「设为默认」按钮统一禁用——避免
+  // 同一面板收到互相插队的默认切换请求（对齐 start/stop 的既有节流思路）。没有取消
+  // 语义（RPC 本身不声明 cancellation，见 rpc-contract.ts），失败与成功都走既有的
+  // panelError/actionError 两个展示位，不新开 UI 区域。
+  const [pendingDefaultModel, setPendingDefaultModel] = useState<string | null>(null);
+  const setDefault = (model: string) => {
+    setPendingDefaultModel(model);
+    apiRef.current.setDefaultModel(model)
+      .then((next) => applySnapshot(next))
+      .catch((error: unknown) => setActionError(describeError(error)))
+      .finally(() => setPendingDefaultModel(null));
+  };
+
   const runAction = (model: string, kind: "start" | "stop") => {
     // 每个动作配一个 AbortController 存 ref：在途行的按钮换成「取消等待」语义，
     // 点击只 abort、不重发动作。pending 与 abortRef 同生共死（finally 里一起清），
@@ -295,6 +311,41 @@ export function Card({ api, t }: CardProps) {
           <div className="llamapad-card__status">
             {view.phase === "idle" ? (
               <span>{t("noModelRunning")}</span>
+            ) : snapshot.runningModels.length > 1 ? (
+              // 多模型：运行区从单行改为列表，每行「模型名 · 已加载 N 秒 · ready 点 ·
+              // （默认标记/设为默认按钮）」。只有一个模型在跑时（长度 <=1）走下面
+              // 未改动的单行分支，视觉与多模型改造前完全一致。
+              <ul className="llamapad-card__runningList">
+                {snapshot.runningModels.map((item) => {
+                  const elapsed = describeLoadingElapsed(item.startedAt, now);
+                  return (
+                    <li key={item.name} className="llamapad-card__runningRow">
+                      <StateDot state={runningRowDotState(item.ready)} />
+                      <span className="llamapad-card__runningName">{runningModelDisplayName(item)}</span>
+                      {elapsed !== null ? (
+                        <span className="llamapad-card__runningMeta">
+                          {elapsed.unit === "seconds"
+                            ? t("runningElapsedSeconds", { sec: elapsed.seconds })
+                            : t("runningElapsedMinutes", { min: elapsed.minutes, sec: elapsed.seconds })}
+                        </span>
+                      ) : null}
+                      {item.isDefault ? (
+                        <Pill active>{t("defaultBadge")}</Pill>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={pendingDefaultModel !== null}
+                          onClick={() => setDefault(item.name)}
+                        >
+                          {pendingDefaultModel === item.name ? t("settingDefault") : t("setDefault")}
+                        </Button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             ) : view.phase === "starting" ? (
               <>
                 {/* ongoing 是 StateDot 四态里唯一带动效的一档（内置的像素追逐动画），

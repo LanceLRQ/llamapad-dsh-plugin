@@ -1,7 +1,7 @@
 // 卡片的纯逻辑：把一份 CardSnapshot（+ 本地的「动作在途」态）折算成渲染要用的
 // 展示值。刻意不掺 React——状态推导本身没有理由依赖运行环境，纯函数才好单测，
 // 也让 Card 组件本身只剩"照着 view 摆控件"这一件事。
-import type { CardConnection, CardEvent, CardModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
+import type { CardConnection, CardEvent, CardModel, CardRunningModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
 
 /** 一次启动/停止动作的进行中态：哪个模型、哪种动作。 */
 export interface PendingAction {
@@ -126,6 +126,32 @@ export function buildCardView(snapshot: CardSnapshot, pending: PendingAction | n
     inferring,
     openDisabled: snapshot.openUrl.length === 0,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * 多模型运行列表：卡片运行区在 >1 个模型同时在跑时的展示推导
+ * ------------------------------------------------------------------ */
+
+/**
+ * 运行列表里单行的展示名。
+ * 面板给了 displayName 就用它；缺席（面板没给，或该模型的配置已经被删除但容器
+ * 还在跑）时回退用 name——与单模型场景里 `runningModel?.displayName ?? snapshot.running`
+ * 的既有回退口径一致，只是挪成可单测的纯函数。
+ */
+export function runningModelDisplayName(model: CardRunningModel): string {
+  return model.displayName ?? model.name;
+}
+
+/**
+ * 运行列表里单行的 ready 状态点映射。
+ * true→done（已就绪）、false→ongoing（容器已起仍在加载，带动效，对齐单模型
+ * starting 阶段用 StateDot "ongoing" 表示加载中的既有视觉）、null→warning
+ * （不可知，老面板没有 ready 这个字段——不能冒充"已就绪"，也不能冒充"加载中"）。
+ */
+export function runningRowDotState(ready: boolean | null): "done" | "warning" | "ongoing" {
+  if (ready === true) return "done";
+  if (ready === false) return "ongoing";
+  return "warning";
 }
 
 /** 连接表单的两个草稿输入框。 */

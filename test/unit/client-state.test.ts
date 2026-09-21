@@ -8,9 +8,11 @@ import {
   formatEventTime,
   inferringDotState,
   rowActionFor,
+  runningModelDisplayName,
+  runningRowDotState,
   selectNotifiableEvents,
 } from "../../src/client/state";
-import type { CardEvent, CardModel, CardSnapshot } from "../../src/rpc-contract";
+import type { CardEvent, CardModel, CardRunningModel, CardSnapshot } from "../../src/rpc-contract";
 
 function model(overrides: Partial<CardModel> = {}): CardModel {
   return {
@@ -34,6 +36,10 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     phase: "ready",
     startedAt: null,
     inferring: null,
+    // 任务 6 新增的多模型运行列表 + 默认模型字段：本文件测的是既有 buildCardView 等
+    // 纯逻辑（不涉及这两个新字段的推导，那是 panel-gateway.test.ts 的范围），占位即可。
+    runningModels: [],
+    defaultModel: null,
     openUrl: "http://panel.local",
     panelError: null,
     // 本文件测的是 buildCardView 等纯逻辑，不涉及连接配置区，占位即可
@@ -41,6 +47,17 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     connection: { panelUrl: "http://panel.local", tokenConfigured: false },
     // 事件流的合法占位；涉及事件消费的用例各自覆盖
     events: [],
+    ...overrides,
+  };
+}
+
+function runningModel(overrides: Partial<CardRunningModel> = {}): CardRunningModel {
+  return {
+    name: "qwen-small",
+    displayName: "Qwen Small",
+    startedAt: null,
+    ready: null,
+    isDefault: false,
     ...overrides,
   };
 }
@@ -357,5 +374,29 @@ describe("formatEventTime：事件时间展示", () => {
 
   it("两位数字直通，不再加工", () => {
     expect(formatEventTime(new Date(2026, 8, 3, 14, 37).getTime(), 0)).toBe("14:37");
+  });
+});
+
+describe("runningModelDisplayName：多模型运行列表每行的展示名（任务 6）", () => {
+  it("面板给了 displayName 时直接用", () => {
+    expect(runningModelDisplayName(runningModel({ name: "a", displayName: "模型 A" }))).toBe("模型 A");
+  });
+
+  it("displayName 为 null（面板没给，或配置已被删除但容器还在跑）时回退用 name", () => {
+    expect(runningModelDisplayName(runningModel({ name: "a", displayName: null }))).toBe("a");
+  });
+});
+
+describe("runningRowDotState：多模型运行列表每行的 ready 状态点（任务 6）", () => {
+  it("ready === true → done（已就绪）", () => {
+    expect(runningRowDotState(true)).toBe("done");
+  });
+
+  it("ready === false → ongoing（容器已起、仍在加载，带动效，对齐单模型 starting 阶段的视觉）", () => {
+    expect(runningRowDotState(false)).toBe("ongoing");
+  });
+
+  it("ready === null（不可知，老面板缺这个字段）→ warning，不冒充「已就绪」", () => {
+    expect(runningRowDotState(null)).toBe("warning");
   });
 });

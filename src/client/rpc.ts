@@ -18,11 +18,12 @@ type RemoteResult<T> =
   | { readonly ok: false; readonly error: RemoteFailure };
 
 /**
- * ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的五个方法一一对应。
+ * ctx.remote[RPC_NAMESPACE] 的最小形状——与 rpc-contract.ts 的六个方法一一对应。
  * start/stop/monitor 的末位可选 signal 对应描述符的 cancellation 声明：signal 不进
  * wire 参数，由传输层截走，一路送到 host 侧 gateway 的末位形参（见 rpc-contract.ts）。
  * monitor 的 since 同样可选（描述符带 acceptsUndefined）：首帧全量不带、之后带上
- * 浏览器自己记的水位走增量。
+ * 浏览器自己记的水位走增量。setDefaultModel 不带 signal——它是一次性 PUT 请求，
+ * 没有「取消在途」的必要（见 rpc-contract.ts 对该描述符的注释）。
  */
 export interface PanelRemoteNamespace {
   snapshot(): Promise<RemoteResult<CardSnapshot>>;
@@ -34,6 +35,7 @@ export interface PanelRemoteNamespace {
     since?: number,
     signal?: AbortSignal,
   ): Promise<RemoteResult<MonitorSnapshot>>;
+  setDefaultModel(model: string): Promise<RemoteResult<CardSnapshot>>;
 }
 
 /** 卡片真正调用的接口：拆完外壳、失败已经是 Error，调用方只需要 try/catch。 */
@@ -43,6 +45,7 @@ export interface PanelApi {
   stop(model: string, signal?: AbortSignal): Promise<CardSnapshot>;
   saveConnection(panelUrl: string, token: string): Promise<CardSnapshot>;
   monitor(range: MetricsRange, since?: number, signal?: AbortSignal): Promise<MonitorSnapshot>;
+  setDefaultModel(model: string): Promise<CardSnapshot>;
 }
 
 async function unwrap<T>(result: Promise<RemoteResult<T>>, label: string): Promise<T> {
@@ -64,5 +67,6 @@ export function createPanelApi(namespace: PanelRemoteNamespace): PanelApi {
     // since/signal 同理三位恒传：监控页首帧传 since=0（面板按「全量」应答），之后
     // 传自己记的水位；两位缺席都按 undefined 占位，保持调用形状稳定
     monitor: (range, since, signal) => unwrap(namespace.monitor(range, since, signal), "monitor"),
+    setDefaultModel: (model) => unwrap(namespace.setDefaultModel(model), "setDefaultModel"),
   };
 }
