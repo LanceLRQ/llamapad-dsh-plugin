@@ -186,6 +186,8 @@ peerDependencies，运行时统一用宿主那一份框架。六个兼容点：�
 见 `docs/manual-smoke.md`「双版本冒烟」。冒烟中顺带修掉 `sharedModelGate` 永远绑定第一个 client、
 改 token 后启停仍用旧 token 报 401 的既有 bug（现改用最近一次传入的 client）。
 
+**v0.2.0 已发布**（2026-09-24）：推送 `v*` tag 由 CI（`.github/workflows/release.yml`）跑全量门禁
+并创建 GitHub Release，流程见 `docs/packaging.md`「正式发布（CI）」。
+
 待办：
-- 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）
 - 卡片在模型加载未就绪期间显示「没有模型在运行」，待多模型面板真机冒烟时一并排查
