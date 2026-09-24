@@ -14,7 +14,8 @@
   "files": [
     "dist",
     "cordis.patch.yml",
-    "examples"
+    "examples",
+    "!examples/dev.yml"
   ],
   "dsh": {
     "bundle": {
