@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 重新打包脚本：插件内容变更后产出新版可安装 tgz。
-// 流程：工作区清洁检查 → 质量门禁（typecheck / 单测 / E2E）→ 版本递增 →
+// 流程：工作区清洁检查 → 质量门禁（typecheck / 单测 / E2E / 0.1.5 兼容矩阵）→ 版本递增 →
 // 构建 → pnpm pack → 打印制品 sha256 与安装/更新命令。
 // 用法：
 //   pnpm run release                    # patch 递增（默认）
@@ -45,10 +45,11 @@ if (!allowDirty) {
 }
 
 // 2. 质量门禁
-console.log('[release] 质量门禁：typecheck / 单测 / E2E')
+console.log('[release] 质量门禁：typecheck / 单测 / E2E / 0.1.5 兼容矩阵')
 run('pnpm', ['run', 'typecheck'])
 run('pnpm', ['test'])
 run('pnpm', ['run', 'test:e2e'])
+run('pnpm', ['run', 'test:compat'])
 
 // 3. 版本递增（patch | minor | major | 显式 x.y.z）
 function nextVersion(current, arg) {
