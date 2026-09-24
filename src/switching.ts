@@ -21,7 +21,11 @@ export type EnsureErrorCode =
   // 因此绝不能并进 PANEL_UNREACHABLE——那会把"稍等再试"说成"面板连不上"
   | "RUNTIME_BUSY"
   // 面板拒绝启动（422 中非文件缺失的成因，当前为思考强度取值不被模板接受）
-  | "START_REJECTED";
+  | "START_REJECTED"
+  // start 请求超时但面板仍在处理（同步拉镜像/建容器/10s 存活检测尚未返回）：请求已经
+  // 送达，不是面板不可达。只在 waitReady:false 时才会真正抛出到调用方——默认档
+  // （waitReady 缺省/true）视为"已发起"，继续走就绪轮询，见 gateOver 里 ensureOnce 的处理
+  | "START_PENDING";
 
 export class EnsureError extends Error {
   constructor(message: string, readonly code: EnsureErrorCode) { super(message); this.name = "EnsureError"; }
@@ -36,6 +40,12 @@ export interface EnsureOptions {
   /** auto-switch 档切换时可选：让服务端等待在途推理排空后再停旧起新 */
   drain?: boolean;
   drainTimeoutMs?: number;
+  /**
+   * 透传为 startModel 的 options.timeoutMs（start 请求本身的最长等待时间，不是就绪
+   * 轮询的 timeoutMs——两者是两个不同阶段的预算，见 panel-client.ts
+   * StartModelOptions.timeoutMs 与本文件 EnsureOptions.timeoutMs 的区别）。
+   */
+  startRequestTimeoutMs?: number;
 }
 
 export interface ModelGate {
@@ -94,6 +104,26 @@ function gateOver(currentClient: () => PanelClient): ModelGate {
   const inflight = new Map<string, Promise<void>>();
   let last: string | null = null;
 
+  /**
+   * 等就绪的轮询循环，抽成独立函数供两条路径复用：start 正常返回后的既有路径，
+   * 以及 start 超时但面板仍在处理（START_PENDING）时——两种情况下请求都已经送达，
+   * 剩下的事完全一样：反复探目标是不是已经就绪。
+   */
+  async function pollReady(client: PanelClient, model: string, options: EnsureOptions): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? 300_000;
+    const pollMs = options.pollIntervalMs ?? 2_000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (options.signal?.aborted) throw new EnsureError(`等待 ${model} 就绪时被取消`, "ABORTED");
+      if (await probeReady(client, model)) return;
+      if (Date.now() + pollMs > deadline) {
+        const others = await otherRunningModels(client, model);
+        throw new EnsureError(formatStartTimeoutMessage(model, timeoutMs, others), "START_TIMEOUT");
+      }
+      await sleep(pollMs, options.signal);
+    }
+  }
+
   async function ensureOnce(model: string, options: EnsureOptions): Promise<void> {
     const client = currentClient();
     const status = await client.runtimeStatus();
@@ -102,11 +132,12 @@ function gateOver(currentClient: () => PanelClient): ModelGate {
     // 最长 60s+），而不只是后面的就绪轮询——否则「取消」之后还得干等请求自己回来。
     // 与 drain 字段同住一个对象：两者都缺席时保持第二参数 undefined（向后兼容）。
     const hasDrainFields = options.drain !== undefined || options.drainTimeoutMs !== undefined;
-    const startOptions = hasDrainFields || options.signal !== undefined
+    const startOptions = hasDrainFields || options.signal !== undefined || options.startRequestTimeoutMs !== undefined
       ? {
           ...(options.drain !== undefined ? { drain: options.drain } : {}),
           ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
+          ...(options.startRequestTimeoutMs !== undefined ? { timeoutMs: options.startRequestTimeoutMs } : {}),
         }
       : undefined;
     try {
@@ -117,6 +148,17 @@ function gateOver(currentClient: () => PanelClient): ModelGate {
       // ABORTED，否则聊天路径会把「用户取消」当「面板挂了」处理。
       if (options.signal?.aborted) throw new EnsureError(`启动 ${model} 时被取消`, "ABORTED");
       const code = (error as { code?: string }).code;
+      if (code === "START_PENDING") {
+        // 请求已经送达面板（只是还没返回）——乐观启动（waitReady:false）不承诺
+        // "服务端已确认"，只承诺"请求已发出"，这份更贴切的错误直接透给调用方；
+        // 否则视为"已发起"，跟正常 start 成功一样继续走就绪轮询（轮询本身就是在
+        // 等这次 start 的结果，不需要额外做什么）。
+        if (options.waitReady === false) {
+          throw new EnsureError((error as Error).message, "START_PENDING");
+        }
+        last = model;
+        return pollReady(client, model, options);
+      }
       if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
         || code === "RUNTIME_BUSY" || code === "START_REJECTED") {
         throw new EnsureError((error as Error).message, code);
@@ -131,18 +173,7 @@ function gateOver(currentClient: () => PanelClient): ModelGate {
     // 同目标 ensure 会合流，0ms 预算会被聊天路径等其他等待者继承而立刻 START_TIMEOUT，
     // 本次调用也会错把别人预算下的超时当成自己的结果。
     if (options.waitReady === false) return;
-    const timeoutMs = options.timeoutMs ?? 300_000;
-    const pollMs = options.pollIntervalMs ?? 2_000;
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      if (options.signal?.aborted) throw new EnsureError(`等待 ${model} 就绪时被取消`, "ABORTED");
-      if (await probeReady(client, model)) return;
-      if (Date.now() + pollMs > deadline) {
-        const others = await otherRunningModels(client, model);
-        throw new EnsureError(formatStartTimeoutMessage(model, timeoutMs, others), "START_TIMEOUT");
-      }
-      await sleep(pollMs, options.signal);
-    }
+    return pollReady(client, model, options);
   }
 
   function sleep(ms: number, signal?: AbortSignal): Promise<void> {

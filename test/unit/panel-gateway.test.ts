@@ -86,6 +86,9 @@ describe("PanelGateway", () => {
         runningModels: [
           { name: "a", displayName: null, startedAt: null, ready: null, isDefault: true },
         ],
+        // 假 client 的 runtimeStatus 没有 starting 字段（老面板形状）：startingModels()
+        // 缺席容忍归一为空数组
+        starting: [],
         defaultModel: "a",
         openUrl: "http://panel:8080",
         panelError: null,
@@ -113,6 +116,41 @@ describe("PanelGateway", () => {
       ring.push({ id: 4, ts: 1725350600000, kind: "model.start", message: "启动 qwen3" });
       const next = await gateway.snapshot();
       expect(next.events).toHaveLength(3);
+    });
+
+    it("starting 投影：runtimeStatus 带 starting 字段时按 startingModels() 归一投影进快照", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => ({
+            running: null,
+            starting: [
+              { model: "c", displayName: "模型 C", action: "start", since: "2026-09-24T00:00:00.000Z", stage: "pulling" },
+            ],
+          }),
+        }),
+      });
+      const snapshot = await gateway.snapshot();
+      expect(snapshot.starting).toEqual([
+        { name: "c", displayName: "模型 C", since: "2026-09-24T00:00:00.000Z", stage: "pulling", action: "start" },
+      ]);
+    });
+
+    it("starting 缺席（老面板）：归一为空数组", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({ runtimeStatus: async () => ({ running: null }) }),
+      });
+      const snapshot = await gateway.snapshot();
+      expect(snapshot.starting).toEqual([]);
+    });
+
+    it("runtimeStatus 失败时 starting 兜底为空数组", async () => {
+      const { gateway } = makeGateway({
+        client: fakeClient({
+          runtimeStatus: async () => { throw new PanelError("llamapad 面板不可达: http://panel:8080", "PANEL_UNREACHABLE"); },
+        }),
+      });
+      const snapshot = await gateway.snapshot();
+      expect(snapshot.starting).toEqual([]);
     });
 
     it("无运行中模型、busy 为 null：running/inferring 均为 null，phase 为 idle，startedAt 为 null", async () => {
@@ -379,6 +417,36 @@ describe("PanelGateway", () => {
 
       expect(snapshot.panelError).toBeNull();
       expect(snapshot.models).toHaveLength(1); // 快照本体照常组装
+    });
+
+    it("面板仍在处理（EnsureError code START_PENDING）：返回不带 panelError 的快照，不当失败", async () => {
+      const ensure = vi.fn(async () => {
+        throw new EnsureError("启动请求已发出，面板仍在处理 a（已等待 300 秒），请稍后刷新状态", "START_PENDING");
+      });
+      const { gateway } = makeGateway({ gate: fakeGate({ ensure }) });
+
+      const snapshot = await gateway.start("a");
+
+      expect(snapshot.panelError).toBeNull();
+      expect(snapshot.models).toHaveLength(1); // 快照本体照常组装（未被这条"非故障"路径裁剪）
+    });
+
+    it("startRequestTimeoutMs 配置时原样透传给 gate.ensure", async () => {
+      const ensure = vi.fn(async () => {});
+      const { gateway } = makeGateway({ gate: fakeGate({ ensure }), startRequestTimeoutMs: 120000 });
+
+      await gateway.start("a");
+
+      expect(ensure).toHaveBeenCalledWith("a", { waitReady: false, startRequestTimeoutMs: 120000 });
+    });
+
+    it("不配置 startRequestTimeoutMs 时不传该字段", async () => {
+      const ensure = vi.fn(async () => {});
+      const { gateway } = makeGateway({ gate: fakeGate({ ensure }) });
+
+      await gateway.start("a");
+
+      expect(ensure).toHaveBeenCalledWith("a", { waitReady: false });
     });
 
     it("gate.ensure 抛错：不外抛，走 panelError，其余字段尽量填", async () => {
@@ -816,6 +884,7 @@ describe("PanelGateway", () => {
       startedAt: null,
       inferring: null,
       runningModels: [],
+      starting: [],
       defaultModel: null,
       openUrl: "http://panel:8080",
       panelError: null,
@@ -823,7 +892,7 @@ describe("PanelGateway", () => {
       events: [],
     };
 
-    it("完整快照（含多模型运行列表与默认模型）逐字段收窄通过，往返不丢字段", () => {
+    it("完整快照（含多模型运行列表、启动中列表与默认模型）逐字段收窄通过，往返不丢字段", () => {
       const snapshot = {
         ...baseSnapshot,
         running: "a",
@@ -834,6 +903,9 @@ describe("PanelGateway", () => {
           { name: "a", displayName: "模型 A", startedAt: "2026-09-21T00:00:00.000Z", ready: true, isDefault: true },
           { name: "b", displayName: null, startedAt: null, ready: null, isDefault: false },
         ],
+        starting: [
+          { name: "c", displayName: "模型 C", since: "2026-09-24T00:00:00.000Z", stage: "pulling" as const, action: "start" as const },
+        ],
         defaultModel: "a",
       };
       expect(resultCodec.parse(snapshot)).toEqual(snapshot);
@@ -842,6 +914,28 @@ describe("PanelGateway", () => {
     it("runningModels 缺席即拒绝（strict codec 不容忍新字段缺席，防止漏改一处就运行期 400）", () => {
       const { runningModels: _drop, ...withoutRunningModels } = baseSnapshot;
       expect(() => resultCodec.parse(withoutRunningModels)).toThrow(TypeError);
+    });
+
+    it("starting 缺席即拒绝（同 runningModels 的 strict 纪律）", () => {
+      const { starting: _drop, ...withoutStarting } = baseSnapshot;
+      expect(() => resultCodec.parse(withoutStarting)).toThrow(TypeError);
+    });
+
+    it("starting 不是数组即拒绝", () => {
+      expect(() => resultCodec.parse({ ...baseSnapshot, starting: "not-array" })).toThrow(TypeError);
+    });
+
+    it("starting 单项逐字段坏形状拒绝（name/displayName/since/stage/action）", () => {
+      const row = { name: "c", displayName: null, since: "2026-09-24T00:00:00.000Z", stage: "pulling", action: "start" };
+      for (const bad of [
+        { ...row, name: 1 },
+        { ...row, displayName: 1 },
+        { ...row, since: 1 },
+        { ...row, stage: "downloading" },
+        { ...row, action: "resume" },
+      ]) {
+        expect(() => resultCodec.parse({ ...baseSnapshot, starting: [bad] })).toThrow(TypeError);
+      }
     });
 
     it("defaultModel 缺席即拒绝，非 string/null 也拒绝", () => {

@@ -35,6 +35,7 @@ export interface Config {
   llamaBaseUrl?: string;
   chatBehavior: string;
   startTimeoutMs: number;
+  startRequestTimeoutMs: number;
   pollIntervalMs: number;
   drainOnSwitch: boolean;
   drainTimeoutMs: number;
@@ -66,6 +67,10 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
     + "auto-switch=保留旧版「选谁起谁」行为，start 自带停旧起新",
   ),
   startTimeoutMs: Schema.number().default(300000).description("切换后等待模型就绪的超时（毫秒，仅 auto-switch 档生效）"),
+  startRequestTimeoutMs: Schema.number().default(300000).description(
+    "启动请求等待面板返回的最长时间（毫秒）；面板首次拉取镜像可能要几分钟。只影响 start 请求本身，"
+    + "不改变 startTimeoutMs（就绪等待）的语义",
+  ),
   pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒，仅 auto-switch 档生效）"),
   drainOnSwitch: Schema.boolean().default(true).description(
     "切换/停止前是否让服务端排空在途推理：auto-switch 档的自动切换与设置卡片的启停按钮共用这个开关",
@@ -158,6 +163,7 @@ export function apply(ctx: Context, config: Config) {
     adapterOptions.drainOnSwitch = cfg.drainOnSwitch;
     setOptional(adapterOptions, "llamaBaseUrl", params.llamaBaseUrl);
     setOptional(adapterOptions, "startTimeoutMs", cfg.startTimeoutMs);
+    setOptional(adapterOptions, "startRequestTimeoutMs", cfg.startRequestTimeoutMs);
     setOptional(adapterOptions, "pollIntervalMs", cfg.pollIntervalMs);
     setOptional(adapterOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
     setOptional(adapterOptions, "defaultContextWindow", cfg.defaultContextWindow);
@@ -172,6 +178,7 @@ export function apply(ctx: Context, config: Config) {
     gatewayOptions.drainOnSwitch = cfg.drainOnSwitch;
     setOptional(gatewayOptions, "panelPublicUrl", cfg.panelPublicUrl);
     setOptional(gatewayOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
+    setOptional(gatewayOptions, "startRequestTimeoutMs", cfg.startRequestTimeoutMs);
   };
 
   // 先接 settings：bindSettings 在 0.1.5 上挂载时会同步调一次 setSource + onChange，

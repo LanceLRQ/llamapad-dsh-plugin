@@ -286,6 +286,67 @@ describe("createModelGate", () => {
       message: "等待 b 就绪超时（0ms）",
     });
   });
+
+  describe("startModel 抛 START_PENDING（面板仍在处理，start 请求本身超时）", () => {
+    it("waitReady 默认（true）：视为已发起，继续走就绪轮询直至就绪成功", async () => {
+      const client = fakeClient();
+      let statusCalls = 0;
+      (client as any).runtimeStatus = async () => {
+        statusCalls += 1;
+        // 第 1 次是 ensureOnce 前置检查（未在跑）；此后几次是就绪轮询——第 3 次起
+        // 反映"面板自己把模型跑起来了"，模拟 start 请求超时但服务端其实在推进
+        if (statusCalls < 3) return { running: null };
+        return { running: { model: "a", ready: true } };
+      };
+      (client as any).startModel = async () => {
+        throw new PanelLikeError("启动请求已发出，面板仍在处理 a（已等待 30 秒），请稍后刷新状态", "START_PENDING");
+      };
+      const gate = createModelGate(client);
+      await expect(gate.ensure("a", { pollIntervalMs: 5 })).resolves.toBeUndefined();
+      expect(gate.lastStarted()).toBe("a");
+    });
+
+    it("waitReady:false：直接把 EnsureError(code START_PENDING) 抛给调用方，不折成 PANEL_UNREACHABLE", async () => {
+      const client = fakeClient();
+      (client as any).startModel = async () => {
+        throw new PanelLikeError("启动请求已发出，面板仍在处理 a（已等待 30 秒），请稍后刷新状态", "START_PENDING");
+      };
+      const gate = createModelGate(client);
+      await expect(gate.ensure("a", { waitReady: false })).rejects.toMatchObject({
+        code: "START_PENDING",
+        message: expect.stringContaining("面板仍在处理"),
+      });
+    });
+
+    it("外部 signal 已 aborted 时优先判定为 ABORTED（既有优先级不因新增分支改变）", async () => {
+      const client = fakeClient();
+      const controller = new AbortController();
+      (client as any).startModel = async () => {
+        controller.abort();
+        throw new PanelLikeError("启动请求已发出，面板仍在处理 a", "START_PENDING");
+      };
+      const gate = createModelGate(client);
+      await expect(
+        gate.ensure("a", { signal: controller.signal, waitReady: false }),
+      ).rejects.toMatchObject({ code: "ABORTED" });
+    });
+  });
+
+  it("startRequestTimeoutMs 透传为 startModel options 的 timeoutMs", async () => {
+    const client = fakeClient();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a", { startRequestTimeoutMs: 120000 });
+    expect(startModel).toHaveBeenCalledWith("a", { timeoutMs: 120000 });
+  });
+
+  it("不传 startRequestTimeoutMs 时不带该字段（向后兼容）", async () => {
+    const client = fakeClient();
+    const startModel = vi.fn(async (name: string) => { client.starts.push(name); client.setRunning(name); });
+    (client as any).startModel = startModel;
+    await createModelGate(client).ensure("a");
+    expect(startModel).toHaveBeenCalledWith("a", undefined);
+  });
 });
 
 describe("formatStartTimeoutMessage", () => {

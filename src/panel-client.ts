@@ -84,6 +84,24 @@ export interface PanelRunningModel {
   isDefault?: boolean;
 }
 
+/**
+ * GET /api/v1/runtime/status 里「启动请求在途」的一项——start/restart 请求已发给
+ * 面板但尚未返回（面板同步做完校验→清旧容器→建容器（本地无镜像先拉取，可能几分钟）→
+ * 启动→10s 存活检测才返回，这期间插件的 start 请求可能先一步超时）。请求返回后该
+ * 模型转入 models（就绪与否看它自己的 ready 字段），容器存活检测那几秒可能同时
+ * 出现在 models 与 starting 里——两边不互斥，调用方各自按需读取。
+ * 面板新版（dev 分支）起才有这个字段；老面板缺席即「没有这类信息」，不代表「没有
+ * 模型在启动中」——见 startingModels() 的缺席容忍处理。
+ */
+export interface PanelStartingModel {
+  model: string;
+  displayName?: string;
+  action: "start" | "restart";
+  /** 请求发起时刻（ISO 8601） */
+  since: string;
+  stage: "preparing" | "pulling" | "creating";
+}
+
 export interface PanelRuntimeStatus {
   /**
    * 语义已变：面板解除「同一时刻只运行一个模型」的约束后，这个字段实际是
@@ -100,6 +118,16 @@ export interface PanelRuntimeStatus {
   defaultModel?: string | null;
   /** 仅 runtimeStatus({ busy: true }) 时返回；null 代表"不可知"，不代表"不忙" */
   busy?: { inferring: boolean; slotsRunning: number } | null;
+  /** start/restart 请求在途（尚未返回）的模型；老面板缺席，取值一律走 startingModels() */
+  starting?: PanelStartingModel[];
+}
+
+/**
+ * 启动中模型的归一出处，与 runningModels() 同一套「缺席容忍」纪律：老面板没有
+ * starting 字段时回落空数组，调用方永远只面对一种形状，不必到处判断新旧面板。
+ */
+export function startingModels(status: PanelRuntimeStatus): PanelStartingModel[] {
+  return status.starting ?? [];
 }
 
 /**
@@ -268,6 +296,14 @@ export interface StartModelOptions {
    * fetch——排空等待最长 60s+，没有它用户只能干等。不进请求体，纯属客户端行为。
    */
   signal?: AbortSignal;
+  /**
+   * 本次请求的最长等待时间（毫秒），不进请求体、纯属客户端行为。start 请求要同步
+   * 等面板做完校验→清旧容器→建容器（本地无镜像先拉取，可能几分钟）→启动→10s 存活
+   * 检测才返回，默认的 requestTimeoutMs（30s）/ 排空换算值对它来说常常太短。实际
+   * 生效的超时是 max(requestTimeoutMs, drain 换算值（若有）, timeoutMs（若有）)，
+   * 不覆盖 stopModel（stopModel 没有这个字段，行为不变）。
+   */
+  timeoutMs?: number;
 }
 
 /** POST .../stop 的可选排空参数，形状与 StartModelOptions 一致（服务端契约同构） */
@@ -557,6 +593,14 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
     init: RequestInit = {},
     timeoutOverrideMs?: number,
     externalSignal?: AbortSignal,
+    /**
+     * 超时命中时改用的错误（目前只有 startModel 传）：start 请求超时不代表面板不可达，
+     * 面板同步做完校验→清旧容器→建容器（可能几分钟拉镜像）→启动→10s 存活检测才返回，
+     * 客户端等不及是常态。仅当**自身 timeoutSignal 触发、且外部 signal 未 aborted**时
+     * 才换用这份文案——两者都满足才能确定"是我们自己等超了"而不是"用户取消"或
+     * "外部信号恰好同时 abort"，其余失败（包括外部取消）原样折成 PANEL_UNREACHABLE。
+     */
+    timeoutError?: { code: string; message: string },
   ): Promise<Response> {
     const timeoutSignal = AbortSignal.timeout(timeoutOverrideMs ?? timeoutMs);
     const signal = externalSignal !== undefined && typeof AbortSignal.any === "function"
@@ -573,6 +617,9 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
         signal,
       });
     } catch {
+      if (timeoutError !== undefined && timeoutSignal.aborted && externalSignal?.aborted !== true) {
+        throw new PanelError(timeoutError.message, timeoutError.code);
+      }
       throw new PanelError(`llamapad 面板不可达: ${base}`, "PANEL_UNREACHABLE");
     }
   }
@@ -682,12 +729,23 @@ export function createPanelClient(options: PanelClientOptions): PanelClient {
       return (await res.json()) as PanelRuntimeStatus;
     },
     async startModel(name, startOptions) {
-      const { body, timeoutOverride } = buildDrainRequest(startOptions, timeoutMs);
+      const { body, timeoutOverride: drainTimeoutOverride } = buildDrainRequest(startOptions, timeoutMs);
+      // 实际生效的超时取三者最大值：默认 requestTimeoutMs（drainTimeoutOverride 缺席时
+      // 已经是它）、排空换算值（若有）、调用方显式给的 timeoutMs（若有）——三者谁大听谁的，
+      // 而不是互相覆盖（见 StartModelOptions.timeoutMs 注释）。
+      const candidates = [drainTimeoutOverride, startOptions?.timeoutMs]
+        .filter((v): v is number => v !== undefined);
+      const timeoutOverride = candidates.length > 0 ? Math.max(...candidates) : undefined;
+      const effectiveTimeoutMs = timeoutOverride ?? timeoutMs;
       const res = await request(
         `/api/v1/models/${encodeURIComponent(name)}/start`,
         { method: "POST", ...(body !== undefined ? { body } : {}) },
         timeoutOverride,
         startOptions?.signal,
+        {
+          code: "START_PENDING",
+          message: `启动请求已发出，面板仍在处理 ${name}（已等待 ${Math.round(effectiveTimeoutMs / 1000)} 秒），请稍后刷新状态`,
+        },
       );
       if (res.ok) return;
       throw await startStopError(res, name, "启动");

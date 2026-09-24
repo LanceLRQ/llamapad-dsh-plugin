@@ -140,6 +140,24 @@ export interface CardRunningModel {
   isDefault: boolean;
 }
 
+/**
+ * 启动中模型的一行（面板 panel-client.ts 的 `startingModels(status)` 归一结果的投影）。
+ * 与 CardRunningModel 同理独立声明：wire 契约只认这一份形状，panel-client 的
+ * PanelStartingModel 将来加字段不会顺着泄漏进浏览器产物。
+ *
+ * displayName 统一用 null 表达「面板没给」，理由同 CardRunningModel.displayName——
+ * codec 是 strict 的，缺席字段会被拒收。
+ */
+export interface CardStartingModel {
+  /** 面板模型名，同 CardRunningModel.name 的对齐理由 */
+  name: string;
+  displayName: string | null;
+  /** 请求发起时刻（ISO 8601） */
+  since: string;
+  stage: "preparing" | "pulling" | "creating";
+  action: "start" | "restart";
+}
+
 /** 卡片一次轮询拿到的全部内容：列表 + 运行状态 + 打开面板用的地址。 */
 export interface CardSnapshot {
   models: CardModel[];
@@ -168,6 +186,16 @@ export interface CardSnapshot {
    * 多模型改造而改变单模型场景下的视觉（见 Card.tsx）。
    */
   runningModels: CardRunningModel[];
+  /**
+   * start/restart 请求在途（尚未返回）的模型，来自面板 runtime/status 的 starting
+   * 字段（见 panel-client.ts PanelStartingModel）。面板同步做完校验→清旧容器→建容器
+   * （本地无镜像先拉取，可能几分钟）→启动→10s 存活检测才返回，这段等待期插件的
+   * start 请求可能先一步超时——这个列表让卡片能画出「还在处理，不是连不上」，而不是
+   * 把 START_PENDING 误报成 panelError。请求返回后模型转入 runningModels（就绪看它
+   * 自己的 ready 字段），容器存活检测那几秒可能同时出现在两个列表里，不互斥。
+   * 老面板没有这个字段时恒为空数组（startingModels() 的缺席容忍）。
+   */
+  starting: CardStartingModel[];
   /**
    * 不带 model 字段的请求会打给谁；没有默认模型（面板没给且也没有任何模型在跑）为
    * null。与 running 的区别：这个字段原样反映面板配置的默认目标，即便该模型当前
@@ -322,6 +350,25 @@ function parseCardRunningModel(value: unknown, field: string): CardRunningModel 
   };
 }
 
+function parseCardStartingModel(value: unknown, field: string): CardStartingModel {
+  const row = asRecord(value, field);
+  const stage = row["stage"];
+  if (stage !== "preparing" && stage !== "pulling" && stage !== "creating") {
+    fail(`${field}.stage`, '"preparing" | "pulling" | "creating"');
+  }
+  const action = row["action"];
+  if (action !== "start" && action !== "restart") {
+    fail(`${field}.action`, '"start" | "restart"');
+  }
+  return {
+    name: asString(row["name"], `${field}.name`),
+    displayName: asNullableString(row["displayName"], `${field}.displayName`),
+    since: asString(row["since"], `${field}.since`),
+    stage,
+    action,
+  };
+}
+
 function parseCardEvent(value: unknown, field: string): CardEvent {
   const row = asRecord(value, field);
   return {
@@ -340,6 +387,8 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
   if (!Array.isArray(events)) fail("snapshot.events", "array");
   const runningModels = row["runningModels"];
   if (!Array.isArray(runningModels)) fail("snapshot.runningModels", "array");
+  const starting = row["starting"];
+  if (!Array.isArray(starting)) fail("snapshot.starting", "array");
   const inferring = row["inferring"];
   if (inferring !== null && typeof inferring !== "boolean") fail("snapshot.inferring", "boolean | null");
   const phase = row["phase"];
@@ -353,6 +402,7 @@ function parseCardSnapshot(value: unknown): CardSnapshot {
     startedAt: asNullableString(row["startedAt"], "snapshot.startedAt"),
     inferring,
     runningModels: runningModels.map((item, index) => parseCardRunningModel(item, `snapshot.runningModels[${index}]`)),
+    starting: starting.map((item, index) => parseCardStartingModel(item, `snapshot.starting[${index}]`)),
     defaultModel: asNullableString(row["defaultModel"], "snapshot.defaultModel"),
     openUrl: asString(row["openUrl"], "snapshot.openUrl"),
     panelError: asNullableString(row["panelError"], "snapshot.panelError"),

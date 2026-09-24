@@ -7,6 +7,7 @@ import {
   isRunning,
   PanelError,
   runningModels,
+  startingModels,
   type PanelEvent,
   type PanelRuntimeStatus,
 } from "../../src/panel-client";
@@ -179,6 +180,67 @@ describe("createPanelClient", () => {
     await client.startModel("a", { drain: true });
     expect(spy).toHaveBeenCalledWith(70000);
     spy.mockRestore();
+  });
+
+  it("startModel 的 timeoutMs 选项直接决定单请求超时（无 drain 字段时）", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const { fn } = fakeFetch([{ body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+    await client.startModel("a", { timeoutMs: 120000 });
+    expect(spy).toHaveBeenCalledWith(120000);
+    spy.mockRestore();
+  });
+
+  it("startModel 的 timeoutMs 与 drain 换算值都提供时取二者最大值", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const { fn } = fakeFetch([{ body: { id: "cid" } }, { body: { id: "cid" } }]);
+    const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 5000 });
+    // drain 换算值 70000 > timeoutMs 45000 → 取 70000
+    await client.startModel("a", { drain: true, drainTimeoutMs: 60000, timeoutMs: 45000 });
+    expect(spy).toHaveBeenLastCalledWith(70000);
+    // timeoutMs 300000 > 默认 requestTimeoutMs 5000 → 取 300000
+    await client.startModel("a", { timeoutMs: 300000 });
+    expect(spy).toHaveBeenLastCalledWith(300000);
+    spy.mockRestore();
+  });
+
+  describe("startModel 请求超时 → START_PENDING", () => {
+    /** 挂起型 fetch：只在收到的合并 signal abort 时才落牌——真实的 AbortSignal.timeout
+     *  会在到期后自动置位，借它模拟"面板还没返回、客户端自己先等超了"。 */
+    function hangingFetch() {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fn = vi.fn((url: any, init?: any) => {
+        calls.push({ url: String(url), init });
+        return new Promise<Response>((_, reject) => {
+          init.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      });
+      return { fn, calls };
+    }
+
+    it("自身超时触发（无外部 signal）→ PanelError(code: START_PENDING)，文案含模型名与等待秒数", async () => {
+      const { fn } = hangingFetch();
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 20 });
+      await expect(client.startModel("qwen3")).rejects.toMatchObject({ code: "START_PENDING" });
+      await expect(client.startModel("qwen3")).rejects.toThrow(/qwen3/);
+      await expect(client.startModel("qwen3")).rejects.toThrow(/秒/);
+    });
+
+    it("外部 signal 主动 abort（非自身超时）→ 仍是 PANEL_UNREACHABLE，不误判成 START_PENDING", async () => {
+      const controller = new AbortController();
+      const { fn } = hangingFetch();
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 20_000 });
+      const pending = client.startModel("qwen3", { signal: controller.signal });
+      pending.catch(() => {});
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ code: "PANEL_UNREACHABLE" });
+    });
+
+    it("其他请求（stopModel）超时不受影响，仍是 PANEL_UNREACHABLE", async () => {
+      const { fn } = hangingFetch();
+      const client = createPanelClient({ ...base, fetch: fn as any, requestTimeoutMs: 20 });
+      await expect(client.stopModel("qwen3")).rejects.toMatchObject({ code: "PANEL_UNREACHABLE" });
+    });
   });
 
   it("getModel：404→null，200→行", async () => {
@@ -821,6 +883,17 @@ describe("归一函数：runningModels / findRunning / isRunning / defaultModelO
     expect(defaultModelOf({ running: { model: "a" }, defaultModel: null })).toBeNull();
     expect(defaultModelOf({ running: { model: "a" } })).toBe("a");
     expect(defaultModelOf({ running: null })).toBeNull();
+  });
+
+  it("startingModels：缺席（老面板）归一为空数组", () => {
+    expect(startingModels({ running: null })).toEqual([]);
+  });
+
+  it("startingModels：在场时原样透传", () => {
+    const starting = [
+      { model: "a", displayName: "模型 A", action: "start" as const, since: "2026-09-24T00:00:00.000Z", stage: "pulling" as const },
+    ];
+    expect(startingModels({ running: null, starting })).toEqual(starting);
   });
 });
 

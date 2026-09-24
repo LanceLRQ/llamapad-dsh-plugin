@@ -467,6 +467,63 @@ describe("llamapad_start_model", () => {
     );
   });
 
+  it("waitReady:false 且 start 请求超时（EnsureError START_PENDING）→ 不抛错，返回 waitedReady:false", async () => {
+    const client = fakeClient({
+      startModel: async () => {
+        throw new PanelError("启动请求已发出，面板仍在处理 a（已等待 300 秒），请稍后刷新状态", "START_PENDING");
+      },
+    });
+    const gate = createModelGate(client);
+    const tool = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000 });
+    const value = await tool.execute({ model: "a", waitReady: false }, fakeExec());
+    expect(value).toEqual({ started: true, model: "a", waitedReady: false });
+  });
+
+  it("waitReady 默认（true）时 start 请求超时（START_PENDING）：视为已发起，继续轮询至就绪，不当失败", async () => {
+    let statusCalls = 0;
+    const client: PanelClient = {
+      baseUrl: "http://panel",
+      listModels: async () => [],
+      getModel: async () => null,
+      runtimeStatus: async () => {
+        statusCalls += 1;
+        // 第 1 次是 ensureOnce 前置检查；此后模拟"面板其实已经在跑起来了，只是这次
+        // start 请求本身先一步超时"——轮询能看到它
+        return statusCalls < 2 ? { running: null } : { running: { model: "a", ready: true } };
+      },
+      startModel: async () => { throw new PanelError("面板仍在处理 a", "START_PENDING"); },
+      stopModel: async () => ({ ok: true }),
+      setDefaultModel: async () => {},
+      llamaHealth: async () => true,
+      getEvents: async () => [],
+    } as unknown as PanelClient;
+    const gate = createModelGate(client);
+    const tool = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 5 });
+    const value = await tool.execute({ model: "a" }, fakeExec());
+    expect(value).toEqual({ started: true, model: "a", waitedReady: true });
+  });
+
+  it("config.startRequestTimeoutMs 配置时透传给 gate.ensure", async () => {
+    const client = fakeClient();
+    const gate = createModelGate(client);
+    const ensureSpy = vi.spyOn(gate, "ensure");
+    const tool = buildStartModelTool(
+      client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000, startRequestTimeoutMs: 120000 },
+    );
+    await tool.execute({ model: "a" }, fakeExec());
+    expect(ensureSpy).toHaveBeenCalledWith("a", expect.objectContaining({ startRequestTimeoutMs: 120000 }));
+  });
+
+  it("config 不带 startRequestTimeoutMs 时不透传该字段", async () => {
+    const client = fakeClient();
+    const gate = createModelGate(client);
+    const ensureSpy = vi.spyOn(gate, "ensure");
+    const tool = buildStartModelTool(client, gate, { startTimeoutMs: 300000, pollIntervalMs: 2000 });
+    await tool.execute({ model: "a" }, fakeExec());
+    const options = ensureSpy.mock.calls[0]![1] as Record<string, unknown>;
+    expect("startRequestTimeoutMs" in options).toBe(false);
+  });
+
   it("模型不存在 → 照抛，不吞错", async () => {
     const client = fakeClient({
       startModel: async () => { throw new PanelError("模型不存在: a", "MODEL_NOT_FOUND", 404); },
@@ -707,6 +764,10 @@ const toolsValid = {
 describe("B 形态 apply：toolApproval 配置", () => {
   it("Config 默认 toolApproval=allow", () => {
     expect((Config(toolsValid) as any).toolApproval).toBe("allow");
+  });
+
+  it("Config 默认 startRequestTimeoutMs=300000", () => {
+    expect((Config(toolsValid) as any).startRequestTimeoutMs).toBe(300000);
   });
 
   it("toolApproval 非法值 → apply 抛错（编程/配置错误尽早暴露）", () => {

@@ -110,6 +110,7 @@ describe("插件入口", () => {
     expect(parsed.mode).toBe("proxy");
     expect(parsed.chatBehavior).toBe("strict");
     expect(parsed.startTimeoutMs).toBe(300000);
+    expect(parsed.startRequestTimeoutMs).toBe(300000);
     expect(parsed.pollIntervalMs).toBe(2000);
     expect(parsed.drainOnSwitch).toBe(true);
     expect(parsed.drainTimeoutMs).toBe(60000);
@@ -185,6 +186,13 @@ describe("apply：未配置时的降级", () => {
     const ctx = fakeCtx({ settings: false });
     apply(ctx, Config(valid) as any);
     expect(ctx.llm.registerAdapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("startRequestTimeoutMs 接线到 adapterOptions（syncConnection 同步的非连接类字段）", () => {
+    const ctx = fakeCtx({ settings: false });
+    apply(ctx, Config({ ...valid, startRequestTimeoutMs: 120000 }) as any);
+    const adapter = ctx.llm.registerAdapter.mock.calls[0]![1];
+    expect((adapter as any).options.startRequestTimeoutMs).toBe(120000);
   });
 });
 

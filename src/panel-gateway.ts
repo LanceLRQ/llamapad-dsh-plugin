@@ -13,18 +13,20 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardRunningModel, type CardSnapshot, type MonitorSnapshot, type RuntimePhase } from "./rpc-contract";
+import { RPC_NAMESPACE, toCardEvent, type CardModel, type CardRunningModel, type CardSnapshot, type CardStartingModel, type MonitorSnapshot, type RuntimePhase } from "./rpc-contract";
 import {
   defaultModelOf,
   PanelError,
   runningModels,
+  startingModels,
   type MetricsRange,
   type PanelClient,
   type PanelModelView,
   type PanelEvent,
   type PanelRunningModel,
+  type PanelStartingModel,
 } from "./panel-client";
-import type { ModelGate } from "./switching";
+import { EnsureError, type ModelGate } from "./switching";
 
 /**
  * ⚠️ 这个对象会被 index.ts 在配置变更时**原地改写**（面板地址/token 改完即时生效，
@@ -42,6 +44,11 @@ export interface PanelGatewayOptions {
   /** 手动启停按钮沿用与 auto-switch 档相同的排空偏好（见 index.ts 的 Config.drainOnSwitch）。 */
   drainOnSwitch?: boolean;
   drainTimeoutMs?: number;
+  /**
+   * start 请求本身（POST .../start）的最长等待时间（毫秒），透传为
+   * EnsureOptions.startRequestTimeoutMs。见 index.ts 的 Config.startRequestTimeoutMs。
+   */
+  startRequestTimeoutMs?: number;
   /** 当前 token，只用来判定 CardSnapshot.connection.tokenConfigured——绝不下发到浏览器。 */
   token: string;
   /**
@@ -111,12 +118,20 @@ export class PanelGateway extends TypertRemoteService {
         waitReady: false,
         ...this.drainOptions(),
         ...(signal !== undefined ? { signal } : {}),
+        ...(this.options.startRequestTimeoutMs !== undefined
+          ? { startRequestTimeoutMs: this.options.startRequestTimeoutMs } : {}),
       });
     } catch (error) {
       // 用户取消不是故障：不塞 panelError（那会画红色横幅），只回一份最新快照，
       // 让卡片安静地回到当前状态。判定依据是 signal 自身而非错误类型——abort 在
       // panel-client 里已被折成 PANEL_UNREACHABLE，靠错误分不出「取消」和「真挂」。
       if (signal?.aborted === true) return this.buildSnapshot();
+      // 面板仍在处理（同步拉镜像/建容器/10s 存活检测尚未返回），不是失败：请求确实
+      // 已经送达面板，这与「取消」同理不塞 panelError（不画红色横幅）——快照本身的
+      // starting 投影足以让卡片画出「还在处理」，不需要额外的错误横幅重复这件事。
+      if (error instanceof EnsureError && error.code === "START_PENDING") {
+        return this.buildSnapshot();
+      }
       return { ...(await this.buildSnapshot()), panelError: describePanelError(error) };
     }
     return this.buildSnapshot();
@@ -233,6 +248,9 @@ export class PanelGateway extends TypertRemoteService {
     // status 为 null（runtimeStatus 探测失败）时归一为空数组，与既有「探测失败不外抛，
     // 尽量填」的降级路径一致。
     const runningModelsList = status !== null ? runningModels(status).map(toCardRunningModel) : [];
+    // 同款归一：status 为 null（runtimeStatus 探测失败）时归一为空数组，理由与
+    // runningModelsList 一致——探测失败不外抛，尽量把其余字段填成合法值
+    const startingList = status !== null ? startingModels(status).map(toCardStartingModel) : [];
     const defaultModel = status !== null ? defaultModelOf(status) : null;
     // running/startedAt 是「默认模型那一项」（不是 defaultModel 本身）：默认模型配了
     // 但没在跑时这里落 null，defaultModel 字段仍原样报告配置的目标——两者语义不同，
@@ -257,6 +275,7 @@ export class PanelGateway extends TypertRemoteService {
       startedAt,
       inferring,
       runningModels: runningModelsList,
+      starting: startingList,
       defaultModel,
       openUrl: this.options.panelPublicUrl || this.options.panelUrl,
       panelError,
@@ -327,6 +346,18 @@ function toCardRunningModel(model: PanelRunningModel): CardRunningModel {
     startedAt: model.startedAt ?? null,
     ready: model.ready ?? null,
     isDefault: model.isDefault === true,
+  };
+}
+
+/** PanelStartingModel → CardStartingModel 的投影，理由同 toCardRunningModel：
+ *  displayName 缺席归一成 null（wire 契约要求显式 null），其余字段原样透传。 */
+function toCardStartingModel(model: PanelStartingModel): CardStartingModel {
+  return {
+    name: model.model,
+    displayName: model.displayName ?? null,
+    since: model.since,
+    stage: model.stage,
+    action: model.action,
   };
 }
 

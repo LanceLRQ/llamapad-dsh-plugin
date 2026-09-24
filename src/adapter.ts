@@ -25,6 +25,12 @@ export interface LlamapadAdapterOptions {
   chatBehavior?: ChatBehavior;
   startTimeoutMs?: number;
   pollIntervalMs?: number;
+  /**
+   * start 请求本身（POST .../start）的最长等待时间（毫秒），不是就绪轮询的
+   * startTimeoutMs——面板首次拉镜像可能要几分钟，默认的 30s 单请求超时常常不够。
+   * 透传为 EnsureOptions.startRequestTimeoutMs。
+   */
+  startRequestTimeoutMs?: number;
   /** auto-switch 档触发 start 时是否让服务端排空在途推理，默认 true */
   drainOnSwitch?: boolean;
   /** 排空等待的最长时间（毫秒），默认 60000，仅 drainOnSwitch=true 时生效 */
@@ -159,6 +165,8 @@ export class LlamapadAdapter extends LlmAdapter {
           ...(options.signal ? { signal: options.signal } : {}),
           ...(this.options.startTimeoutMs !== undefined ? { timeoutMs: this.options.startTimeoutMs } : {}),
           ...(this.options.pollIntervalMs !== undefined ? { pollIntervalMs: this.options.pollIntervalMs } : {}),
+          ...(this.options.startRequestTimeoutMs !== undefined
+            ? { startRequestTimeoutMs: this.options.startRequestTimeoutMs } : {}),
           ...(drainOnSwitch
             ? { drain: true, drainTimeoutMs: this.options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS }
             : {}),
@@ -210,7 +218,7 @@ function mapEnsureError(error: unknown, signalAborted: boolean): Error {
   if (code === "MODEL_NOT_FOUND" || code === "MODEL_FILES_MISSING" || code === "AUTH"
     || code === "PANEL_UNREACHABLE" || code === "START_TIMEOUT" || code === "ABORTED"
     || code === "MODEL_NOT_RUNNING" || code === "MODEL_NOT_READY"
-    || code === "RUNTIME_BUSY" || code === "START_REJECTED") {
+    || code === "RUNTIME_BUSY" || code === "START_REJECTED" || code === "START_PENDING") {
     return new LlmError((error as Error).message, code);
   }
   return error instanceof Error ? error : new Error(String(error));

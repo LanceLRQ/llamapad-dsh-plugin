@@ -15,13 +15,14 @@ import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { createPanelClient, defaultModelOf, isRunning, PanelError, runningModels, type PanelClient } from "./panel-client";
-import { sharedModelGate, type ModelGate } from "./switching";
+import { EnsureError, sharedModelGate, type ModelGate } from "./switching";
 
 export interface Config {
   panelUrl: string;
   token: string;
   requestTimeoutMs: number;
   startTimeoutMs: number;
+  startRequestTimeoutMs: number;
   pollIntervalMs: number;
   toolApproval: string;
 }
@@ -35,6 +36,10 @@ export const Config: Schema<Partial<Config>, Config> = Schema.object({
   requestTimeoutMs: Schema.number().default(30000).description("面板控制面单请求超时（毫秒）"),
   startTimeoutMs: Schema.number().default(300000).description(
     "llamapad_start_model 等待模型就绪的超时（毫秒）默认值；工具调用参数 timeoutMs 可逐次覆盖",
+  ),
+  startRequestTimeoutMs: Schema.number().default(300000).description(
+    "启动请求等待面板返回的最长时间（毫秒）；面板首次拉取镜像可能要几分钟。只影响 start 请求本身，" +
+    "不改变 startTimeoutMs（就绪等待）的语义",
   ),
   pollIntervalMs: Schema.number().default(2000).description("就绪探测轮询间隔（毫秒）"),
   toolApproval: Schema.string().default("allow").description(
@@ -539,7 +544,7 @@ export function buildEventsTool(client: PanelClient): ToolDefinition {
 export function buildStartModelTool(
   client: PanelClient,
   gate: ModelGate,
-  config: { startTimeoutMs: number; pollIntervalMs: number },
+  config: { startTimeoutMs: number; pollIntervalMs: number; startRequestTimeoutMs?: number },
 ): ToolDefinition {
   return defineTool({
     name: "llamapad_start_model",
@@ -582,13 +587,26 @@ export function buildStartModelTool(
     async execute(args, exec) {
       const waitReady = args.waitReady ?? true;
       const drain = args.drain ?? true;
-      await gate.ensure(args.model, {
-        signal: exec.signal,
-        waitReady,
-        timeoutMs: args.timeoutMs ?? config.startTimeoutMs,
-        pollIntervalMs: config.pollIntervalMs,
-        ...(drain ? { drain: true } : {}),
-      });
+      try {
+        await gate.ensure(args.model, {
+          signal: exec.signal,
+          waitReady,
+          timeoutMs: args.timeoutMs ?? config.startTimeoutMs,
+          pollIntervalMs: config.pollIntervalMs,
+          ...(config.startRequestTimeoutMs !== undefined
+            ? { startRequestTimeoutMs: config.startRequestTimeoutMs } : {}),
+          ...(drain ? { drain: true } : {}),
+        });
+      } catch (error) {
+        // 乐观启动（waitReady:false）下 start 请求本身超时（面板仍在处理，见
+        // switching.ts 的 START_PENDING）不是失败——请求确实已经发出，与「服务端已
+        // 确认」这件事无关，本就不承诺过。渲染文案已是「未等待就绪，可能仍在加载」，
+        // 正常返回即可，不必让调用方把这当一次工具失败
+        if (waitReady === false && error instanceof EnsureError && error.code === "START_PENDING") {
+          return { started: true, model: args.model, waitedReady: false };
+        }
+        throw error;
+      }
       // 乐观启动时补探一次：waitedReady 如实反映健康状态，而不是硬编码成 false
       // （llamaHealth 自吞异常返回 false，探不到即按未就绪算）
       const waitedReady = waitReady ? true : await client.llamaHealth();

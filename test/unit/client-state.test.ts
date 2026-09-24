@@ -39,6 +39,8 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     // 任务 6 新增的多模型运行列表 + 默认模型字段：本文件测的是既有 buildCardView 等
     // 纯逻辑（不涉及这两个新字段的推导，那是 panel-gateway.test.ts 的范围），占位即可。
     runningModels: [],
+    // 启动中列表的合法占位，理由同 runningModels（本文件不测它的推导）
+    starting: [],
     defaultModel: null,
     openUrl: "http://panel.local",
     panelError: null,

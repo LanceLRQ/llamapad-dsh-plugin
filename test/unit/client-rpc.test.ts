@@ -31,6 +31,9 @@ function fakeSnapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     // 任务 6 新增字段的合法占位：本文件不测多模型运行列表的推导（那是
     // panel-gateway.test.ts / client-state.test.ts 的范围），空数组 + null 即可。
     runningModels: [],
+    // 启动中列表同理：合法占位，本文件不测 START_PENDING 的投影推导
+    // （那是 panel-gateway.test.ts 的范围）。
+    starting: [],
     defaultModel: null,
     openUrl: "http://panel.local",
     panelError: null,
