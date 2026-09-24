@@ -4,11 +4,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Button,
-  IconCloseOutline16,
-  IconWarningOutline16,
   Pill,
   StateDot,
 } from "@deepseek-ai/dsh-client-ui-primitives";
+import { IconClose, IconWarning } from "./icons";
 import { Sparkline } from "./Sparkline";
 import type { PanelApi } from "./rpc";
 // type-only：MonitorSnapshot/RuntimePhase 锚定 wire 契约（running/phase 的形状），
@@ -215,7 +214,7 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
             </Pill>
           ))}
         </div>
-        <Button type="button" variant="ghost" size="sm" icon={<IconCloseOutline16 />} onClick={close}>
+        <Button type="button" variant="ghost" size="sm" icon={<IconClose size={16} />} onClick={close}>
           {t("monitorClose")}
         </Button>
       </div>
@@ -238,14 +237,14 @@ export function MonitorPage({ api, t, close }: MonitorPageProps) {
 
       {panelError !== null ? (
         <div className="llamapad-monitor__banner" role="alert">
-          <IconWarningOutline16 />
+          <IconWarning size={16} />
           <span>{panelError}</span>
         </div>
       ) : null}
 
       {loadError !== null ? (
         <div className="llamapad-monitor__banner" role="alert">
-          <IconWarningOutline16 />
+          <IconWarning size={16} />
           <span>{t("monitorRefreshFailed")}</span>
         </div>
       ) : null}

@@ -4,17 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Button,
-  IconCheckOutline16,
-  IconChevronDownOutline14,
-  IconLinkOutline16,
-  IconPlayOutline16,
-  IconStopFill16,
-  IconWarningOutline16,
   Input,
   Pill,
   StateDot,
   Toast,
 } from "@deepseek-ai/dsh-client-ui-primitives";
+import { IconCheck, IconChevronDown, IconLink, IconPlay, IconStop, IconWarning } from "./icons";
 import type { CardEvent, CardSnapshot } from "../rpc-contract";
 import type { PanelApi } from "./rpc";
 import {
@@ -53,6 +48,13 @@ export type Translate = (key: LocaleKey, params?: Record<string, unknown>) => st
 export interface CardProps {
   readonly api: PanelApi;
   readonly t: Translate;
+  /**
+   * `plugins.bundle.config`/`plugins.row.config`（0.1.7）的 owner props 之一：
+   * `"summary"` 是列表/行页顶部的一句话简介，`"page"` 与未传（0.1.5 的
+   * settings.plugin.item 不带这个 prop）都是现有的完整卡片。summary 态不启动
+   * 轮询——它只在页面切换到详情前露出一瞬，没有必要打面板。
+   */
+  readonly view?: "summary" | "page";
 }
 
 /**
@@ -77,7 +79,8 @@ function CardHeader({ t, open, onToggle }: { t: Translate; open: boolean; onTogg
         <span className="llamapad-card__title">{title}</span>
         <span className="llamapad-card__subtitle">{t("subtitle")}</span>
       </span>
-      <IconChevronDownOutline14
+      <IconChevronDown
+        size={14}
         className={`llamapad-card__chevron${open ? " llamapad-card__chevronOpen" : ""}`}
       />
     </button>
@@ -92,7 +95,7 @@ function OpenPanelRow({ t, openUrl }: { t: Translate; openUrl: string }) {
         type="button"
         variant="outline"
         size="sm"
-        icon={<IconLinkOutline16 />}
+        icon={<IconLink size={16} />}
         disabled={openUrl.length === 0}
         onClick={() => window.open(openUrl, "_blank", "noopener,noreferrer")}
       >
@@ -102,7 +105,7 @@ function OpenPanelRow({ t, openUrl }: { t: Translate; openUrl: string }) {
   );
 }
 
-export function Card({ api, t }: CardProps) {
+export function Card({ api, t, view: ownerView }: CardProps) {
   // 快照与「本轮刷新失败」分开存：一次轮询失败不该把上一次拿到的模型列表和
   // openUrl 一起抹掉——那样用户既看不到列表，连「用浏览器打开面板」这条退路
   // 也一并消失，恰好是最需要退路的时候。有旧快照就继续画，只在顶部补一条提示。
@@ -186,7 +189,7 @@ export function Card({ api, t }: CardProps) {
   // 在途动作的取消控制器：runAction 里创建、动作收尾时清空（见 runAction 注释）
   const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
-    if (!open) return;            // 折起来就不打面板了
+    if (!open || ownerView === "summary") return;   // 折起来、或只画一句话简介时都不打面板
     let cancelled = false;
     const load = async () => {
       try {
@@ -205,7 +208,7 @@ export function Card({ api, t }: CardProps) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [isStarting, open]);
+  }, [isStarting, open, ownerView]);
 
   // 秒表：只在 phase===starting 且展开期间走动，驱动「已加载 N 秒」的文案；一旦跨出
   // 这个阶段或被折叠就清掉 interval，不让它常驻在背景空转。
@@ -258,6 +261,13 @@ export function Card({ api, t }: CardProps) {
       });
   };
 
+  // dsh 0.1.7 的插件管理页在某些位置只要一句话简介（view:'summary'，见
+  // docs/research/2026-09-24-dsh-015-017-settings.md 第 4 节），不需要走下面的
+  // 快照/轮询/操作逻辑。放在全部 hooks 之后提前返回，不破坏 hooks 调用顺序。
+  if (ownerView === "summary") {
+    return <span>{t("cardSummary")}</span>;
+  }
+
   if (snapshot === null) {
     // 一次都没拿到过快照：连 openUrl 都不知道，画不出可用的「用浏览器打开」按钮
     // （OpenPanelRow 会因为 openUrl 是空串自动把它禁掉），但外框、标题行照样露出，
@@ -272,7 +282,7 @@ export function Card({ api, t }: CardProps) {
               <p className="llamapad-card__hint">{t("loading")}</p>
             ) : (
               <div className="llamapad-card__banner" role="alert">
-                <IconWarningOutline16 />
+                <IconWarning size={16} />
                 <span>{t("panelUnavailable")}</span>
               </div>
             )}
@@ -296,14 +306,14 @@ export function Card({ api, t }: CardProps) {
           <OpenPanelRow t={t} openUrl={snapshot.openUrl} />
           {snapshot.panelError !== null ? (
             <div className="llamapad-card__banner" role="alert">
-              <IconWarningOutline16 />
+              <IconWarning size={16} />
               <span>{snapshot.panelError}</span>
             </div>
           ) : null}
 
           {loadError !== null ? (
             <div className="llamapad-card__banner" role="alert">
-              <IconWarningOutline16 />
+              <IconWarning size={16} />
               <span>{t("refreshFailed")}</span>
             </div>
           ) : null}
@@ -400,7 +410,7 @@ export function Card({ api, t }: CardProps) {
                   type="button"
                   variant={action.kind === "stop" ? "outline" : "primary"}
                   size="sm"
-                  icon={action.kind === "stop" ? <IconStopFill16 /> : <IconPlayOutline16 />}
+                  icon={action.kind === "stop" ? <IconStop size={16} /> : <IconPlay size={16} />}
                   disabled={action.disabled}
                   onClick={() =>
                     // 在途行的按钮承担「取消等待」：只 abort 在途请求，不重发动作
@@ -539,8 +549,8 @@ function eventToneModifier(tone: EventTone): string {
  */
 function toastIcon(kind: string): ReactNode {
   const tone = describeEventTone(kind);
-  if (tone === "error") return <IconWarningOutline16 />;
-  if (tone === "success") return <IconCheckOutline16 />;
+  if (tone === "error") return <IconWarning size={16} />;
+  if (tone === "success") return <IconCheck size={16} />;
   return undefined;
 }
 

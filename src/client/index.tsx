@@ -2,13 +2,18 @@
 // settings.plugin.item slot（按 SETTINGS_NAMESPACE 这个 key 派发，见 rpc-contract.ts），
 // 并把监控页注册进 settings.section slot（整页 + 左侧导航条目，宿主 shell 自动渲染）。
 //
+// dsh 0.1.5 的「设置 → 插件」页签走 settings.plugin.item；0.1.7 删掉了这个插槽，改由
+// 侧栏「插件」页的 plugins.bundle.config 承载（key 是 npm 包名 RPC_PACKAGE，owner props
+// 是 { view: "summary" | "page", form? }，Card 组件按 view 分支见 Card.tsx）。
+// slots.inject 对宿主未声明的插槽只是挂起等待、不会报错，所以两个都注册即可。
+//
 // ctx 保持 any：dsh 动态挂载的 remote 命名空间在本仓库没有真实的生成类型可用
 // （生成该类型的包不在本插件依赖范围内），勉强手写 declare module 去凑合 SlotMap /
 // TypertRemoteNamespaceMap 的合并声明既拿不到真正的类型安全，还要负担生成式类型的
 // 精确匹配（尤其 slots.register 那组高度依赖泛型推导的重载），性价比很低。真正需要
 // 类型安全的地方——RPC 返回值、卡片状态推导——已经在 rpc.ts / state.ts 里用具体类型
 // 兜住了，边界处这一层薄薄的 any 是唯一现实的选择。
-import { RPC_CONTRIBUTION, RPC_NAMESPACE, SETTINGS_NAMESPACE } from "../rpc-contract";
+import { RPC_CONTRIBUTION, RPC_NAMESPACE, RPC_PACKAGE, SETTINGS_NAMESPACE } from "../rpc-contract";
 import { Card } from "./Card";
 import { MonitorPage } from "./MonitorPage";
 import { createPanelApi, type PanelRemoteNamespace } from "./rpc";
@@ -47,6 +52,19 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
           Card,
         ),
       );
+      // 0.1.7 的等价挂载点：侧栏「插件」页的 bundle 详情，key 是包名而非 settings
+      // 命名空间。同一个 Card 组件、同样的 inject，唯一不同是宿主会传 view/form。
+      const disposeBundleConfigSlot = inner.slots.inject("plugins.bundle.config", () =>
+        inner.slots.register(
+          {
+            name: "plugins.bundle.config",
+            key: RPC_PACKAGE,
+            locale: LOCALE_NS,
+            inject: () => ({ api }),
+          },
+          Card,
+        ),
+      );
       // 整页监控：一个 list 条目就是一页设置页，导航条目由宿主 shell 按 id/order/
       // label 自动渲染，注册即出现，无需其他接线。order 60 刻意排在官方设置页
       // （general/appearance 等惯例低值段）之后——第三方页缀在官方页后面，别插队。
@@ -69,6 +87,7 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
       // 形状），两个 slot 各自的清理收拢在这里
       return () => {
         disposeCardSlot();
+        disposeBundleConfigSlot();
         disposeMonitorSlot();
       };
     },

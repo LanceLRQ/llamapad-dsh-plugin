@@ -8,6 +8,9 @@ export type LocaleKey = keyof typeof zh;
 export const zh = {
   title: "llamapad 模型面板",
   subtitle: "本地 llama.cpp 模型的启停与状态。",
+  // plugins.bundle.config / plugins.row.config（dsh 0.1.7）的 view:"summary" 态用，
+  // 只是一句话简介，见 Card.tsx 的 view prop
+  cardSummary: "连接 llamapad 面板，查看和启停本地模型",
   expand: "展开",
   collapse: "收起",
   openPanel: "在浏览器中打开面板",
@@ -95,6 +98,9 @@ export const zh = {
 export const en = {
   title: "llamapad Model Panel",
   subtitle: "Start, stop and watch local llama.cpp models.",
+  // Used for plugins.bundle.config / plugins.row.config (dsh 0.1.7) view:"summary";
+  // a one-line blurb, see Card.tsx's view prop
+  cardSummary: "Connect to the llamapad panel to view, start, and stop local models",
   expand: "Expand",
   collapse: "Collapse",
   openPanel: "Open panel in browser",
