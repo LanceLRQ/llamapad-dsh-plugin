@@ -1,7 +1,7 @@
 // 卡片的纯逻辑：把一份 CardSnapshot（+ 本地的「动作在途」态）折算成渲染要用的
 // 展示值。刻意不掺 React——状态推导本身没有理由依赖运行环境，纯函数才好单测，
 // 也让 Card 组件本身只剩"照着 view 摆控件"这一件事。
-import type { CardConnection, CardEvent, CardModel, CardRunningModel, CardSnapshot, RuntimePhase } from "../rpc-contract";
+import type { CardConnection, CardEvent, CardModel, CardRunningModel, CardSnapshot, CardStartingModel, RuntimePhase } from "../rpc-contract";
 
 /** 一次启动/停止动作的进行中态：哪个模型、哪种动作。 */
 export interface PendingAction {
@@ -256,4 +256,114 @@ export function formatEventTime(ts: number, now: number): string {
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
   return `${hh}:${mm}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * 启动中列表：CardSnapshot.starting 的展示折算 + 按钮禁用判定 + 轮询提速判定
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一行「仍在启动中」模型的展示值。Card.tsx 只需把 stage/action 两个字段挑成
+ * 对应的词典 key 传给 t()，本函数不直接产出拼好的文案——拼文案是 i18n 的活，
+ * 放在这里会让 state.ts 也得认识两套语言。
+ */
+export interface StartingRowView {
+  readonly name: string;
+  /** 面板没给展示名（displayName 为 null）时回退用 name，理由同 runningModelDisplayName */
+  readonly displayName: string;
+  readonly stage: CardStartingModel["stage"];
+  /** 已耗时（秒），由 since 与调用方注入的 now 计算 */
+  readonly elapsedSec: number;
+  readonly action: CardStartingModel["action"];
+}
+
+/**
+ * starting 列表里「尚未出现在 runningModels」的那部分——真机实测过面板的时序：
+ * 容器建好后 start 请求还要再做约 10 秒存活检测才返回，实测 4B 模型第 4 秒已经
+ * 进了 runningModels 且 ready=true，但直到第 12 秒 start 返回前它仍留在 starting
+ * 里。这段重叠期该模型已经有更具体的运行中/加载中展示（ready 字段驱动），不该再
+ * 在「仍在启动中」区额外画一行说它「还在启动」——两处同时出现是误导，不是信息量。
+ * isModelStarting（按钮禁用）刻意不用这个过滤：它防的是「重复点启动触发面板
+ * 409」，只要 start 请求本身没返回就该继续禁用，与该模型是否已经能从
+ * runningModels 观测到无关。
+ */
+function startingNotYetRunning(snapshot: CardSnapshot): CardStartingModel[] {
+  const runningNames = new Set(snapshot.runningModels.map((item) => item.name));
+  return snapshot.starting.filter((item) => !runningNames.has(item.name));
+}
+
+/**
+ * 推导「仍在启动中」列表的展示值——只覆盖 startingNotYetRunning 过滤后的子集，
+ * 理由见该函数注释。
+ *
+ * now 由调用方注入（与 describeLoadingElapsed 同一约定：测试不挂真实时钟，
+ * Card.tsx 的秒表 tick 把自己存的时间戳灌进来）。now 早于 since（时钟偏移）
+ * 按 0 秒处理，不展示负数，口径与 describeLoadingElapsed 一致。
+ * since 解析失败（按 contract 是必填 ISO 字符串，理论不会发生，这里仍做防御）
+ * 同样按 0 秒处理，不让一条脏数据搞崩整个列表。
+ */
+export function describeStarting(snapshot: CardSnapshot, now: number): StartingRowView[] {
+  return startingNotYetRunning(snapshot).map((item) => {
+    const sinceMs = Date.parse(item.since);
+    const elapsedSec = Number.isNaN(sinceMs) ? 0 : Math.max(0, Math.floor((now - sinceMs) / 1000));
+    return {
+      name: item.name,
+      displayName: item.displayName ?? item.name,
+      stage: item.stage,
+      elapsedSec,
+      action: item.action,
+    };
+  });
+}
+
+/**
+ * 某个模型是否正处于「启动中」列表。供 Card.tsx 给该行的启动按钮追加禁用条件——
+ * 面板对同一模型的并发启停会回 409，禁用比让用户点了再等报错更友好。
+ */
+export function isModelStarting(snapshot: CardSnapshot, name: string): boolean {
+  return snapshot.starting.some((item) => item.name === name);
+}
+
+/**
+ * 轮询是否该提速到 2s 档。
+ *
+ * 用 startingNotYetRunning 而非原始 snapshot.starting：一个模型如果已经出现在
+ * runningModels 里（即便 start 请求本身因面板的 10s 存活检测还没返回），它的
+ * 加载进度已经能从 runningModels 的 ready 字段观测到，不需要靠提速轮询去追一个
+ * 卡片根本不会为它多画什么的「已 N 秒」——提速轮询的意义只在于还有一行
+ * 「仍在启动中」在靠 tick 更新秒数。phase==="starting" 这一支不受影响：它是
+ * 单模型加载中的既有场景，与 starting 列表无关。
+ */
+export function shouldFastPoll(snapshot: CardSnapshot): boolean {
+  return snapshot.phase === "starting" || startingNotYetRunning(snapshot).length > 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * 过期快照守卫
+ *
+ * 轮询、手动刷新、start/stop/setDefaultModel/saveConnection 等多个请求可能同时
+ * 在途，网络到达顺序与发起顺序未必一致——start/stop 这类长请求（排空最长 60s+）
+ * 发起得早却回来得晚是常态，期间若轮询已经把更新的快照应用上了，长请求这份更旧
+ * 的回包就不该覆盖回去。序号在请求发起时分配（next()）、单调递增；回包到达时校验
+ * （accept()），只有序号不小于「已应用的最大序号」才放行，旧序号一律拒收。
+ * ------------------------------------------------------------------ */
+
+export interface SnapshotSequencer {
+  /** 请求发起时调用一次，取得本次请求的序号（从 1 开始单调递增）。 */
+  next(): number;
+  /** 回包到达时调用：true = 可以应用这份快照，false = 序号更旧，应丢弃。 */
+  accept(seq: number): boolean;
+}
+
+export function createSnapshotSequencer(): SnapshotSequencer {
+  let counter = 0;
+  let maxAccepted = 0;
+  return {
+    next: () => ++counter,
+    accept: (seq: number) => {
+      if (seq < maxAccepted) return false;
+      maxAccepted = seq;
+      return true;
+    },
+  };
 }

@@ -41,12 +41,17 @@ export const CARD_CSS = `
 .llamapad-card__chevronOpen{transform:rotate(180deg)}
 .llamapad-cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}
 .llamapad-card__body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:14px 0 16px;display:flex;flex-direction:column;gap:12px}
-.llamapad-card__openRow{display:flex;justify-content:flex-end}
+.llamapad-card__openRow{display:flex;justify-content:flex-end;gap:8px}
 .llamapad-card__hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
 .llamapad-card__banner{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-radius:8px;padding:8px 10px}
 .llamapad-card__status{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
 .llamapad-card__runningList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;width:100%}
 .llamapad-card__runningRow{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
+/* 「仍在启动中」列表：视觉上刻意与 __runningList/__runningRow 同构——两者
+ * 都是「一行 StateDot + 一段说明文字」，用户不需要靠样式区分「正在启动」与「已在跑」，
+ * 靠左边的圆点状态（ongoing 动效 vs done 静态）和文案本身就够。 */
+.llamapad-card__startingList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;width:100%}
+.llamapad-card__startingRow{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
 .llamapad-card__runningName{flex:1;min-width:0;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .llamapad-card__runningMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;flex:none}
 .llamapad-card__actionError{margin:0;color:var(--dsw-alias-state-error-primary)}

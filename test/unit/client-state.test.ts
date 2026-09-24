@@ -2,17 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   buildCardView,
   connectionFormState,
+  createSnapshotSequencer,
   describeEventTone,
   describeInferring,
   describeLoadingElapsed,
+  describeStarting,
   formatEventTime,
   inferringDotState,
+  isModelStarting,
   rowActionFor,
   runningModelDisplayName,
   runningRowDotState,
   selectNotifiableEvents,
+  shouldFastPoll,
 } from "../../src/client/state";
-import type { CardEvent, CardModel, CardRunningModel, CardSnapshot } from "../../src/rpc-contract";
+import type { CardEvent, CardModel, CardRunningModel, CardSnapshot, CardStartingModel } from "../../src/rpc-contract";
 
 function model(overrides: Partial<CardModel> = {}): CardModel {
   return {
@@ -49,6 +53,17 @@ function snapshot(overrides: Partial<CardSnapshot> = {}): CardSnapshot {
     connection: { panelUrl: "http://panel.local", tokenConfigured: false },
     // 事件流的合法占位；涉及事件消费的用例各自覆盖
     events: [],
+    ...overrides,
+  };
+}
+
+function startingModel(overrides: Partial<CardStartingModel> = {}): CardStartingModel {
+  return {
+    name: "qwen-small",
+    displayName: null,
+    since: "2026-09-24T00:00:00.000Z",
+    stage: "preparing",
+    action: "start",
     ...overrides,
   };
 }
@@ -376,6 +391,186 @@ describe("formatEventTime：事件时间展示", () => {
 
   it("两位数字直通，不再加工", () => {
     expect(formatEventTime(new Date(2026, 8, 3, 14, 37).getTime(), 0)).toBe("14:37");
+  });
+});
+
+describe("describeStarting：「仍在启动中」列表的展示折算", () => {
+  const SINCE = "2026-09-24T00:00:00.000Z";
+  const sinceMs = Date.parse(SINCE);
+
+  it("starting 为空数组 → 空列表", () => {
+    expect(describeStarting(snapshot({ starting: [] }), sinceMs)).toEqual([]);
+  });
+
+  it("displayName 有值时直接用，stage/action 透传", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ name: "a", displayName: "模型 A", stage: "pulling", action: "start" })] }),
+      sinceMs,
+    );
+    expect(rows).toEqual([
+      { name: "a", displayName: "模型 A", stage: "pulling", elapsedSec: 0, action: "start" },
+    ]);
+  });
+
+  it("displayName 为 null（面板没给）时回退用 name", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ name: "a", displayName: null })] }),
+      sinceMs,
+    );
+    expect(rows[0]?.displayName).toBe("a");
+  });
+
+  it("action 为 restart 时原样透传（前缀由 Card.tsx 按这个字段挑词典 key）", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ action: "restart" })] }),
+      sinceMs,
+    );
+    expect(rows[0]?.action).toBe("restart");
+  });
+
+  it("耗时按 since 与 now 之差计算，向下取整", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ since: SINCE })] }),
+      sinceMs + 18_500,
+    );
+    expect(rows[0]?.elapsedSec).toBe(18);
+  });
+
+  it("now 早于 since（时钟偏移）→ 按 0 秒处理，不出现负数", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ since: SINCE })] }),
+      sinceMs - 5_000,
+    );
+    expect(rows[0]?.elapsedSec).toBe(0);
+  });
+
+  it("since 无法解析（防御式，contract 里理论不会发生）→ 按 0 秒处理", () => {
+    const rows = describeStarting(
+      snapshot({ starting: [startingModel({ since: "不是一个时间" })] }),
+      sinceMs,
+    );
+    expect(rows[0]?.elapsedSec).toBe(0);
+  });
+
+  it("多条 starting 按原有顺序逐条折算", () => {
+    const rows = describeStarting(
+      snapshot({
+        starting: [
+          startingModel({ name: "a", since: SINCE }),
+          startingModel({ name: "b", since: SINCE }),
+        ],
+      }),
+      sinceMs,
+    );
+    expect(rows.map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  it("同时在 runningModels 与 starting 中的模型不产出行——真机实测过面板的时序：" +
+    "容器建好后 start 请求还要再等约 10 秒存活检测才返回，这段重叠期该模型已经能从" +
+    "runningModels（ready 字段）观测到，不该在「仍在启动中」区再重复画一行", () => {
+    const rows = describeStarting(
+      snapshot({
+        starting: [startingModel({ name: "a", since: SINCE }), startingModel({ name: "b", since: SINCE })],
+        runningModels: [runningModel({ name: "a", ready: true })],
+      }),
+      sinceMs,
+    );
+    expect(rows.map((r) => r.name)).toEqual(["b"]);
+  });
+});
+
+describe("isModelStarting：某模型是否正处于启动中列表", () => {
+  it("模型名在 starting 列表里 → true", () => {
+    expect(isModelStarting(snapshot({ starting: [startingModel({ name: "a" })] }), "a")).toBe(true);
+  });
+
+  it("模型名不在 starting 列表里 → false", () => {
+    expect(isModelStarting(snapshot({ starting: [startingModel({ name: "a" })] }), "b")).toBe(false);
+  });
+
+  it("starting 为空列表 → 恒 false", () => {
+    expect(isModelStarting(snapshot({ starting: [] }), "a")).toBe(false);
+  });
+});
+
+describe("shouldFastPoll：轮询是否该提速到 2s 档", () => {
+  it("phase===starting 时 → true，即便 starting 列表为空（单模型加载中的既有场景）", () => {
+    expect(shouldFastPoll(snapshot({ phase: "starting", starting: [] }))).toBe(true);
+  });
+
+  it("starting 非空时 → true，即便 phase 是 idle（面板正在拉镜像/建容器）", () => {
+    expect(shouldFastPoll(snapshot({ phase: "idle", starting: [startingModel()] }))).toBe(true);
+  });
+
+  it("starting 非空时 → true，即便 phase 是 ready（该模型不是默认模型，默认模型已就绪）", () => {
+    expect(shouldFastPoll(snapshot({ phase: "ready", starting: [startingModel()] }))).toBe(true);
+  });
+
+  it("两者都没有 → false，回落到既有 5s 档", () => {
+    expect(shouldFastPoll(snapshot({ phase: "ready", starting: [] }))).toBe(false);
+    expect(shouldFastPoll(snapshot({ phase: "idle", starting: [] }))).toBe(false);
+  });
+
+  it("starting 里唯一的模型已经进了 runningModels（面板 10s 存活检测还没返回）且 " +
+    "phase 不是 starting → false，不为一个卡片已经不会再画「仍在启动中」行的模型提速", () => {
+    expect(
+      shouldFastPoll(
+        snapshot({
+          phase: "ready",
+          starting: [startingModel({ name: "a" })],
+          runningModels: [runningModel({ name: "a", ready: true })],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("starting 里除了已进 runningModels 的那个，还有别的真在等 → 仍为 true", () => {
+    expect(
+      shouldFastPoll(
+        snapshot({
+          phase: "ready",
+          starting: [startingModel({ name: "a" }), startingModel({ name: "b" })],
+          runningModels: [runningModel({ name: "a", ready: true })],
+        }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("createSnapshotSequencer：过期快照守卫", () => {
+  it("next() 从 1 开始单调递增", () => {
+    const seq = createSnapshotSequencer();
+    expect(seq.next()).toBe(1);
+    expect(seq.next()).toBe(2);
+    expect(seq.next()).toBe(3);
+  });
+
+  it("按发起顺序回包 → 全部放行", () => {
+    const seq = createSnapshotSequencer();
+    const a = seq.next();
+    const b = seq.next();
+    expect(seq.accept(a)).toBe(true);
+    expect(seq.accept(b)).toBe(true);
+  });
+
+  it("乱序：更旧的序号在更新的序号之后回包 → 被拒收", () => {
+    const seq = createSnapshotSequencer();
+    const older = seq.next(); // 1，例如 start 请求，发起早
+    const newer = seq.next(); // 2，例如轮询，发起晚但先回包
+    expect(seq.accept(newer)).toBe(true);
+    expect(seq.accept(older)).toBe(false); // start 的回包比轮询的旧，丢弃
+  });
+
+  it("同序号（理论上不会重复回包，仍验证边界）→ 不当作「更旧」拒收", () => {
+    const seq = createSnapshotSequencer();
+    const a = seq.next();
+    expect(seq.accept(a)).toBe(true);
+    expect(seq.accept(a)).toBe(true);
+  });
+
+  it("初始状态下第一次回包永远放行，不受 counter 从 0 开始的初值影响", () => {
+    const seq = createSnapshotSequencer();
+    expect(seq.accept(seq.next())).toBe(true);
   });
 });
 

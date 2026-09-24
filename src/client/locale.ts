@@ -17,6 +17,10 @@ export const zh = {
   loading: "正在读取面板状态…",
   panelUnavailable: "暂时无法连接到面板。",
   refreshFailed: "状态刷新失败，下方显示的是上一次读到的内容。",
+  // 手动刷新按钮：与既有轮询共用 refreshFailed 的失败提示，成功不单独提示
+  // （快照本身刷新出来就是反馈）。
+  refresh: "刷新",
+  refreshing: "刷新中…",
   noModelRunning: "当前没有模型在运行",
   loadingModel: "正在加载模型 {name}（已 {sec}s）",
   loadingModelLong: "正在加载模型 {name}（已 {min}分{sec}秒）",
@@ -47,6 +51,14 @@ export const zh = {
   // 面板侧事件 message 本身就是中文人类可读文本（「模型 xxx 已启动」），逐 kind
   // 翻译会随面板事件表无界膨胀，en 环境下宁可原样显示也不维护一份必然滞后的映射。
   eventsTitle: "最近事件",
+  // ── 「仍在启动中」列表（CardSnapshot.starting 非空时渲染）──
+  // action 为 start 用 startingModel，为 restart 用 restartingModel（Card.tsx 按
+  // StartingRowView.action 挑 key）；stage 三态各自独立一个 key，拼进 {stage} 占位。
+  startingModel: "仍在启动中：{name}（{stage}，已 {sec} 秒）",
+  restartingModel: "正在重启：{name}（{stage}，已 {sec} 秒）",
+  stagePreparing: "准备中",
+  stagePulling: "正在拉取镜像",
+  stageCreating: "正在创建容器",
   // ── 多模型运行列表（>1 个模型同时在跑时的卡片运行区）──
   runningElapsedSeconds: "已加载 {sec} 秒",
   runningElapsedMinutes: "已加载 {min} 分 {sec} 秒",
@@ -107,6 +119,9 @@ export const en = {
   loading: "Loading panel status…",
   panelUnavailable: "The panel is temporarily unreachable.",
   refreshFailed: "Refresh failed; showing the last known state.",
+  // Manual refresh button; shares refreshFailed with polling, no separate success text
+  refresh: "Refresh",
+  refreshing: "Refreshing…",
   noModelRunning: "No model is running",
   loadingModel: "Loading {name}… ({sec}s)",
   loadingModelLong: "Loading {name}… ({min}m{sec}s)",
@@ -135,6 +150,12 @@ export const en = {
   connSaved: "Saved. Reconnecting with the new settings.",
   // Toast text intentionally bypasses this dictionary; see the zh entry's comment.
   eventsTitle: "Recent activity",
+  // ── "Still starting" list (CardSnapshot.starting non-empty) ──
+  startingModel: "Still starting: {name} ({stage}, {sec}s)",
+  restartingModel: "Restarting: {name} ({stage}, {sec}s)",
+  stagePreparing: "Preparing",
+  stagePulling: "Pulling image",
+  stageCreating: "Creating container",
   // ── Multi-model running list (card status area when >1 model is running) ──
   runningElapsedSeconds: "Loaded {sec}s ago",
   runningElapsedMinutes: "Loaded {min}m{sec}s ago",
