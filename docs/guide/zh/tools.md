@@ -13,7 +13,7 @@
 | `llamapad_status` | 无 | 面板是否可达，列出所有在跑的模型、是否就绪、哪个是默认。只探测默认模型是否在忙，探测不到时省略这项，不会误报成「空闲」 |
 | `llamapad_list_models` | 无 | 按名称列出全部模型配置，最多 100 条，`total` 和 `truncated` 反映是否截断 |
 | `llamapad_events` | `limit`、`kind`，均可选 | 查面板的事件记录，排障时用得上，比如回答「模型为什么停了」。`limit` 默认 20、最多 100；`kind` 按类型精确过滤，如 `model.exit` 只看容器异常退出 |
-| `llamapad_start_model` | `model` 必填；`waitReady`、`drain`、`timeoutMs` 可选 | 启动模型。老面板会先停掉旧的再起新的，多模型面板只保证目标在跑，不影响其他模型。`drain` 默认开启，不打断正在输出的对话 |
+| `llamapad_start_model` | `model` 必填；`waitReady`、`drain`、`timeoutMs` 可选 | 启动模型。老面板会先停掉旧的再起新的，多模型面板只保证目标在跑，不影响其他模型。`drain` 默认开启，不打断正在输出的对话。`waitReady:false` 时，启动请求本身超时（面板首次拉镜像常见，见配置参考的 `startRequestTimeoutMs`）不算调用失败，照样返回 `started:true` |
 | `llamapad_stop_model` | `model`、`drain`、`drainTimeoutMs`，均可选 | 停止指定模型，不传 `model` 就停默认模型。目标没在跑时返回 `stopped:false`，不会改去停别的模型 |
 | `llamapad_set_default_model` | `model` 必填 | 切换面板的默认模型。目标必须已在跑，否则面板返回 409。老面板会提示需要多模型版本 |
 

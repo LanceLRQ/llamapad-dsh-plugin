@@ -16,6 +16,7 @@ Config lives under the `config` key of the llamapad entry in the profile's `cord
 | `llamaBaseUrl` | — | The llama.cpp address in `direct` mode |
 | `chatBehavior` | `strict` | `strict` / `passthrough` / `auto-switch`, see [Chat routing](chat-routing.md) |
 | `startTimeoutMs` | `300000` | Timeout waiting for readiness after start, only applies under `auto-switch` |
+| `startRequestTimeoutMs` | `300000` | Max time to wait for the start request itself to return from the panel. The panel's first pull of a model's image can take a few minutes, and this is the budget set aside for that |
 | `pollIntervalMs` | `2000` | Readiness polling interval, only applies under `auto-switch` |
 | `drainOnSwitch` | `true` | Whether to wait for the server to finish in-flight inference requests before starting or stopping. Shared by `auto-switch` and the settings card's start/stop buttons |
 | `drainTimeoutMs` | `60000` | Max time to wait for the drain above |
@@ -27,12 +28,17 @@ Config lives under the `config` key of the llamapad entry in the profile's `cord
 
 Context window length comes from the panel's `GET /api/v1/models/:name/effective`, i.e. the merged effective value of global defaults and per-model overrides. If a model has `docker.args_override` configured, the startup arguments are replaced entirely, and the plugin can't determine the actual context window, so it doesn't report one.
 
+`startRequestTimeoutMs` and `startTimeoutMs` cover two phases: the first is the start request's own HTTP round trip, the second is the wait for the model to become ready after the request returns (only `auto-switch` waits). The start request actually waits for the largest of `requestTimeoutMs`, the drain time plus 10 seconds, and `startRequestTimeoutMs`, so this value can only extend the wait; lowering it won't make the request time out sooner.
+
+A `startRequestTimeoutMs` timeout isn't a failure: the request reached the panel, which is most likely still pulling the image or creating the container. The settings card shows "Still starting", and `auto-switch` keeps polling at `pollIntervalMs`, only erroring if the model still isn't ready when `startTimeoutMs` runs out.
+
 ## Management tools (`llamapad-dsh-plugin/tools`)
 
-The tools entry's config is independent from the adapter's; you need to fill in a separate `panelUrl` / `token`. It also has its own field:
+The tools entry's config is independent from the adapter's; you need to fill in a separate `panelUrl` / `token`. It also has a few fields of its own:
 
 | Field | Default | Description |
 |---|---|---|
+| `startRequestTimeoutMs` | `300000` | Max time to wait for the start request itself to return from the panel, same meaning as above; when `llamapad_start_model` is called with `waitReady:false`, a timeout here doesn't count as a tool call failure |
 | `toolApproval` | `allow` | When set to `ask`, the start, stop, and set-default tools require user confirmation before running |
 
 ## Reasoning effort (reasoning_effort)

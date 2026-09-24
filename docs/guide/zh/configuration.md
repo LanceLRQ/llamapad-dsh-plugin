@@ -16,6 +16,7 @@
 | `llamaBaseUrl` | — | `direct` 模式下 llama.cpp 的地址 |
 | `chatBehavior` | `strict` | `strict` / `passthrough` / `auto-switch`，见[聊天路由](chat-routing.md) |
 | `startTimeoutMs` | `300000` | 启动后等待就绪的超时，只在 `auto-switch` 下生效 |
+| `startRequestTimeoutMs` | `300000` | 启动请求本身等面板返回的最长时间。面板第一次拉取某个模型的镜像可能要几分钟，这个值就是留给它的预算 |
 | `pollIntervalMs` | `2000` | 就绪探测间隔，只在 `auto-switch` 下生效 |
 | `drainOnSwitch` | `true` | 启动或停止前，是否先等服务端处理完正在推理的请求。`auto-switch` 和设置卡片的启停按钮共用 |
 | `drainTimeoutMs` | `60000` | 上面那次等待最长多久 |
@@ -27,12 +28,17 @@
 
 上下文长度取自面板的 `GET /api/v1/models/:name/effective`，也就是全局默认和模型覆盖合并后的生效值。如果模型配置了 `docker.args_override`，启动参数整个被替换，插件无从得知实际的上下文长度，这时干脆不报。
 
+`startRequestTimeoutMs` 和 `startTimeoutMs` 管的是两个阶段：前者是启动请求这一次 HTTP 往返，后者是请求返回之后等模型真正就绪（只有 `auto-switch` 会等）。启动请求实际的等待时间取 `requestTimeoutMs`、排空时间加 10 秒、`startRequestTimeoutMs` 三者中最大的一个，所以这个值只能放宽，调小不会让请求更早超时。
+
+`startRequestTimeoutMs` 超时不算失败：请求已经送到面板，面板多半还在拉镜像或建容器。设置卡片会显示「仍在启动中」，`auto-switch` 会接着按 `pollIntervalMs` 轮询，到 `startTimeoutMs` 还没就绪才报错。
+
 ## 管理工具（`llamapad-dsh-plugin/tools`）
 
-工具入口的配置和适配器相互独立，要单独填一份 `panelUrl` / `token`。它还有一个自己的字段：
+工具入口的配置和适配器相互独立，要单独填一份 `panelUrl` / `token`。它还有几个自己的字段：
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
+| `startRequestTimeoutMs` | `300000` | 启动请求本身等面板返回的最长时间，含义同上；`llamapad_start_model` 的 `waitReady:false` 时超时不算工具调用失败 |
 | `toolApproval` | `allow` | 设为 `ask` 时，调用启动、停止、设默认三个工具前要用户确认 |
 
 ## 思考强度（reasoning_effort）

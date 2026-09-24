@@ -27,6 +27,18 @@ export interface FakePanelState {
   /** 老面板模式(false，默认)/多模型模式(true) 开关；createFakePanel 的 multiModel
    *  选项直接落地在这里，创建后不可切档（只读，测试不应改写） */
   readonly multiModel: boolean;
+  /** `runtime/status` 的 `starting` 字段开关（默认 true）；createFakePanel 的
+   *  supportsStarting 选项直接落地在这里，创建后不可切档（只读，测试不应改写）。
+   *  与 multiModel 是独立的轴，见 fake-panel-server.mjs 文件头注释 */
+  readonly supportsStarting: boolean;
+  /** start 挂起配置：模型名 → 毫秒数（有限值=定时放行，Infinity=只能手动
+   *  releaseStart 放行）；测试在调用 start 前写入，见文件头「start 挂起」段落 */
+  startHoldMs: Map<string, number>;
+  /** 挂起中的 start 请求（键=模型名），随 runtime/status 的 starting 字段一起投影；
+   *  测试通常只读不写 */
+  pendingStarts: Map<string, { action: "start" | "restart"; since: string; stage: "preparing" | "pulling" | "creating" }>;
+  /** 内部：挂起请求的放行回调，供顶层 releaseStart(model) 调用；测试不应直接碰它 */
+  startReleasers: Map<string, () => void>;
   /** 多模型模式专用：全部运行中模型各自的运行态，键为模型名。老面板模式下恒为空 Map */
   runtime: Map<string, FakePanelRuntimeEntry>;
   /** 多模型模式专用：不带 model 字段的请求会打给谁；老面板模式下恒为 null */
@@ -61,6 +73,14 @@ export interface FakePanelState {
 export interface FakePanel {
   server: Server;
   state: FakePanelState;
+  /** 放行一个挂起中的 start 请求；目标模型当前没有挂起中的请求时是安全的空操作。
+   *  见 FakePanelState.startHoldMs / pendingStarts 与文件头「start 挂起」段落 */
+  releaseStart(model: string): void;
 }
 
-export function createFakePanel(options?: { loadMs?: number; multiModel?: boolean }): FakePanel;
+export function createFakePanel(options?: {
+  loadMs?: number;
+  multiModel?: boolean;
+  /** `runtime/status` 的 `starting` 字段开关，默认 true */
+  supportsStarting?: boolean;
+}): FakePanel;

@@ -11,8 +11,10 @@ Card location differs by version: dsh 0.1.5 has it under "Settings -> Plugins ->
 The card has:
 
 - Title row: click to collapse or expand; collapsing stops polling the panel.
+- "Refresh" button: fetches the panel state right away instead of waiting for the next poll. Not shown before the first snapshot has ever loaded.
 - "Open panel in browser" button: jumps to the full llamapad panel.
 - Running status: when only one model is running, shows a single line indicating whether it's inferring. When multiple are running, shows a running list, each line with the model name, how long it's been loaded, readiness, and either a default marker or a "set as default" button. All "set as default" buttons are disabled while a switch is in progress, to avoid conflicting clicks.
+- Still starting: a model whose start/restart request the panel has received but hasn't finished processing gets its own line, showing the stage (preparing / pulling image / creating container, matching the card's own wording) and how many seconds it's been waiting. Its start button is disabled during this time, to avoid a repeat click landing a 409. This only shows up on panel versions that report the `starting` field; on older panels, the card may keep showing "no model running" during this window until the image finishes pulling and the container actually comes up.
 - Model list: a two-column card grid, scrolling within the list past about 4 rows. Becomes a single column when the window is narrower than 520px.
 - Start/stop button per model: starting one doesn't stop other running models. While waiting, the button turns into "cancel waiting"; clicking it aborts the request without showing an error.
 - Connection settings: panel address, API token, and a save button.

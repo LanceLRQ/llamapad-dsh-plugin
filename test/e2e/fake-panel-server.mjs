@@ -22,6 +22,25 @@ import { createServer } from "node:http";
  *   （对齐面板"起第一个模型就会有默认"的实际行为），此后只能通过
  *   `PUT default-model` 显式切换，stop 掉默认模型会把默认清空而不是自动顶替下一个
  *   （面板真实语义含糊，取最简单、最不会误导测试的假设）。
+ *
+ * `supportsStarting` 开关（默认 true）：与 `multiModel` 是两条独立的轴——`starting`
+ * 字段来自面板 dev/main 主线（与 `feature/multi-model` 分支无关），老面板（两个开关
+ * 都可能是 false）没有这个字段。为 false 时 `runtime/status` 响应体里连 `starting`
+ * 键本身都不写（不是写一个空数组）——对齐 panel-client.ts `PanelStartingModel` 注释里
+ * "老面板缺这个字段时才回退"的措辞，也让「老面板模式该长什么样」不用去读源码默认值
+ * 就能从响应体本身确认。
+ *
+ * start 挂起（`state.startHoldMs`，Map<模型名, 毫秒数>）：由测试在调用 start 前写入，
+ * 命中后 start 请求不会立即完成——先把该模型记进 `state.pendingStarts`（此时
+ * `runtime/status` 的 `starting` 数组会带上它，`stage` 固定给 `"pulling"`，对应真机
+ * 「本地无镜像先拉取」的最长阶段，简化模型不细分三阶段），再进入等待：
+ * - 数值是有限数：`setTimeout` 到点自动完成（模拟"拉镜像用了 N ms"）。
+ * - 数值是 `Infinity`：不设定时器，只能由测试调用 `releaseStart(model)`（本文件顶层
+ *   返回值的一个函数，不是 `state` 字段——它是"放行"这个动作而不是可读写的状态）手动
+ *   放行，用于测试要在挂起期间精确控制断言时机（先查一次快照确认仍在 starting，
+ *   再放行确认转入 models）而不是赌一个刚好够长的延迟。
+ * `releaseStart` 对定时器挂起的模型同样有效（提前放行、清掉尚未触发的定时器），
+ * 对没有挂起中请求的模型名是安全的空操作。
  */
 
 /** 各窗口时长（毫秒），与真实面板 window.ts 的 RANGE_DEFS 同值——from 计算要用 */
@@ -30,13 +49,23 @@ const RANGE_DEFS = { "30m": 30 * 60_000, "2h": 2 * 3_600_000, "24h": 24 * 3_600_
 /** 与真实面板 resolutionForRange 同款：≤2h 走 5s ring、更长走 15min 聚合桶 */
 const resolutionForRange = (range) => (range === "30m" || range === "2h" ? "5s" : "15m");
 
-export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
+export function createFakePanel({ loadMs = 100, multiModel = false, supportsStarting = true } = {}) {
   const seedNow = Date.now();
   const state = {
     running: null, readyAt: 0, starts: [], stops: [], chatRequests: [], busy: null,
     events: [], eventStreams: new Set(), eventConnections: 0,
     /** 老面板模式(false，默认)/多模型模式(true) 开关，见文件头注释；只读，创建后不切档 */
     multiModel,
+    /** `starting` 字段开关（默认 true），见文件头注释；只读，创建后不切档 */
+    supportsStarting,
+    /** start 挂起配置：模型名 → 毫秒数（有限值=定时放行，Infinity=只能手动 releaseStart）。
+     *  可写，测试在调用 start 前设置；命中后见文件头「start 挂起」段落 */
+    startHoldMs: new Map(),
+    /** 挂起中的 start 请求，键为模型名，值 { action, since, stage }；随 runtime/status 的
+     *  `starting` 字段一起投影（见 runtime/status 处理逻辑）。测试通常只读不写。 */
+    pendingStarts: new Map(),
+    /** 内部：挂起请求的放行回调，供顶层返回的 releaseStart(model) 调用；测试不直接碰它 */
+    startReleasers: new Map(),
     /**
      * 多模型模式专用：全部运行中模型各自的运行态（键=模型名）。`running`/`readyAt`
      * 两个老字段在多模型模式下不再被这里的逻辑写入——两套状态分轨保存，不混着用
@@ -103,6 +132,15 @@ export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
     "qwen-small": { levels: ["xhigh", "medium", "low"], rounding: "down" },
     "qwen-big": { levels: ["high", "medium", "low", "minimal"], rounding: "nearest" },
   };
+  /** `runtime/status` 的 `starting` 字段：把 `state.pendingStarts` 投影成面板 wire 形状；
+   *  只在 `state.supportsStarting` 为 true 时才会被调用方挂到响应体上（见两处状态分支）。 */
+  const buildStartingList = () => [...state.pendingStarts.entries()].map(([model, info]) => ({
+    model,
+    displayName: MODELS.find((m) => m.name === model)?.displayName,
+    action: info.action,
+    since: info.since,
+    stage: info.stage,
+  }));
   const server = createServer((req, res) => {
     const json = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (!/^Bearer lp_/.test(req.headers.authorization ?? "")) return json(401, { error: "unauthorized" });
@@ -139,17 +177,22 @@ export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
           const busyTarget = url.searchParams.get("model") ?? state.defaultModel;
           body.busy = busyTarget !== null && state.runtime.has(busyTarget) ? state.busy : null;
         }
+        // `starting` 开关，见文件头「supportsStarting」段落——为 false 时连键都不写，
+        // 不是写一个空数组
+        if (state.supportsStarting) body.starting = buildStartingList();
         return json(200, body);
       }
       // 老面板模式（默认）：ready 与下面 /health 的判定同源（都看 readyAt），这样
       // loadMs 这一个参数就同时控制两条路径，不会出现「health 说没好、status 说好了」
-      // 的自相矛盾。这条分支保持原样字节不动——本文件其余既有 E2E 用例的前提
+      // 的自相矛盾。running/busy 两个字段保持原样字节不动——本文件其余既有 E2E 用例
+      // 的前提；`starting` 是后加的独立字段，追加不影响这条前提
       const body = {
         running: state.running
           ? { model: state.running, hostPort: 18080, ready: Date.now() >= state.readyAt }
           : null,
       };
       if (url.searchParams.get("busy") === "1") body.busy = state.busy;
+      if (state.supportsStarting) body.starting = buildStartingList();
       return json(200, body);
     }
     if (url.pathname === "/api/v1/runtime/default-model") {
@@ -182,39 +225,68 @@ export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
     if (req.method === "POST" && startMatch) {
       let body = "";
       req.on("data", (c) => { body += c; });
+      // 客户端等挂起等不及、自己 AbortSignal.timeout 先触发时会主动断开连接——
+      // 不装这个监听器，之后（延迟结束/手动 releaseStart 触发时）往一个已经断开的
+      // socket 上 res.end() 会抛一个没人接的 'error' 事件，直接崩掉测试进程
+      res.on("error", () => {});
       req.on("end", () => {
         const name = decodeURIComponent(startMatch[1]);
         if (!MODELS.some((m) => m.name === name)) return json(404, { error: `模型不存在: ${name}` });
         let drainReq = {};
         try { drainReq = body ? JSON.parse(body) : {}; } catch { drainReq = {}; }
-        state.starts.push(name);
-        if (state.multiModel) {
-          // 多模型模式的核心行为（P0-1 的根因所在）：start 只新增这一个模型的
-          // 运行态，绝不驱逐 state.runtime 里已有的其它模型——面板解除了「同一
-          // 时刻只运行一个模型」的约束，旧「停旧起新」的假设不再成立
-          const configuredHostPort = MODELS.find((m) => m.name === name)?.hostPort ?? 18080;
-          state.runtime.set(name, {
-            hostPort: configuredHostPort,
-            readyAt: Date.now() + loadMs,
-            startedAt: new Date().toISOString(),
-          });
-          // 只有「当前没有任何默认模型」时才顺手把新模型设成默认——对齐面板
-          // 「起第一个模型就会有默认」的实际行为；此后只能靠 PUT default-model
-          // 显式切换，不能被后续的 start 悄悄改掉（否则测不出 P0-1/P0-2 想验证的
-          // 「目标不是默认也该正常工作」）
-          if (state.defaultModel === null) state.defaultModel = name;
-        } else {
-          state.running = name;
-          state.readyAt = Date.now() + loadMs;
-        }
-        emitEvent("model.start", `启动 ${name}`);
-        const resBody = { id: `cid-${state.starts.length}` };
-        if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
-          // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
-          // 假面板没有真实在途推理，对应真机的冷启动场景 → skipped
-          resBody.drain = { drained: true, reason: "skipped" };
-        }
-        return json(200, resBody);
+        // 对已在运行的模型再来一次 start 是「重建」而不是「首次启动」（面板真实语义，
+        // 见文件头引用的 docs/guide/zh/api.md 说明）；要在挂起/完成两条路径共用，
+        // 必须在这里（挂起状态尚未改动 running/runtime 前）就判定完，不能等 finishStart
+        // 里再判——那时状态已经被写过了
+        const action = (state.multiModel ? state.runtime.has(name) : state.running === name)
+          ? "restart" : "start";
+        const finishStart = () => {
+          state.starts.push(name);
+          if (state.multiModel) {
+            // 多模型模式的核心行为（P0-1 的根因所在）：start 只新增这一个模型的
+            // 运行态，绝不驱逐 state.runtime 里已有的其它模型——面板解除了「同一
+            // 时刻只运行一个模型」的约束，旧「停旧起新」的假设不再成立
+            const configuredHostPort = MODELS.find((m) => m.name === name)?.hostPort ?? 18080;
+            state.runtime.set(name, {
+              hostPort: configuredHostPort,
+              readyAt: Date.now() + loadMs,
+              startedAt: new Date().toISOString(),
+            });
+            // 只有「当前没有任何默认模型」时才顺手把新模型设成默认——对齐面板
+            // 「起第一个模型就会有默认」的实际行为；此后只能靠 PUT default-model
+            // 显式切换，不能被后续的 start 悄悄改掉（否则测不出 P0-1/P0-2 想验证的
+            // 「目标不是默认也该正常工作」）
+            if (state.defaultModel === null) state.defaultModel = name;
+          } else {
+            state.running = name;
+            state.readyAt = Date.now() + loadMs;
+          }
+          emitEvent("model.start", `启动 ${name}`);
+          const resBody = { id: `cid-${state.starts.length}` };
+          if (drainReq.drain !== undefined || drainReq.drainTimeoutMs !== undefined) {
+            // reason 必须落在服务端契约的四个值内（idle/timeout/unavailable/skipped）；
+            // 假面板没有真实在途推理，对应真机的冷启动场景 → skipped
+            resBody.drain = { drained: true, reason: "skipped" };
+          }
+          try { json(200, resBody); } catch { /* 客户端已经等不及断开了，回不回都无所谓 */ }
+        };
+        const holdMs = state.startHoldMs.get(name);
+        if (holdMs === undefined) return finishStart();
+        // 挂起：先把这个模型记进 pendingStarts（runtime/status 的 starting 数组会
+        // 立即带上它），再等——见文件头「start 挂起」段落
+        const since = new Date().toISOString();
+        state.pendingStarts.set(name, { action, since, stage: "pulling" });
+        let timer = null;
+        const release = () => {
+          if (timer !== null) clearTimeout(timer);
+          state.pendingStarts.delete(name);
+          state.startHoldMs.delete(name);
+          state.startReleasers.delete(name);
+          finishStart();
+        };
+        state.startReleasers.set(name, release);
+        if (Number.isFinite(holdMs)) timer = setTimeout(release, holdMs);
+        // holdMs === Infinity：不设定时器，只能靠测试调用顶层 releaseStart(name) 放行
       });
       return;
     }
@@ -390,5 +462,13 @@ export function createFakePanel({ loadMs = 100, multiModel = false } = {}) {
     }
     json(404, { error: "not found" });
   });
-  return { server, state };
+  /**
+   * 放行一个挂起中的 start 请求（见文件头「start 挂起」段落）。对定时器挂起
+   * （`state.startHoldMs` 给的是有限数）与纯手动挂起（`Infinity`）同样有效——
+   * 两者内部都是同一个 `release` 回调，提前调用会先清掉尚未触发的定时器。
+   * 目标模型当前没有挂起中的请求时是安全的空操作（不抛错），方便测试在
+   * "可能已经自然完成"的场景下无脑调用。
+   */
+  const releaseStart = (name) => state.startReleasers.get(name)?.();
+  return { server, state, releaseStart };
 }

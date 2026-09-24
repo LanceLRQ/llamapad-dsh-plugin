@@ -189,5 +189,11 @@ peerDependencies，运行时统一用宿主那一份框架。六个兼容点：�
 **v0.2.0 已发布**（2026-09-24）：推送 `v*` tag 由 CI（`.github/workflows/release.yml`）跑全量门禁
 并创建 GitHub Release，流程见 `docs/packaging.md`「正式发布（CI）」。
 
-待办：
-- 卡片在模型加载未就绪期间显示「没有模型在运行」，待多模型面板真机冒烟时一并排查
+**启动中状态已实施**（2026-09-24，设计见面板仓库 `docs/_internal/features/2026-09-24-启动中状态上报-design.md`）：
+根因是面板 start 接口要同步做完建容器（本地无镜像先拉取，可能几分钟）和 10 秒存活检测才返回，期间
+`runtime/status` 看不到该模型，插件 70 秒超时后又把 abort 报成面板不可达。面板 dev 新增 `starting`
+字段（preparing/pulling/creating 三个阶段）；插件新增 `startRequestTimeoutMs`（默认 5 分钟，与
+requestTimeoutMs、排空 +10s 取最大值，只放宽不缩短），start 自身超时抛 `START_PENDING`：auto-switch
+与工具默认档继续轮询就绪，卡片/`waitReady:false` 不报错。卡片显示「仍在启动中」（已进 runningModels
+的模型不重复显示）、手动刷新按钮、过期快照序号守卫，启停在途时立即拉快照并按 2s 轮询。老面板没有
+`starting` 时归一为空数组，行为不回归。真机结果见 `docs/manual-smoke.md`「启动中状态冒烟」
