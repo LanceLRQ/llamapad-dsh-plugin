@@ -43,6 +43,31 @@ interface OpenAiMessage {
 }
 
 /**
+ * 工具结果的两代消息结构。0.1.5 把它当作挂在 user 消息 content 里的一个块
+ * （`ContentBlockMap` 里的 `"tool-result"`，0.1.7 已彻底移除）；0.1.7 改成独立的
+ * `role: "tool"` 顶层消息（`ToolResultMessage`，字段直接挂在消息本身，不再嵌套）。
+ * 两种结构本地各起一个类型描述，分支靠运行时特征检测（`block.type`/`message.role`），
+ * 不依赖唯一装的类型包版本。
+ */
+interface LegacyToolResultBlock {
+  type: "tool-result";
+  toolCallId: string;
+  content: readonly ContentBlock[];
+}
+
+interface ToolRoleMessage {
+  role: "tool";
+  toolCallId: string;
+  content: readonly ContentBlock[];
+}
+
+const isLegacyToolResult = (block: { type: string }): block is LegacyToolResultBlock =>
+  block.type === "tool-result";
+
+const isToolRoleMessage = (message: { role: string }): message is ToolRoleMessage =>
+  message.role === "tool";
+
+/**
  * 收集请求里出现的全部图片引用（user 顶层 + tool-result 嵌套 content，递归），
  * 供调用方在拼请求体之前并行预解析。同一 ref 对象去重——同一张图贴两处只读一次盘。
  * 纯函数：不读不写任何外部状态。
@@ -57,11 +82,13 @@ export function collectImages(options: GenerateOptions): ImageAttachmentRef[] {
           seen.add(block.attachment);
           out.push(block.attachment);
         }
-      } else if (block.type === "tool-result") {
-        walk(block.content);
+      } else if (isLegacyToolResult(block as { type: string })) {
+        walk((block as unknown as LegacyToolResultBlock).content);
       }
     }
   };
+  // 0.1.7 的 role:tool 消息本身就有 content（图片可能嵌在里面），照样会被 walk 到；
+  // 不需要额外分支。
   for (const message of options.messages) walk(message.content);
   return out;
 }
@@ -98,6 +125,11 @@ export function buildChatBody(options: GenerateOptions, resolved?: ResolvedImage
 }
 
 function mapMessage(message: GenerateOptions["messages"][number], resolved?: ResolvedImages): OpenAiMessage[] {
+  // 0.1.7：工具结果是独立的 role:"tool" 消息，直接读顶层 toolCallId/content。
+  if (isToolRoleMessage(message as unknown as { role: string })) {
+    const tool = message as unknown as ToolRoleMessage;
+    return [{ role: "tool", tool_call_id: tool.toolCallId, content: renderToolResult(tool.content as ContentBlock[]) }];
+  }
   if (message.role === "system") {
     // system 不携带图片（dsh 的图片只进 user 侧）；类型上拦不住就显式占位——
     // 与静默丢同为难解，但占位至少在排查时看得见
@@ -123,8 +155,9 @@ function mapMessage(message: GenerateOptions["messages"][number], resolved?: Res
     }
     return [{ role: "assistant", content: textParts.join("") || null, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) }];
   }
-  // user：text 块合入一条 user；tool-result 块各拆一条 role:"tool"
-  // （ToolResultBlock 字段以包为准：toolCallId + content: ContentBlock[]）
+  // user：text 块合入一条 user；0.1.5 挂在 content 里的 tool-result 块各拆一条 role:"tool"
+  // （0.1.7 的工具结果已经是独立消息，会被本函数开头的 isToolRoleMessage 分支接住，
+  // 走不到这里）
   const out: OpenAiMessage[] = [];
   const textParts: string[] = [];
   // 图片只有在接了预解析（resolved 存在）时才进 wire：命中的进 image_url 块，
@@ -144,8 +177,9 @@ function mapMessage(message: GenerateOptions["messages"][number], resolved?: Res
       } else {
         textParts.push(IMAGE_UNAVAILABLE_PLACEHOLDER);
       }
-    } else if (block.type === "tool-result") {
-      out.push({ role: "tool", tool_call_id: block.toolCallId, content: renderToolResult(block.content) });
+    } else if (isLegacyToolResult(block as { type: string })) {
+      const legacy = block as unknown as LegacyToolResultBlock;
+      out.push({ role: "tool", tool_call_id: legacy.toolCallId, content: renderToolResult(legacy.content as ContentBlock[]) });
     }
   }
   if (imageParts.length > 0) {

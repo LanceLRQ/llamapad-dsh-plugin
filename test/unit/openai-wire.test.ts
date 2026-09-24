@@ -265,3 +265,32 @@ describe("buildChatBody：图片 wire 通道", () => {
     expect((body.messages as any[])[0]!.content).toBe("收到[image attachment unavailable]");
   });
 });
+
+describe("工具结果：两代消息结构输出同一份 wire", () => {
+  const expected = { role: "tool", tool_call_id: "call_1", content: "晴" };
+
+  it("0.1.7：role=tool 的独立消息", () => {
+    const body = buildChatBody({
+      provider: "llamapad", model: "a",
+      messages: [{ id: "m1", role: "tool", toolCallId: ToolCallId("call_1"), content: [{ type: "text", text: "晴" }], source: {} }],
+    } as any);
+    expect((body.messages as unknown[])).toContainEqual(expected);
+  });
+
+  it("0.1.5：user 消息里的 tool-result 块", () => {
+    const body = buildChatBody({
+      provider: "llamapad", model: "a",
+      messages: [msg("user", [{ type: "tool-result", toolCallId: "call_1", content: [{ type: "text", text: "晴" }] }])],
+    } as any);
+    expect((body.messages as unknown[])).toContainEqual(expected);
+  });
+
+  it("collectImages 能收集到 0.1.7 工具消息里的图片", () => {
+    const ref = { id: "img1" };
+    const refs = collectImages({
+      provider: "llamapad", model: "a",
+      messages: [{ id: "m1", role: "tool", toolCallId: ToolCallId("call_1"), content: [{ type: "image", attachment: ref }], source: {} }],
+    } as any);
+    expect(refs).toEqual([ref]);
+  });
+});
