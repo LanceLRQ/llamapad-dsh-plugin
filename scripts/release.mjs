@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // 重新打包脚本：插件内容变更后产出新版可安装 tgz。
 // 流程：工作区清洁检查 → 质量门禁（typecheck / 单测 / E2E / 0.1.5 兼容矩阵）→ 版本递增 →
-// 构建 → pnpm pack → 打印制品 sha256 与安装/更新命令。
+// 构建 → pnpm pack → 打印制品 sha256 与安装/更新命令。正式发布由推送 v* tag 触发 CI 完成
+// （.github/workflows/release.yml），本脚本负责本地门禁与版本递增。
 // 用法：
 //   pnpm run release                    # patch 递增（默认）
 //   pnpm run release minor              # minor 递增（0.x 阶段的行为/依赖变更）
@@ -99,4 +100,5 @@ console.log(`
   更新    已装旧版的 profile 重新执行同一条 add 即覆盖更新（层列表不变）
   验证    dsh --profile <名> --dump-config   # 应看到 "# == llamapad-dsh-plugin" 层
   提交    git add package.json && git commit -m "release: v${next}"
+  发布    合并到 main 后 git tag v${next} && git push origin main v${next}，CI 会重跑门禁并创建 GitHub Release
 ${stale.length ? `  注意    根目录还有旧制品：${stale.join('、')}（确认无用后可 rm）` : ''}`)

@@ -93,12 +93,12 @@ pnpm run release 0.2.0     # 显式版本
 脚本（`scripts/release.mjs`）依次执行：
 
 1. **清洁检查**：工作区必须干净——制品的版本号要能对应到提交；不干净则拒绝（`--allow-dirty` 强制跳过，不建议）
-2. **质量门禁**：`typecheck` → 单测 → 假面板 E2E，任一失败即中止
-3. **版本递增**：写入 `package.json` 并同步 `package-lock.json` 两处 version
+2. **质量门禁**：`typecheck` → 单测 → 假面板 E2E → 0.1.5 兼容矩阵（`test:compat`），任一失败即中止
+3. **版本递增**：写入 `package.json` 的 version（pnpm 锁文件不记录根包版本，无需同步）
 4. **构建**：esbuild 打 `src/` → `dist/{index,tools,client}.js`（Node 侧 `@deepseek-ai/*` 保持
    external，浏览器侧仅 7 个 seed 模块 external，见上「浏览器端产物」）
 5. **打包**：`pnpm pack`（prepare 钩子会再构建一次，幂等），产出 `llamapad-dsh-plugin-<版本>.tgz`
-6. **输出**：制品路径、sha256、安装/验证命令、建议的提交信息
+6. **输出**：制品路径、sha256、安装/验证命令、建议的提交信息与发布命令
 
 产物不入库（`.gitignore` 忽略 `*.tgz` 与 `dist/`）。旧版 tgz 脚本**不自动删**——留着可用于
 升级链路验证（先 add 旧版再 add 新版），确认无用后手动 rm。
@@ -158,7 +158,27 @@ dsh plugin --profile <名> add github:LanceLRQ/llamapad-dsh-plugin#<新sha>
 dsh --profile <名> --dump-config    # "# == llamapad-dsh-plugin" 层仍在
 ```
 
+## 正式发布（CI）
+
+GitHub Release 由 CI 创建（`.github/workflows/release.yml`），只在推送 `v*` tag 时运行，普通推送和 PR
+不会触发。流程：
+
+```bash
+pnpm run release minor                 # 本地：门禁 + 版本递增（本地产出的 tgz 只用来自测，不上传）
+git add package.json && git commit -m "release: v0.2.0"
+git checkout main && git merge --ff-only dev
+git tag v0.2.0
+git push origin main dev v0.2.0        # 推送 tag 后 CI 开始工作
+```
+
+CI 依次：校验 tag 与 `package.json` 的版本一致（不一致直接失败）→ 全量门禁（typecheck、单测、E2E、
+0.1.5 兼容矩阵）→ 构建并 `pnpm pack` → 创建 Release，附上 tgz 和 `.sha256`，说明里带安装命令，
+并追加 GitHub 自动生成的变更列表。版本号带 `-`（如 `0.3.0-rc.1`）时标记为预发布。
+
+CI 失败时 Release 不会创建。修好后删掉远端 tag（`git push origin :refs/tags/v0.2.0`），本地重新打
+tag 再推送。
+
 ## 分发渠道（任选，都不强制 npm 发号）
 
-- **GitHub Release 附 tgz**：release 脚本产出的制品直接上传，用户下载后 add——首选
+- **GitHub Release 附 tgz**：推送 tag 后由 CI 自动创建，用户下载后 add——首选
 - **npm 发布**：`npm publish`（publish 前自动跑 prepare 构建），用户 `dsh plugin add llamapad-dsh-plugin`

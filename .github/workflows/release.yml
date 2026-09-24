@@ -1,0 +1,77 @@
+# 发布流水线：只在推送 v* tag 时运行，其余推送和 PR 都不触发。
+# 流程：校验 tag 与 package.json 版本一致 → 全量门禁（含 0.1.5 兼容矩阵）→ 构建打包 →
+# 创建 GitHub Release，附上 tgz 与 sha256。本地怎么打 tag 见 docs/packaging.md。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 package.json 的版本 $version 不一致"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 质量门禁
+        run: |
+          pnpm run typecheck
+          pnpm test
+          pnpm run test:e2e
+          pnpm run test:compat
+
+      - name: 构建并打包
+        run: |
+          pnpm run build
+          file=$(pnpm pack | tail -1)
+          sha256sum "$file" > "$file.sha256"
+          echo "ARTIFACT=$file" >> "$GITHUB_ENV"
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$ARTIFACT"
+          sha=$(cut -d' ' -f1 "$ARTIFACT.sha256")
+          cat > notes.md <<EOF
+          支持 dsh \`>=0.1.5-rc.3 <0.1.8-0\`。
+
+          安装或升级（\`<profile>\` 换成你的 dsh profile 名，如 \`web\`）：
+
+          \`\`\`bash
+          curl -LO $url
+          dsh plugin --profile <profile> add ./$ARTIFACT
+          \`\`\`
+
+          首次安装后按 [安装与接入](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/guide/zh/installation.md) 填写面板地址和 token。
+
+          sha256: \`$sha\`
+          EOF
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" "$ARTIFACT" "$ARTIFACT.sha256" \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes $prerelease
