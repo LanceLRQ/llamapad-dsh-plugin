@@ -1,4 +1,4 @@
-import { CallId, LlmError, EMPTY_RESPONSE_CODE } from "@deepseek-ai/dsh-llm";
+import { ToolCallId, LlmError, EMPTY_RESPONSE_CODE } from "@deepseek-ai/dsh-llm";
 import type { ContentBlock, StreamChunk, TokenUsage } from "@deepseek-ai/dsh-llm";
 
 /**
@@ -85,7 +85,7 @@ export async function* translateOpenAiSse(body: ReadableStream<Uint8Array>): Asy
         if (tc.function?.name && !acc.name) acc.name = tc.function.name;
         const argsDelta = tc.function?.arguments ?? "";
         if (argsDelta !== "") acc.args += argsDelta;
-        yield { type: "tool-call-delta", index: blockIdx, id: CallId(acc.id), name: acc.name, argumentsDelta: argsDelta };
+        yield { type: "tool-call-delta", index: blockIdx, id: ToolCallId(acc.id), name: acc.name, argumentsDelta: argsDelta };
       }
     }
   }
@@ -101,7 +101,7 @@ export async function* translateOpenAiSse(body: ReadableStream<Uint8Array>): Asy
           ? { type: "reasoning", text: reasoningParts.join("") }
           : (() => {
               const acc = toolAcc.get(b.index)!;
-              return { type: "tool-call", id: CallId(acc.id), name: acc.name, arguments: acc.args };
+              return { type: "tool-call", id: ToolCallId(acc.id), name: acc.name, arguments: acc.args };
             })();
       yield { type: "block-end", index: b.index, block };
     }

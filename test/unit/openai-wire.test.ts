@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildChatBody, collectImages } from "../../src/openai-wire";
-import { CallId } from "@deepseek-ai/dsh-llm";
+import { ToolCallId } from "@deepseek-ai/dsh-llm";
 
 function msg(role: any, content: any[], id = "m1"): any {
   return { id, role, content, source: {} };
@@ -31,7 +31,7 @@ describe("buildChatBody", () => {
       messages: [msg("assistant", [
         { type: "reasoning", text: "思考…" },
         { type: "text", text: "我查一下" },
-        { type: "tool-call", id: CallId("call_1"), name: "get_weather", arguments: '{"city":"北京"}' },
+        { type: "tool-call", id: ToolCallId("call_1"), name: "get_weather", arguments: '{"city":"北京"}' },
       ])],
     } as any);
     const assistant = (body.messages as any[])[0]!;
@@ -47,7 +47,7 @@ describe("buildChatBody", () => {
       provider: "llamapad", model: "a",
       messages: [msg("user", [{
         type: "tool-result",
-        toolCallId: CallId("call_1"),
+        toolCallId: ToolCallId("call_1"),
         content: [{ type: "text", text: "晴，25 度" }],
       }])],
     } as any);
@@ -99,7 +99,7 @@ describe("collectImages", () => {
       provider: "llamapad", model: "a",
       messages: [msg("user", [
         { type: "image", attachment: pngRef },
-        { type: "tool-result", toolCallId: CallId("call_1"), content: [
+        { type: "tool-result", toolCallId: ToolCallId("call_1"), content: [
           { type: "text", text: "结果" },
           { type: "image", attachment: jpegRef },
         ] },
@@ -114,7 +114,7 @@ describe("collectImages", () => {
       messages: [
         msg("user", [{ type: "text", text: "hi" }]),
         msg("assistant", [{ type: "text", text: "hello" }]),
-        msg("user", [{ type: "tool-result", toolCallId: CallId("c"), content: [{ type: "text", text: "r" }] }]),
+        msg("user", [{ type: "tool-result", toolCallId: ToolCallId("c"), content: [{ type: "text", text: "r" }] }]),
       ],
     } as any)).toEqual([]);
   });
@@ -233,7 +233,7 @@ describe("buildChatBody：图片 wire 通道", () => {
       provider: "llamapad", model: "a",
       messages: [msg("user", [{
         type: "tool-result",
-        toolCallId: CallId("call_1"),
+        toolCallId: ToolCallId("call_1"),
         content: [{ type: "text", text: "截屏：" }, { type: "image", attachment: pngRef }],
       }])],
     } as any, new Map<any, any>([
