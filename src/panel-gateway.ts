@@ -69,12 +69,12 @@ export class PanelGateway extends TypertRemoteService {
   }
 
   /**
-   * 保存连接配置。落到 $DSH_HOME/settings.yaml 的本插件分节，覆盖 cordis.yml 那层
-   * （优先级由宿主保证）。写入成功后 index.ts 的 onChange 会把 client 换掉，
-   * 所以这里直接返回新快照即可，不必自己重建什么。
+   * 保存连接配置。0.1.5 落到 $DSH_HOME/settings.yaml 的本插件分节，0.1.7 落到 profile
+   * 的 cordis.patch.yml，覆盖 cordis.yml 那层（优先级由宿主保证）。写入成功后
+   * index.ts 的 onChange 会把 client 换掉，所以这里直接返回新快照即可，不必自己重建什么。
    *
    * token 留空 = 不改动它（沿用官方 SecretField 的语义：草稿留空写入什么都不做，
-   * 保留已存的值）。因此"清空 token"这个手势故意不提供——真要清得去改 settings.yaml，
+   * 保留已存的值）。因此"清空 token"这个手势故意不提供——真要清得去改配置文件，
    * 这与官方对 secret 字段的处理一致。
    */
   async saveConnection(panelUrl: string, token: string): Promise<CardSnapshot> {

@@ -3,25 +3,31 @@ import { apply, Config, name, inject } from "../../src/index";
 import { RPC_CONTRIBUTION, RPC_PACKAGE } from "../../src/rpc-contract";
 
 /**
- * settings 依赖按 `options.settings` 开关是否回调，模拟 installSettingsSection 内部
- * `ctx.inject(["settings"], …)` 的真实降级行为：服务未挂载时该回调根本不会跑。
- * `scopeValue` 暴露成 `ctx.__scopeValue`，供「连接热更新」用例在 apply() 之后
- * 改写 settings 层的解析结果，模拟一次外部写入 settings.yaml。
+ * settings 依赖按 `options.settings` 取值分派 fake ctx 的形态：
+ * - "v015"：`ctx.settings.installSection` 挂载时同步调用 hooks.setSource + hooks.onChange，
+ *   模拟 dsh 0.1.5 的 installSection 真实行为（bindSettings 里 hooks 原样透传给它）。
+ * - "v017"：`ctx.settings.configure` 存在，模拟 dsh 0.1.7 的 SettingsForms；热更新经
+ *   `ctx.on("loader/volatile-update", …)` 注册的监听器触发，不经 hooks.setSource。
+ * - false：settings 服务未挂载，`ctx.inject(["settings"], …)` 的回调不会跑。
+ *
+ * `scopeValue` 暴露成 `ctx.__scopeValue`，供「连接热更新」用例（v015 分支）在 apply()
+ * 之后改写 settings 层的解析结果，模拟一次外部写入 settings.yaml；v017 分支改用
+ * `commitSettings` 辅助函数（改写 Config 本身的引用，再触发 loader/volatile-update）。
  * `options.systemPrompt` 同款开关，模拟 `ctx.inject(["systemPrompt"], …)` 在宿主
  * 未装配 systemPrompt 服务（回调不跑）与已装配（回调同步跑一次）两种形态。
- *
- * `fiber.state` 是 installSettingsSection 真实实现（非本文件的桩）里
- * `scope.watch(callback)` 回调体的 isUnloading(ctx) 检查会读的字段——我们在
- * 「连接热更新」用例里手动调用被捕获的 watch 回调时会经过这条判断，缺了这个字段
- * 会在读 `ctx.fiber.state` 时直接抛 TypeError。取一个非 4（FIBER_DISPOSED）/
- * 非 5（FIBER_UNLOADING）的值即可表示「未在卸载」。
  */
-function fakeCtx(options: { settings?: boolean; systemPrompt?: boolean } = {}) {
+function fakeCtx(options: { settings?: "v015" | "v017" | false; systemPrompt?: boolean } = {}) {
   const scopeValue: { current: any } = { current: null };
   const ctx: any = {
     llm: { registerAdapter: vi.fn() },
-    effect: vi.fn(),
+    // 无标签（bindSettings 的 configure 注册）立即执行，贴近真实 cordis effect() 的
+    // 同步语义；带标签（status-watch 的长驻 effect）只记录、不自动跑——由
+    // startStatusWatcher 辅助函数按需手动触发，测试才能控制它的时机。
+    effect: vi.fn((fn: () => unknown, label?: string) => (label === undefined ? fn() : undefined)),
     emit: vi.fn(),
+    on: vi.fn(),
+    logger: () => ({ warn: vi.fn(), info: vi.fn() }),
+    fiber: { state: 0, entry: { options: { id: "llamapad" } } },
     // PanelGateway 是 cordis Service（经 TypertRemoteService），构造时自注册要用到
     // ctx.reflect.provide。
     reflect: { provide: vi.fn() },
@@ -33,28 +39,35 @@ function fakeCtx(options: { settings?: boolean; systemPrompt?: boolean } = {}) {
     // systemPrompt.section 桩出来只为捕获注册参数（name/order/text）；宿主真身的
     // 排序、空分节丢弃等行为不在本文件验证范围。
     systemPrompt: { section: vi.fn(() => () => {}) },
-    fiber: { state: 0 },
-    // installSettingsSection 会调 ctx.settings.register(ns, schema, {base}) 并拿 scope，
-    // 挂载时同步回调一次 setSource + onChange。桩出 register 才能驱动这条链。
-    settings: {
-      register: vi.fn((_ns: string, _schema: unknown, opts: any) => ({
-        get: () => scopeValue.current ?? opts.base,
-        watch: vi.fn(),
-        update: vi.fn(),
-        replace: vi.fn(),
-      })),
-      update: vi.fn(async () => {}),
-    },
   };
+  if (options.settings === "v015") {
+    ctx.settings = {
+      installSection: vi.fn((_owner: unknown, _ns: string, _schema: unknown, entry: any, hooks: any) => {
+        hooks.setSource(() => scopeValue.current ?? entry);
+        hooks.onChange();
+      }),
+      update: vi.fn(async () => {}),
+    };
+  } else if (options.settings === "v017") {
+    ctx.settings = { configure: vi.fn(() => () => {}), update: vi.fn(async () => {}) };
+  }
+  ctx.get = vi.fn((n: string) => (n === "settings" && options.settings ? ctx.settings : undefined));
   // 按依赖名分派：请求 "typert" 时真的回调（本次会话已挂载该服务）；"settings" 只在
-  // 调用方显式要求时才回调，与 installSettingsSection 自身文档描述的降级行为一致；
+  // 调用方显式要求时才回调，与 bindSettings 自身文档描述的降级行为一致；
   // "systemPrompt" 同理由 options.systemPrompt 控制。
   ctx.inject = vi.fn((deps: string[], callback: (c: any) => void) => {
     if (deps.includes("typert")) callback(ctx);
-    if (deps.includes("settings") && options.settings === true) callback(ctx);
+    if (deps.includes("settings") && options.settings) callback(ctx);
     if (deps.includes("systemPrompt") && options.systemPrompt === true) callback(ctx);
   });
   return Object.assign(ctx, { __scopeValue: scopeValue });
+}
+
+/** 模拟 0.1.5 settings 层的一次提交：改写 scope 值，再调 installSection 收到的 onChange。 */
+function commitSettings(ctx: any, next: object) {
+  ctx.__scopeValue.current = next;
+  const hooks = ctx.settings.installSection.mock.calls[0]![4];
+  hooks.onChange();
 }
 
 const valid = {
@@ -149,19 +162,20 @@ describe("插件入口", () => {
 
 describe("apply：未配置时的降级", () => {
   it("缺 panelUrl/token 时仍然注册 settings（否则设置页看不到卡片，无处可填）", () => {
-    const ctx = fakeCtx({ settings: true });
+    const ctx = fakeCtx({ settings: "v015" });
     apply(ctx, Config({ panelUrl: "", token: "" }) as any);
-    expect(ctx.settings.register).toHaveBeenCalledTimes(1);
+    expect(ctx.settings.installSection).toHaveBeenCalledTimes(1);
+    expect(ctx.settings.installSection.mock.calls[0]![1]).toBe("llamapad-panel");
   });
 
   it("缺配置时仍然注册 adapter（选择器里看得见 provider）", () => {
-    const ctx = fakeCtx({ settings: true });
+    const ctx = fakeCtx({ settings: "v015" });
     apply(ctx, Config({ panelUrl: "", token: "" }) as any);
     expect(ctx.llm.registerAdapter).toHaveBeenCalledTimes(1);
   });
 
   it("缺配置时 adapter 拿到的是未配置桩：调用会抛出指路的错误", async () => {
-    const ctx = fakeCtx({ settings: true });
+    const ctx = fakeCtx({ settings: "v015" });
     apply(ctx, Config({ panelUrl: "", token: "" }) as any);
     const adapter = ctx.llm.registerAdapter.mock.calls[0]![1];
     await expect(adapter.listModels("llamapad")).rejects.toThrow(/面板地址/);
@@ -176,30 +190,38 @@ describe("apply：未配置时的降级", () => {
 
 describe("apply：连接热更新", () => {
   it("settings 层给出新 panelUrl 时，adapter 换到新 client 而不重新注册", () => {
-    const ctx = fakeCtx({ settings: true });
+    const ctx = fakeCtx({ settings: "v015" });
     apply(ctx, Config(valid) as any);
     const adapter = ctx.llm.registerAdapter.mock.calls[0]![1];
     const before = (adapter as any).options.client;
 
-    // 模拟 settings 层覆盖：换掉 scope.get() 的返回，再触发一次 onChange
-    ctx.__scopeValue.current = Config({ ...valid, panelUrl: "http://other:9090" });
-    const watchArg = ctx.settings.register.mock.results[0]!.value.watch.mock.calls[0]?.[0];
-    watchArg?.();
+    commitSettings(ctx, Config({ ...valid, panelUrl: "http://other:9090" }));
 
     expect(ctx.llm.registerAdapter).toHaveBeenCalledTimes(1);  // 没有重复注册
     expect((adapter as any).options.client).not.toBe(before);  // 但 client 换了
   });
 
   it("配置没变时不换 client（onChange 必须幂等，它每次写入都会被触发）", () => {
-    const ctx = fakeCtx({ settings: true });
+    const ctx = fakeCtx({ settings: "v015" });
     apply(ctx, Config(valid) as any);
     const adapter = ctx.llm.registerAdapter.mock.calls[0]![1];
     const before = (adapter as any).options.client;
 
-    const watchArg = ctx.settings.register.mock.results[0]!.value.watch.mock.calls[0]?.[0];
-    watchArg?.();
+    commitSettings(ctx, Config(valid));
 
     expect((adapter as any).options.client).toBe(before);
+  });
+
+  it("0.1.7：volatile 更新事件到达后 adapter 换用新 client，不重新注册", () => {
+    const ctx = fakeCtx({ settings: "v017" });
+    apply(ctx, Config(valid) as any);
+    expect(ctx.settings.configure).toHaveBeenCalledWith({ auto: false }, ctx.fiber);
+    const adapter = ctx.llm.registerAdapter.mock.calls[0]![1];
+    const before = adapter.options.client;
+    const onVolatile = ctx.on.mock.calls.find((c: any[]) => c[0] === "loader/volatile-update")![1];
+    onVolatile();
+    expect(adapter.options.client).toBe(before);   // 值没变，syncConnection 幂等，不换 client
+    expect(ctx.llm.registerAdapter).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -277,7 +299,7 @@ describe("apply：提示词快照分节（M5）", () => {
   });
 
   it("settings 层热关 statusPromptSection → text 立即渲染为空（等同未注册）", async () => {
-    const ctx = fakeCtx({ systemPrompt: true, settings: true });
+    const ctx = fakeCtx({ systemPrompt: true, settings: "v015" });
     apply(ctx, Config(valid) as any);
     const section = ctx.systemPrompt.section.mock.calls[0]![0];
 
@@ -293,9 +315,7 @@ describe("apply：提示词快照分节（M5）", () => {
 
     // settings 层写入 statusPromptSection: false 并触发 onChange（连接热更新用例
     // 同款手法）：text 下一次求值就应该是空串，不必重载插件
-    ctx.__scopeValue.current = Config({ ...valid, statusPromptSection: false });
-    const watchArg = ctx.settings.register.mock.results[0]!.value.watch.mock.calls[0]?.[0];
-    watchArg?.();
+    commitSettings(ctx, Config({ ...valid, statusPromptSection: false }));
     expect(section.text({})).toBe("");
 
     disposeWatch();

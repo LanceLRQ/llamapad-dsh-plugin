@@ -9,7 +9,7 @@ import type {} from "@deepseek-ai/dsh-system-prompt";
 // 同上：dsh-attachment 用 declare module 给 ctx.attachments（AttachmentStore 服务）
 // 补上类型；下面 ImageAttachmentRef 的类型引入顺带把这份 augmentation 带进编译。
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
-import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
+import { bindSettings, live, plain } from "./compat/settings";
 import { LlamapadAdapter, type LlamapadAdapterOptions } from "./adapter";
 import {
   connectionChanged, createUnconfiguredClient, isConnectionComplete, readConnection,
@@ -19,7 +19,7 @@ import { createEventRing, createFleetCache, startStatusWatch } from "./status-wa
 import { renderFleetSnapshot } from "./fleet-snapshot";
 import { createPanelClient, DEFAULT_DRAIN_TIMEOUT_MS } from "./panel-client";
 import { PanelGateway, type PanelGatewayOptions } from "./panel-gateway";
-import { RPC_CONTRIBUTION, RPC_PACKAGE, SETTINGS_NAMESPACE } from "./rpc-contract";
+import { RPC_CONTRIBUTION, RPC_PACKAGE } from "./rpc-contract";
 import { createModelGate, sharedModelGate } from "./switching";
 
 export interface Config {
@@ -45,10 +45,14 @@ export interface Config {
   statusPromptSection: boolean;
 }
 
+// panelUrl/token 套了 live()：dsh 0.1.7 的设置写入（SettingsForms.update）只接受
+// volatile 字段，这两项是设置卡片 saveConnection 唯一要写的字段。0.1.5 宿主的
+// schemastery 没有 volatile()，live() 原样返回，两项照常是普通字段。其余字段不是
+// volatile，在 0.1.7 下被改动时会重启本插件 fiber（与「改了需要重载」的既有语义一致）。
 export const Config: Schema<Partial<Config>, Config> = Schema.object({
   // 不用 .required()：bundle 安装后用户总要先补配置再重启，缺配置不该拖垮整个 dsh 启动
-  panelUrl: Schema.string().description("llamapad 面板地址，如 http://192.168.1.10:8080"),
-  token: Schema.string().role("secret").description("llamapad API token（lp_ 开头；建议 cordis.yml 里用 !!js process.env.LLAMAPAD_TOKEN 注入）"),
+  panelUrl: live(Schema.string().description("llamapad 面板地址，如 http://192.168.1.10:8080")),
+  token: live(Schema.string().role("secret").description("llamapad API token（lp_ 开头；建议 cordis.yml 里用 !!js process.env.LLAMAPAD_TOKEN 注入）")),
   panelPublicUrl: Schema.string().description(
     "浏览器可见的面板地址，供设置卡片「用浏览器打开」按钮使用；缺省回落 panelUrl。"
     + "跨机部署时 panelUrl 是 host 进程视角的地址（可能是 127.0.0.1），浏览器打不开",
@@ -93,10 +97,10 @@ export function apply(ctx: Context, config: Config) {
   // 配齐无关，settings 层也改不出合法值来，越早暴露越好。
   assertStaticConfig(config);
 
-  // current 是「当前生效配置」的取值 thunk。初值指向 entry（cordis.yml 那层）；
-  // settings 服务挂载后 setSource 会把它换成 () => scope.get()，从此读到的是
-  // 「schema 默认 < cordis.yml < settings.yaml」三层合并后的值。
-  let current: () => Config = () => config;
+  // current 是「当前生效配置」的取值 thunk。初值是组合配置（0.1.7 上会现取 Volatile
+  // 的当前值，因为 loader 就地改写那些引用，plain() 每次都要重新解包）；0.1.5 挂上
+  // 设置服务后被 setSource 换成三层合并（schema 默认 < cordis.yml < settings.yaml）的值。
+  let current: () => Config = () => plain(config);
 
   // adapter 与 gateway 全程只有一个实例，配置变了改写它们的 options（见 adapter.ts /
   // panel-gateway.ts 两个 options 接口上的契约注释），不重建、不重新注册。
@@ -170,16 +174,17 @@ export function apply(ctx: Context, config: Config) {
     setOptional(gatewayOptions, "drainTimeoutMs", cfg.drainTimeoutMs);
   };
 
-  // 先接 settings：installSettingsSection 在挂载时会同步调一次 setSource + onChange，
-  // 于是第一次 syncConnection 用的就已经是三层合并后的值。settings 服务没挂载时这两个
-  // 回调都不会触发，靠下面那次手动调用兜底（syncConnection 幂等，两条路径都安全）。
+  // 先接 settings：bindSettings 在 0.1.5 上挂载时会同步调一次 setSource + onChange，
+  // 于是第一次 syncConnection 用的就已经是三层合并后的值；0.1.7 上没有 setSource 这回事，
+  // current 一直现取 Volatile 的当前值（见上面 current 的初值注释）。settings 服务
+  // 没挂载时 hooks 都不会触发，靠下面那次手动调用兜底（syncConnection 幂等，安全）。
   //
-  // settings 命名空间必须是 SETTINGS_NAMESPACE（kebab-case）而非 RPC_NAMESPACE（驼峰）——
-  // 两者是不同的东西，见 rpc-contract.ts 顶部注释。它同时是卡片在 Plugins 页签的 slot key：
-  // 该页签只渲染「host 已服务的 settings namespace ∩ 已注册到 settings.plugin.item 的卡片」
-  // 的交集，两边对不上卡片就不会出现——这正是缺配置也必须无条件走到这一步的原因。
-  installSettingsSection(ctx, settingsNamespace(SETTINGS_NAMESPACE), Config, config, {
-    setSource: (source) => { current = source; },
+  // bindSettings 内部两代分支都要求「缺配置也无条件走到这一步」：0.1.5 靠 settings
+  // 命名空间（SETTINGS_NAMESPACE，kebab-case，非 RPC_NAMESPACE 驼峰，两者是不同的东西，
+  // 见 rpc-contract.ts 顶部注释）让 Plugins 页签的 slot 交集非空；0.1.7 靠
+  // configure({auto:false}) 关闭自动表单——两者都不依赖 panelUrl/token 是否已填。
+  const writeSettings = bindSettings(ctx, Config, config, {
+    setSource: (source) => { current = () => plain(source()); },
     onChange: syncConnection,
   });
   syncConnection();
@@ -231,7 +236,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 设置卡片的 host 半身：构造即在 ctx.reflect 自注册，dispose 跟随本插件 fiber
   // （TypertRemoteService 继承自 cordis Service，语义见其类注释），不需要手动 ctx.effect。
-  new PanelGateway(ctx, gatewayOptions, (patch) => writeSettings(ctx, patch));
+  new PanelGateway(ctx, gatewayOptions, (patch) => writeSettings(patch));
 
   // 把全部 RPC 方法的 strict 描述符注册进 typert 共享注册表。
   //
@@ -307,24 +312,6 @@ function setOptional<T extends object, K extends keyof T>(
 ): void {
   if (value === undefined || value === "") delete target[key];
   else target[key] = value;
-}
-
-/**
- * 把补丁写进本插件的 settings 分节（$DSH_HOME/settings.yaml），供设置卡片的 saveConnection
- * 调用。不传 expectedRevision——卡片拿到的是脱敏后的 CardSnapshot.connection，没有 revision
- * 可带回来，乐观合并即可：并发写入本就是同一个人在同一张卡片上点，冲突概率可以忽略。
- *
- * ctx.inject(["settings"], …) 只在服务挂载后才回调；但这条路径只有卡片真被点了
- * saveConnection 才会触达，而卡片能渲染出来就意味着 settings 服务已经挂了（见上面
- * installSettingsSection 那段注释：Plugins 页签只派发「host 已服务的 namespace」的卡片），
- * 不会真的悬空等不到回调。
- */
-function writeSettings(ctx: Context, patch: Record<string, unknown>): Promise<void> {
-  return new Promise((resolve, reject) => {
-    ctx.inject(["settings"], (sctx) => {
-      sctx.settings.update(settingsNamespace(SETTINGS_NAMESPACE), patch).then(resolve, reject);
-    });
-  });
 }
 
 export { LlamapadAdapter, createPanelClient, createModelGate };
