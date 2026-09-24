@@ -105,9 +105,12 @@ pnpm run release 0.2.0     # 显式版本
 
 ## 版本策略（0.x 阶段）
 
-- 适配器行为变化、契约调整、`@deepseek-ai/*` 钉版升级 → **minor**
+- 适配器行为变化、契约调整、`@deepseek-ai/*` peer 范围调整 → **minor**
 - 缺陷修复、默认值微调 → **patch**
-- dsh 生态仍在 rc 频繁变动，`@deepseek-ai/*` 必须钉精确版本（见 CLAUDE.md 关键约束）
+- 框架依赖是带版本范围的 peerDependencies（当前 `>=0.1.5-rc.3 <0.1.8-0`），运行时用宿主那一份；
+  devDependencies 钉 0.1.7 这一代用于类型检查，0.1.5 靠 `pnpm run test:compat`（在临时目录装
+  0.1.5 框架跑单测 + 假面板 E2E）兜底，该脚本已纳入 `pnpm run release` 的质量门禁，见 CLAUDE.md
+  关键约束
 
 ## 提交惯例
 

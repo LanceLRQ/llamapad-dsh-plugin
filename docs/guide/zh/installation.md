@@ -104,9 +104,9 @@ dsh plugin --profile <名> add github:LanceLRQ/llamapad-dsh-plugin#<commit>
 
 ## 版本要求
 
-本包对 `@deepseek-ai/*` 依赖钉的是精确版本，而且必须与宿主 dsh 同代。构建时这些依赖全部 external，运行时由 pnpm 按本包的钉版安装。如果本包钉的版本比宿主旧，就会出现两份框架并存，宿主拿新接口去调旧基类，直接报错。我们实际遇到过：`dsh-llm` 0.1.x 的运行时每次对话都会调用 `adapter.prepareCall`，而 0.0.1-rc.1 的基类没有这个方法。
+本包支持 dsh 0.1.5-rc.3 到 0.1.7.x。`@deepseek-ai/*` 框架依赖声明的是版本范围（peerDependencies），不是精确版本，运行时统一使用宿主自带的那一份。
 
-当前钉版是 0.1.1-rc.2，包括 `dsh-llm`、`dsh-tools`、`dsh-attachment`、`dsh-system-prompt`。
+dsh 0.1.7 在安装和启动时会拿这个范围和自己的版本比对，不在范围内就拒绝安装并给出提示。dsh 0.1.5 没有这项检查，所以在范围外的 dsh 上强行安装时，问题要到加载或对话时才会暴露。
 
 ## 升级提示：默认聊天行为已改为 strict
 

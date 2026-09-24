@@ -104,9 +104,9 @@ One gotcha: re-`add`ing a tgz with the same version and filename does not refres
 
 ## Version requirements
 
-This package pins exact versions of the `@deepseek-ai/*` dependencies, and they must match the host dsh's generation. These dependencies are all external at build time, and installed at their pinned versions by pnpm at runtime. If this package's pinned versions are older than the host's, two copies of the framework end up coexisting, and the host calls the new interface against the old base class, which fails outright. We actually hit this: `dsh-llm` 0.1.x's runtime calls `adapter.prepareCall` on every conversation, but the `LlmAdapter` base class in 0.0.1-rc.1 has no such method.
+This package supports dsh 0.1.5-rc.3 through 0.1.7.x. The `@deepseek-ai/*` framework dependencies are declared as version ranges (peerDependencies), not exact versions, and at runtime the package always uses the copy the host ships.
 
-The currently pinned version is 0.1.1-rc.2, covering `dsh-llm`, `dsh-tools`, `dsh-attachment`, and `dsh-system-prompt`.
+dsh 0.1.7 compares this range with its own version at install and startup time, and refuses to install with a clear message when it's out of range. dsh 0.1.5 has no such check, so forcing an install on an unsupported dsh only shows problems later, at load or chat time.
 
 ## Upgrade note: default chat behavior is now strict
 

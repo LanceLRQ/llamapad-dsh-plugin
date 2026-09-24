@@ -6,7 +6,7 @@ The plugin adds two things to the dsh web UI: a llamapad card on the settings pa
 
 ## Settings card
 
-Located under dsh's "Settings -> Plugins -> Plugin configuration", alongside the official terminal, agent loop, and web search cards. The card shows up even without `panelUrl` / `token` configured; it just displays "not connected".
+Card location differs by version: dsh 0.1.5 has it under "Settings -> Plugins -> Plugin configuration", alongside the official terminal, agent loop, and web search cards; dsh 0.1.7 moved it into the llamapad-dsh-plugin detail page under the "Plugins" sidebar page. The card shows up even without `panelUrl` / `token` configured; it just displays "not connected".
 
 The card has:
 
@@ -20,7 +20,9 @@ The card has:
 
 ### Configuring the connection in the card
 
-Fill in the address and token under "Connection settings" and save; this writes to this plugin's own section in `$DSH_HOME/settings.yaml`, without touching `cordis.yml`. Values here take priority over `cordis.yml` and apply immediately on save, no dsh restart needed.
+Fill in the address and token under "Connection settings" and save; where this ends up depends on the version: dsh 0.1.5 writes to this plugin's own section in `$DSH_HOME/settings.yaml`, without touching `cordis.yml`; dsh 0.1.7 writes to the profile's `cordis.patch.yml`. Either way, it applies immediately on save, no dsh restart needed.
+
+Upgrading from dsh 0.1.5 to 0.1.7 does not carry over a connection saved through the old card. You need to re-enter the panel address and token once in the new card.
 
 Leaving the token field blank keeps the existing value, matching how dsh's own password fields behave, so there's no "clear token" action in the card. The panel address can't be left blank; clearing it leaves the card unable to reach the panel at all.
 

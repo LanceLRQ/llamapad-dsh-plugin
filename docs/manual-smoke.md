@@ -274,6 +274,41 @@ dsh 监听 `http://127.0.0.1:3080`。
 - 预期：行为与本次适配之前完全一致——单模型选择器标记、`strict`/`passthrough`/`auto-switch`
   三档、卡片单行运行态、`llamapad_set_default_model` 报「当前面板版本不支持默认模型切换」
 
+## 双版本冒烟（2026-09-24，dsh 0.1.5-rc.3 / 0.1.7-rc.1）
+
+验证本轮双版本兼容改造（方案见 `docs/plans/2026-09-24-dsh-dual-compat.md`）：框架依赖从钉精确
+版本改为带范围的 peerDependencies，运行时用宿主那一份框架；两代差异收在设置服务、RPC codec、
+工具结果消息、图标、设置卡片插槽五个兼容点。逻辑本身由单测、假面板 E2E 和 `test:compat` 的
+0.1.5 矩阵覆盖，本节只验真实宿主下的挂载与交互。
+
+做法：`pnpm run build && pnpm pack`，用 tgz 装进 web profile（走真实的 peer 解析路径），
+`dsh web --no-open` 后在浏览器里逐项核对；0.1.5 用 `npm i -g @deepseek-ai/dsh@0.1.5-rc.3`
+切换 CLI，profile 的框架包是指向 CLI 自带依赖的软链，跟着一起切，插件不用重装。
+
+| # | 检查项 | 0.1.7-rc.1 | 0.1.5-rc.3 |
+|---|---|---|---|
+| 1 | 插件加载成功，无 `Failed to load plugins`，控制台无本插件报错 | ✅ | ✅ |
+| 2 | 模型选择器列出面板上的模型 | ⏸ 未验证 | ⏸ 未验证 |
+| 3 | 设置卡片出现 | ✅ 侧栏「插件」→ llamapad-dsh-plugin 详情页 | ✅「设置 → 插件 → 插件配置」 |
+| 4 | 卡片保存连接写入正确位置，token 留空时保持原值，插件不重启 | ✅ 写进 profile `cordis.patch.yml` 的 llamapad 行 | ✅ 写进 `$DSH_HOME/settings.yaml` 的 `llamapad-panel` 节，`cordis.patch.yml` 未动 |
+| 5 | 设置导航有「llamapad 监控」页 | ✅ | ✅ |
+| 6 | 对话流式返回 | ⏸ 未验证 | ⏸ 未验证 |
+
+第 2、6 项没能验证：本机 web profile 里配置的面板 token 已失效（面板返回 401，卡片如实显示
+「token 无效或未授权」），需要换一个有效 token 后补测。选择器上能看到的只是 agent 默认模型那一行
+配置的名字，不能算作面板模型列表。另外，`link:` 本地调试模式在 0.1.7 下也确认能正常加载。
+
+实测踩到的两件事：
+
+- **从 `link:` 切到 tgz 安装前，先删掉 profile 里的旧插件目录**
+  （`rm -rf ~/.dsh/profiles/web/node_modules/llamapad-dsh-plugin`）。直接 add 的话，旧软链目标下
+  的开发依赖会残留在插件目录的嵌套 `node_modules` 里（含 `@deepseek-ai/*` 0.1.7），插件运行时会
+  优先解析到这份而不是宿主那份，peer 改造等于白做。干净安装不会出现嵌套目录。
+- **在 0.1.7 用过之后再切回 0.1.5，测完要删掉 0.1.5 新生成的 `~/.dsh/settings.yaml`**。否则下次
+  0.1.7 启动会再导入一次，并把它改名成 `settings.yaml.imported`，覆盖掉第一次导入时留下的那份
+  原始备份。0.1.5 侧栏的工作区组件在读 0.1.7 写过的状态时会报 `retainAccountKeys` 错误，属于宿主
+  自身问题，与本插件无关。
+
 ## 真机校准结果（2026-08-25，llamapad v0.1.0-rc / RTX 3090 / Qwen3.6-35B-A3B）
 
 用 `lp_` token 直接打面板 API 复现插件的调用链，校准 A 形态遗留的三项：

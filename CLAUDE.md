@@ -31,14 +31,14 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   `client`/`gate`，不重建 adapter/gateway、不重新注册 provider。因此 adapter 与 gateway
   的每个方法都必须现取 `this.options.*`，不得在构造期把字段拷进实例字段——拷了会静默
   失效，配置改了也不生效，且没有任何报错
-- dsh 是 v0.1 技术预览：`@deepseek-ai/*` 依赖**钉精确版本**；类型契约以
-  `node_modules/@deepseek-ai/dsh-llm/lib/types/*.d.ts` 为准（文档可能滞后）。
-  **钉版必须与宿主 dsh 同代**——构建把 `@deepseek-ai/*` 全部 external，运行时由 pnpm 按本包钉版
-  落盘，落后于宿主就是两份框架并存。2026-08-27 实测过代价：`dsh-llm` 0.1.x 的运行时在派发路径上
-  **无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有这个方法，
-  每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护测试；
-  升级 dsh 后先跑它。本包现钉 `dsh-attachment` / `dsh-system-prompt` 均 0.1.1-rc.2
-  （多模态输入与系统提示快照消费的宿主服务，2026-09-03 第三批新增），升级 dsh 时同样要同步
+- dsh 是 v0.1 技术预览：类型契约以 `node_modules/@deepseek-ai/dsh-llm/lib/types/*.d.ts` 为准
+  （文档可能滞后）。2026-08-27 实测过钉精确版本落后于宿主的代价：`dsh-llm` 0.1.x 的运行时在
+  派发路径上**无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有
+  这个方法，每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护
+  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.1.8-0`，运行时用宿主那一份**；
+  devDependencies 钉 0.1.7 这一代用于类型检查；两代差异收在 `src/compat/settings.ts`、
+  `rpc-contract.ts` 的 `strict()`、`openai-wire.ts` 的工具结果判定、`src/client/icons.ts`、
+  `client/index.tsx` 的双插槽注册；新增宿主代时先跑 `pnpm run test:compat` 并扩展 peer 范围
 - **模型状态刷新走 `status-watch.ts`**（2026-09-03 起吸收并替代已删除的 directory-refresh）：
   host 侧常驻 SSE（面板 `/api/v1/events/stream`）事件驱动，`model.*` 事件即时探测、运行中模型
   变化才 `ctx.emit("llm/adapters-updated")`；断流看门狗按节拍用 `getEvents({limit:1})` 核对水位，
@@ -169,5 +169,22 @@ URL/reasoning 精确匹配/选择器 `★` 默认标记（任务 4，修 P0-3）
 真机冒烟需等面板 `feature/multi-model` 分支合并后才能执行，清单已记入
 `docs/manual-smoke.md`（只记清单，未打勾）。
 
+**dsh 0.1.5/0.1.7 双版本兼容已实施**（2026-09-24，方案见
+`docs/plans/2026-09-24-dsh-dual-compat.md`，调研归档在
+`docs/research/2026-09-24-dsh-015-017-settings.md` 与 `docs/research/2026-09-24-dsh-015-017-apis.md`）：
+修掉当前在 0.1.7 上「整个插件加载失败」的问题，同一份构建产物同时在 dsh 0.1.5-rc.3 与
+0.1.7-rc.1 上加载并正常工作。框架依赖从钉精确版本的 dependencies 改为带版本范围的
+peerDependencies，运行时统一用宿主那一份框架。六个兼容点：设置服务两代差异
+（`src/compat/settings.ts`，0.1.5 的 `installSection`/`settings.yaml` 与 0.1.7 的
+`SettingsForms`/Volatile 字段/`cordis.patch.yml`）、RPC codec 同时带 `schema` 与 `create`
+两种校验入口（`rpc-contract.ts` 的 `strict()`）、工具结果两种消息结构都接受（`openai-wire.ts`）、
+图标按新名找不到再退旧名（`src/client/icons.ts`）、设置卡片同时注册 `settings.plugin.item`
+（0.1.5）与 `plugins.bundle.config`（0.1.7）两个插槽。类型检查以 0.1.7 为准，0.1.5 靠
+`scripts/test-compat.mjs`（临时目录装 0.1.5 框架跑单测 + E2E，已纳入 `pnpm run release`
+门禁）兜底。全部测试 639 单测 + 36 假面板 E2E 全绿，0.1.5 矩阵 638 单测（1 条 volatile 专用用例跳过）
++ 36 E2E 全绿。两代真机冒烟已完成加载、卡片位置、保存连接落盘位置、监控页四项（tgz 安装），
+模型列表与对话两项因本机面板 token 失效待补测，见 `docs/manual-smoke.md`「双版本冒烟」。
+
 待办：
 - 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）
+- 双版本真机冒烟补测：模型列表与对话两项（需有效面板 token）
