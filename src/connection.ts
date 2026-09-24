@@ -51,7 +51,8 @@ export function connectionChanged(
 }
 
 const UNCONFIGURED_MESSAGE =
-  "尚未配置 llamapad 面板地址与 token。请在 设置 → 插件配置 → llamapad 模型面板 里填写。";
+  "尚未配置 llamapad 面板地址与 token。请在 llamapad 模型面板卡片里填写（侧栏「插件」→ llamapad-dsh-plugin，"
+  + "或旧版 dsh 的「设置 → 插件配置」）。";
 
 function unconfigured(): never {
   throw new PanelError(UNCONFIGURED_MESSAGE, "PANEL_UNREACHABLE", 0);

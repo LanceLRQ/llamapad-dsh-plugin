@@ -16,8 +16,11 @@ import type { RouteBlockReason } from "./routing";
 /** 配置 key → 用户可读名；解析不到时由调用方回落 key 本身。 */
 export type ModelNameResolver = (model: string) => string;
 
-/** 卡片就在设置页里，指路比让用户自己找面板 URL 更快 */
-const PANEL_PATH = "设置 → 插件配置 → llamapad 模型面板";
+/**
+ * 指路比让用户自己找面板 URL 更快。卡片位置两代不同：dsh 0.1.7 在侧栏「插件」页的
+ * llamapad-dsh-plugin 详情里，0.1.5 在「设置 → 插件配置」，文案两处都点到。
+ */
+const PANEL_PATH = "llamapad 模型面板卡片（侧栏「插件」→ llamapad-dsh-plugin，或旧版 dsh 的「设置 → 插件配置」）";
 
 const AUTO_SWITCH_HINT =
   "（想让选中的模型自动启动：把插件配置里的 chatBehavior 改成 auto-switch）";
