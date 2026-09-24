@@ -1078,3 +1078,17 @@ describe("PanelGateway", () => {
     });
   });
 });
+
+describe("RPC codec 同时满足 dsh 0.1.5 与 0.1.7 的校验", () => {
+  // 描述符形状见 src/rpc-contract.ts 的 Descriptor：result 本身就是 codec，参数的 codec 在 parameters[].codec
+  const codecs = RPC_CONTRIBUTION.descriptors.flatMap((d: any) => [d.result, ...d.parameters.map((p: any) => p.codec)]);
+
+  it("每个 strict codec 都有 schema.parse（0.1.5）和 create()（0.1.7），且是同一个 parse", () => {
+    expect(codecs.length).toBeGreaterThan(0);
+    for (const codec of codecs) {
+      expect(typeof codec.schema.parse).toBe("function");
+      expect(typeof codec.create).toBe("function");
+      expect(codec.create().parse).toBe(codec.schema.parse);
+    }
+  });
+});

@@ -243,15 +243,21 @@ export interface MonitorSnapshot {
  * 免得为了三个方法把整个 zod 打进浏览器产物。
  * ------------------------------------------------------------------ */
 
-/** dsh 的 TypertCodec 的 strict 分支，本地重述一份避免浏览器产物 import 运行时包。 */
+/**
+ * dsh 的 TypertCodec 的 strict 分支，本地重述一份，避免浏览器产物 import 运行时包。
+ * 两代宿主读的字段不同：0.1.5 校验并调用 schema.parse，0.1.7 校验并调用 create().parse。
+ * 两个字段都带上，指向同一个 parse。
+ */
 export interface StrictCodec<T> {
   readonly mode: "strict";
   readonly typeSymbol: string;
   readonly schema: { parse(value: unknown): T };
+  readonly create: () => { parse(value: unknown): T };
 }
 
 function strict<T>(typeSymbol: string, parse: (value: unknown) => T): StrictCodec<T> {
-  return { mode: "strict", typeSymbol, schema: { parse } };
+  const schema = { parse };
+  return { mode: "strict", typeSymbol, schema, create: () => schema };
 }
 
 function fail(field: string, expected: string): never {
