@@ -3,7 +3,7 @@
 #   pnpm dsh web --patch /绝对路径/llamapad-dsh-plugin/examples/dev.example.yml
 #
 # 安装版 dsh（npx/全局）的 --patch 不解析模块路径行，会静默忽略本文件——
-# 那种情况请用 profile 方式（README「本地调试」方式一）：
+# 那种情况请用 profile 方式（docs/guide/zh/development.md「本地调试」）：
 #   dsh plugin --profile web add /绝对路径/llamapad-dsh-plugin
 #   # 配置写 ~/.dsh/profiles/web/cordis.patch.yml（模板 examples/profile-patch.example.yml）
 #

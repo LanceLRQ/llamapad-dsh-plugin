@@ -1,7 +1,7 @@
 # 打包与发布（tgz 制品）
 
 > 面向维护者：插件内容变化后如何产出新版可安装制品，以及用户侧如何更新。
-> 安装侧的用户文档见 README「安装到 dsh」。
+> 安装侧的用户文档见 [安装与接入](guide/zh/installation.md)。
 
 ## 三个入口
 
@@ -124,7 +124,7 @@ pnpm run pack:dsh    # 无门禁、不升版本，直接 pnpm pack
 
 ⚠️ 实测坑：**同版本同文件名的 tgz 重新 `add` 到已装的 profile 不会刷新**——pnpm 按依赖
 spec 路径缓存，内容变了但路径没变就跳过重装。要刷新就换文件名（复制改名再 add），或改用
-本地目录方式（目录重 add 会刷新，见 README「本地调试（不发布版本）」）。
+本地目录方式（目录重 add 会刷新，见[开发与调试](guide/zh/development.md#本地调试)）。
 
 ## 本地调试（不发布版本）
 
@@ -132,7 +132,7 @@ spec 路径缓存，内容变了但路径没变就跳过重装。要刷新就换
 软链，每轮 `pnpm run build` + 重启 dsh 即生效）+ 用户层 `~/.dsh/profiles/web/cordis.patch.yml`。
 ⚠️ 安装版 dsh 的 `--patch` 不解析模块路径行（`./src/index.ts`、`./dist/index.js`、绝对路径均被
 静默忽略，实测确认）；路径直挂仅限从 dsh 源码仓库运行的场景（`examples/dev.example.yml`）。
-三种方式对比见 README「本地调试（不发布版本）」。
+几种方式的对比见[开发与调试](guide/zh/development.md#本地调试)。
 
 ## 用户侧如何更新到新版
 

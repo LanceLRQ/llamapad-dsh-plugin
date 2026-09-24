@@ -60,7 +60,7 @@
 - 等待切换期间 dsh 界面无进度提示（静默）——仅 `auto-switch` 档触发 start 时才会有等待；
   `strict`/`passthrough` 档不等待，不满足路由条件时直接报错（见上「步骤」5/6）。静默这一设计
   决策本身：注入文本会污染会话历史上下文，依据见
-  [调研文档](../research/2026-08-24-dsh-plugin-research.md) §5
+  [调研文档](research/2026-08-24-dsh-plugin-research.md) §5
 
 
 ## 真机冒烟结果（2026-08-27，dsh 0.1.1-rc.2 / llamapad v0.1.1-rc / 模型 qwen3-1p7b-q8）
@@ -88,7 +88,7 @@
 [设置卡片设计记录](design/settings-card-design.md)。
 
 **前置**：`pnpm run build`——**必须**执行，`package.json` 一旦声明 `dsh.client`，
-宿主找不到 `dist/client.js` 会让整个插件（连 A 形态一起）加载失败（见 README 文首提示）。
+宿主找不到 `dist/client.js` 会让整个插件（连 A 形态一起）加载失败（见[开发与调试](guide/zh/development.md#先构建再启动-dsh)）。
 
 **启动**：
 
