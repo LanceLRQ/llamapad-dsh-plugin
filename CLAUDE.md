@@ -182,9 +182,10 @@ peerDependencies，运行时统一用宿主那一份框架。六个兼容点：�
 （0.1.5）与 `plugins.bundle.config`（0.1.7）两个插槽。类型检查以 0.1.7 为准，0.1.5 靠
 `scripts/test-compat.mjs`（临时目录装 0.1.5 框架跑单测 + E2E，已纳入 `pnpm run release`
 门禁）兜底。全部测试 639 单测 + 36 假面板 E2E 全绿，0.1.5 矩阵 638 单测（1 条 volatile 专用用例跳过）
-+ 36 E2E 全绿。两代真机冒烟已完成加载、卡片位置、保存连接落盘位置、监控页四项（tgz 安装），
-模型列表与对话两项因本机面板 token 失效待补测，见 `docs/manual-smoke.md`「双版本冒烟」。
++ 36 E2E 全绿。两代真机冒烟全部通过（tgz 安装；0.1.5 的对话用干净 DSH_HOME + headless 验证），
+见 `docs/manual-smoke.md`「双版本冒烟」。冒烟中顺带修掉 `sharedModelGate` 永远绑定第一个 client、
+改 token 后启停仍用旧 token 报 401 的既有 bug（现改用最近一次传入的 client）。
 
 待办：
 - 打包发布：本轮改动尚未 `pnpm run release`（版本未递增、未出 tgz）
-- 双版本真机冒烟补测：模型列表与对话两项（需有效面板 token）
+- 卡片在模型加载未就绪期间显示「没有模型在运行」，待多模型面板真机冒烟时一并排查
