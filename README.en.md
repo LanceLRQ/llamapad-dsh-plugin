@@ -16,6 +16,14 @@ Once installed, the panel's models show up in dsh's model picker, and you can ch
 - GPU monitor page: throughput, VRAM, utilization, temperature, and other curves
 - Management tools: let the agent query, start, and stop local models itself, optionally gated behind human approval
 
+## Let an AI assistant install it
+
+If you use an AI assistant that can run commands, such as Claude Code or Cursor, send it the sentence below. It will ask you for the panel address and token, then download, install, and configure the plugin:
+
+```text
+Read https://raw.githubusercontent.com/LanceLRQ/llamapad-dsh-plugin/main/docs/guide/en/ai-install.md and follow its steps to install and configure llamapad-dsh-plugin for me.
+```
+
 ## Quick start
 
 You need: a reachable llamapad panel and its API token, and dsh already installed (version requirements in [Installation and setup](docs/guide/en/installation.md#version-requirements)).
@@ -47,6 +55,7 @@ The default `strict` mode only uses models that are already running. So before y
 
 | Doc | Content |
 |---|---|
+| [AI install guide](docs/guide/en/ai-install.md) | Step-by-step install instructions for an AI assistant to run; humans can follow them too |
 | [Installation and setup](docs/guide/en/installation.md) | Install, connection config, mounting the management tools, upgrading, version requirements |
 | [Configuration reference](docs/guide/en/configuration.md) | All config fields, reasoning effort, notes on custom images |
 | [Chat routing and model status](docs/guide/en/chat-routing.md) | The three `chatBehavior` modes, multiple models, picker markers, status refresh |
