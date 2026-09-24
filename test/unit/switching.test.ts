@@ -312,6 +312,16 @@ describe("sharedModelGate", () => {
     const gateB = sharedModelGate(fakeClient({ baseUrl: "http://shared-b2" }));
     expect(gateA).not.toBe(gateB);
   });
+
+  it("同一 baseUrl 换了 client（如设置卡片改了 token）→ 同一把门改用最新的 client", async () => {
+    const stale = fakeClient({ baseUrl: "http://shared-c" });
+    const fresh = fakeClient({ baseUrl: "http://shared-c" });
+    const gate = sharedModelGate(stale);
+    expect(sharedModelGate(fresh)).toBe(gate);
+    await gate.ensure("m1");
+    expect(fresh.starts).toEqual(["m1"]);
+    expect(stale.starts).toEqual([]);
+  });
 });
 
 // 测试内小工具

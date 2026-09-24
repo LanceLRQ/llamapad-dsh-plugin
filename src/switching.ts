@@ -85,11 +85,17 @@ async function otherRunningModels(client: PanelClient, model: string): Promise<s
 }
 
 export function createModelGate(client: PanelClient): ModelGate {
+  return gateOver(() => client);
+}
+
+/** 门的实现。client 每轮 ensure 现取：sharedModelGate 会在配置热更时换掉它（见下）。 */
+function gateOver(currentClient: () => PanelClient): ModelGate {
   let tail: Promise<void> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
   let last: string | null = null;
 
   async function ensureOnce(model: string, options: EnsureOptions): Promise<void> {
+    const client = currentClient();
     const status = await client.runtimeStatus();
     if (isRunning(status, model)) return;
     // signal 并进 startModel 的 options：取消手势要能掐断在途 POST 本身（排空等待
@@ -162,24 +168,28 @@ export function createModelGate(client: PanelClient): ModelGate {
   };
 }
 
-const sharedGates = new Map<string, ModelGate>();
+const sharedGates = new Map<string, { gate: ModelGate; client: PanelClient }>();
 
 /**
  * 门的包级单例：A 形态入口（provider）与 B 形态的 start 工具必须共用同一把锁，
  * 否则单模型运行时下会出现"一边起一边停"。按 client.baseUrl 分键——门保护的是
- * "某个面板的单模型运行时"这个物理资源，两个不同面板本就该是两把锁。
+ * "某个面板的运行时"这个物理资源，两个不同面板本就该是两把锁。
  *
- * 取舍：同一 baseUrl 下先到者胜。第一次调用传入的 client 决定这把门实际绑定的
- * 面板控制面语义（含该 client 构造期的 requestTimeoutMs 等设置），后续同 baseUrl
- * 的调用即便传入配置不同的 client（例如 A、B 两个入口各自的 startTimeoutMs /
- * pollIntervalMs 默认值不同），也复用第一次创建的 Gate 实例，不会重新绑定——
- * 门保护的是同一个物理资源，不应该因为谁先注册就开两把锁。
+ * 锁的身份按 baseUrl 共享，但门调用面板用的 client 是**最近一次传入的那个**：
+ * 面板地址不变、只改了 token（设置卡片保存连接）时，index.ts 会带着新 client 再调
+ * 一次这里。早先的实现是「同一 baseUrl 先到者胜」，门永远绑着第一个 client，结果
+ * 改 token 后列模型用新 token、启停却还拿旧 token 撞 401（2026-09-24 真机冒烟发现）。
+ * 代价是 A、B 两个入口各配一份不同的 requestTimeoutMs 时，以后调用的那份为准。
  */
 export function sharedModelGate(client: PanelClient): ModelGate {
   const key = client.baseUrl;
   const existing = sharedGates.get(key);
-  if (existing) return existing;
-  const gate = createModelGate(client);
-  sharedGates.set(key, gate);
-  return gate;
+  if (existing) {
+    existing.client = client;
+    return existing.gate;
+  }
+  const entry = { client, gate: undefined as unknown as ModelGate };
+  entry.gate = gateOver(() => entry.client);
+  sharedGates.set(key, entry);
+  return entry.gate;
 }
