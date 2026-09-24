@@ -217,7 +217,11 @@ export function Card({ api, t, view: ownerView }: CardProps) {
   // 相等性。单模型加载中的既有文案分支（下面 JSX 里的 loadingLabel 那支）仍直接判
   // `view.phase === "starting"`，不复用这个变量——那支判的是「要不要画哪种文案」，
   // 这里判的是「轮询/秒表要不要提速」，语义不同，没必要共用一个名字制造耦合假象。
-  const fastPoll = snapshot !== null && shouldFastPoll(snapshot);
+  // 本卡片自己的启停请求在途（pending）也算：面板在收到 start 的同一刻就把模型列进
+  // starting，但普通档轮询要几秒后才打下一枪，真机实测这几秒里卡片仍显示「当前没有
+  // 模型在运行」。pending 一出现 fastPoll 就翻成 true，下面的 effect 随之重建并立即
+  // 拉一次快照，之后按 2s 档跟进。
+  const fastPoll = pending !== null || (snapshot !== null && shouldFastPoll(snapshot));
 
   // 只在卡片挂载（可见）**且展开**期间轮询；effect 的清理函数负责在卸载/折叠时停表，
   // 不让它常驻在后台打面板。phase 跨过 starting 边界、或折叠态改变时才重建定时器——
