@@ -16,9 +16,9 @@
 - GPU 监控页：吞吐、显存、利用率、温度等曲线
 - 管理工具：让 Agent 自己查询、启停本地模型，可以要求先经过人工确认
 
-## 让 AI 帮你安装
+## 让 dsh 自己安装
 
-如果你在用 Claude Code、Cursor 这类能执行命令的 AI 助手，把下面这句话发给它就行。它会先问你面板地址和 token，然后完成下载、安装和配置：
+在 dsh 里新开一个会话，把下面这句话发给它。它会先问你面板地址和 token，然后自己完成下载、安装和配置，装好后重启 dsh 即可。其他能执行命令的 AI 助手也可以照这份说明来装：
 
 ```text
 请阅读 https://raw.githubusercontent.com/LanceLRQ/llamapad-dsh-plugin/main/docs/guide/zh/ai-install.md ，按里面的步骤帮我安装并配置 llamapad-dsh-plugin。
@@ -55,7 +55,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [AI 安装指引](docs/guide/zh/ai-install.md) | 给 AI 助手执行的分步安装说明，人也可以照着做 |
+| [AI 安装指引](docs/guide/zh/ai-install.md) | 给 dsh 执行的分步安装说明，人也可以照着做 |
 | [安装与接入](docs/guide/zh/installation.md) | 安装、连接配置、挂载管理工具、升级、版本要求 |
 | [配置参考](docs/guide/zh/configuration.md) | 全部配置项、思考强度、自定义镜像的注意事项 |
 | [聊天路由与模型状态](docs/guide/zh/chat-routing.md) | `chatBehavior` 三档、多模型、选择器标记、状态刷新 |

@@ -1,8 +1,8 @@
-# llamapad-dsh-plugin 安装指引（给 AI 助手）
+# llamapad-dsh-plugin 安装指引（给 dsh 执行）
 
 [English](../en/ai-install.md) · [返回 README](../../../README.md)
 
-这份文档写给帮用户操作电脑的 AI 助手，例如 Claude Code、Cursor、Codex 这类能执行终端命令的工具。用户把一句话交给你，你照下面的步骤把 llamapad-dsh-plugin 装进用户的 dsh，并配好 llamapad 面板的连接。
+这份文档写给 dsh（DeepSeek Harness）本身：用户在 dsh 的会话里把一句话交给你，你用终端工具照下面的步骤把 llamapad-dsh-plugin 装进用户的 dsh，并配好 llamapad 面板的连接。其他能执行终端命令的 AI 助手也可以照做。
 
 人类读者也可以照着手动做，效果一样。
 
@@ -153,6 +153,7 @@ dsh --profile <PROFILE> --dump-config | grep -n -A4 "id: llamapad"
 用两三句话说明：
 
 - 装好的插件版本、装进的 profile；
+- 需要重启 dsh 插件才会加载。如果你就是在这个 profile 里运行的 dsh，要提醒用户：退出当前的 dsh，再重新启动；
 - 启动方式：`dsh --profile <PROFILE>`，profile 是 `web` 时直接 `dsh web`；
 - 默认只使用面板上已经在运行的模型：先在 llamapad 面板里启动一个模型，再到 dsh 的模型选择器里选它；
 - 以后想改面板地址或 token，可以直接在 dsh 里的 llamapad 设置卡片里改。卡片在 dsh 0.1.7 侧栏的「插件」页里，在 0.1.5 的「设置 → 插件 → 插件配置」里。

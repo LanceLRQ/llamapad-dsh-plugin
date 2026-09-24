@@ -1,8 +1,8 @@
-# llamapad-dsh-plugin install guide (for AI assistants)
+# llamapad-dsh-plugin install guide (for dsh to run)
 
 [中文](../zh/ai-install.md) · [Back to README](../../../README.en.md)
 
-This guide is written for an AI assistant that can run terminal commands on the user's machine, such as Claude Code, Cursor, or Codex. The user hands you one sentence; you follow the steps below to install llamapad-dsh-plugin into their dsh and connect it to their llamapad panel.
+This guide is written for dsh (DeepSeek Harness) itself: the user hands you one sentence in a dsh session, and you use your terminal tool to follow the steps below, installing llamapad-dsh-plugin into the user's dsh and connecting it to their llamapad panel. Any other AI assistant that can run terminal commands can follow it too.
 
 A human can follow it by hand too, with the same result.
 
@@ -153,6 +153,7 @@ If it fails: no `id: llamapad` usually means you edited the wrong profile direct
 In two or three sentences, cover:
 
 - the installed plugin version and the profile it went into;
+- dsh must be restarted before the plugin loads. If you are the dsh running on this very profile, remind the user to quit the current dsh and start it again;
 - how to start it: `dsh --profile <PROFILE>`, or just `dsh web` when the profile is `web`;
 - by default the plugin only uses models already running on the panel: start a model in llamapad first, then pick it in dsh's model picker;
 - to change the panel address or token later, use the llamapad settings card inside dsh. On dsh 0.1.7 it's on the Plugins page in the sidebar; on 0.1.5 it's under Settings → Plugins → Plugin configuration.
