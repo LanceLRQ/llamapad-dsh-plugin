@@ -11,6 +11,24 @@ Before you start, get two things ready:
 
 ## Step 1: install the plugin
 
+### Desktop: install by pasting the address
+
+The dsh desktop app (0.2.0+) needs no commands:
+
+1. Open the "Plugins" page in the sidebar and click "Add plugin"
+2. Paste this repository address into the input:
+
+   ```text
+   https://github.com/LanceLRQ/llamapad-dsh-plugin
+   ```
+
+   The plugin is not published on npm, so a bare package name won't install — paste the full repository address
+3. Click "Install". Once it appears under "Installed", open the llamapad-dsh-plugin detail page and fill the panel URL and token right in the "llamapad Model Panel" card (see [step 2](#step-2-fill-in-connection-info)) — no manual config editing needed
+
+Installing from the address builds from source, the same mechanism as the `github:` install below; if prompted to allow build scripts, accept and retry. Note the desktop does **not** auto-update plugins (the UI says so too): to upgrade, uninstall first, then install again from the same address.
+
+### CLI: install from a tgz
+
 Installing from a tgz is the easiest path, no local build needed:
 
 ```bash

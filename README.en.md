@@ -28,6 +28,8 @@ Read https://raw.githubusercontent.com/LanceLRQ/llamapad-dsh-plugin/main/docs/gu
 
 You need: a reachable llamapad panel and its API token, and dsh already installed (version requirements in [Installation and setup](docs/guide/en/installation.md#version-requirements)).
 
+On the dsh desktop app it's even simpler: open "Plugins" → "Add plugin" and paste the repository address `https://github.com/LanceLRQ/llamapad-dsh-plugin` (see [Installation and setup](docs/guide/en/installation.md#desktop-install-by-pasting-the-address)). The CLI steps below work on every edition:
+
 1. Install the plugin:
 
    ```bash

@@ -28,6 +28,8 @@
 
 需要先准备：一个能访问的 llamapad 面板和它的 API token，以及已安装好的 dsh（版本要求见[安装与接入](docs/guide/zh/installation.md#版本要求)）。
 
+用 dsh 桌面版的话更简单：在「插件」页点「添加插件」，粘贴仓库地址 `https://github.com/LanceLRQ/llamapad-dsh-plugin` 安装即可，详见[安装与接入](docs/guide/zh/installation.md#桌面版粘贴地址安装)。下面的命令行方式适用于所有版本：
+
 1. 安装插件：
 
    ```bash
