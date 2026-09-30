@@ -18,7 +18,7 @@
 - 任何源码都不得运行时 import `@deepseek-ai/dsh-settings`，因为 0.1.5 和 0.1.7 都删掉了 `installSettingsSection`/`settingsNamespace`，ESM 链接阶段就会失败。
 - 两代宿主的差异一律用运行时特征检测处理，禁止读取或比较宿主版本号。
 - `LlamapadAdapterOptions`/`PanelGatewayOptions` 原地改写的约束保持不变（见 CLAUDE.md「关键约束」）：adapter 与 gateway 每次都现取 `this.options.*`。
-- 包管理器是 pnpm，所有网络命令先 `export HTTP_PROXY=http://10.22.33.1:20172 HTTPS_PROXY=http://10.22.33.1:20172 NO_PROXY=localhost,127.0.0.1`。这是 GPU 服务器的出口；在 Mac 开发机上改用 `http://127.0.0.1:20171`，两个都不通就不设代理直连。
+- 包管理器是 pnpm，所有网络命令先 `export HTTP_PROXY=<内网代理> HTTPS_PROXY=<内网代理> NO_PROXY=localhost,127.0.0.1`。这是 GPU 服务器的出口；在 Mac 开发机上改用 `http://127.0.0.1:20171`，两个都不通就不设代理直连。
 - 提交信息使用中文 Conventional Commits，一个任务一个提交。**提交前必须等主会话确认，subagent 不得自行 commit。**
 - TDD：先写失败测试，再实现。
 

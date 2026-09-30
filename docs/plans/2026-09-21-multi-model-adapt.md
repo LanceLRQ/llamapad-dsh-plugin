@@ -45,7 +45,7 @@ A** → 默认模型仍是 A → `probeReady` 比较 `running.model !== B` 恒�
 - TDD：先写失败测试 → 再实现 → 跑 `pnpm test` + `pnpm run typecheck`
 - 每个任务结束跑 `pnpm run typecheck`，类型错误不留到下一个任务
 - 提交由用户明确指示后才执行；`git add` 与 `git commit` 分两条命令
-- 代理：网络命令前 `export HTTP_PROXY=http://10.22.33.1:20172 HTTPS_PROXY=http://10.22.33.1:20172 NO_PROXY=localhost,127.0.0.1`
+- 代理：网络命令前 `export HTTP_PROXY=<内网代理> HTTPS_PROXY=<内网代理> NO_PROXY=localhost,127.0.0.1`
 
 ---
 

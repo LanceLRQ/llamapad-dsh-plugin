@@ -11,9 +11,9 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   `pnpm-lock.yaml` 入库，不要再生成 `package-lock.json`。`pnpm-workspace.yaml` 里
   `allowBuilds: {esbuild: false}` 是有意为之——esbuild 的 postinstall 只做平台二进制兜底，
   平台包走 optionalDependencies 已装好，声明它免得每次 install 刷 ERR_PNPM_IGNORED_BUILDS
-- **代理**：所有 pnpm/网络命令先
-  `export HTTP_PROXY=http://10.22.33.1:20172 HTTPS_PROXY=http://10.22.33.1:20172 NO_PROXY=localhost,127.0.0.1`
-  （GPU 服务器出口；旧记的 `127.0.0.1:20171` 是 Mac 开发机地址，在本机不存在）
+- **代理**：所有 pnpm/网络命令先 `export HTTP_PROXY=<内网代理> HTTPS_PROXY=<内网代理>
+  NO_PROXY=localhost,127.0.0.1`。代理地址属内网信息，**不写入仓库**（GPU 服务器出口一个、
+  Mac 开发机一个，问维护者要；本机 `~/.zcode` 项目记忆里也存了一份）
 - **测试**：`pnpm test`（单测）/ `pnpm run test:e2e`（假面板 E2E，无需真实环境）/ `pnpm run typecheck`；
   TDD——先写失败测试再实现
 - **打包发布**：内容变更后 `pnpm run release`（清洁检查→门禁→版本递增→构建→`pnpm pack` 出 tgz，
