@@ -58,7 +58,7 @@ jobs:
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$ARTIFACT"
           sha=$(cut -d' ' -f1 "$ARTIFACT.sha256")
           cat > notes.md <<EOF
-          支持 dsh \`>=0.1.5-rc.3 <0.1.8-0\`。
+          支持 dsh \`>=0.1.5-rc.3 <0.2.1-0\`。
 
           安装或升级（\`<profile>\` 换成你的 dsh profile 名，如 \`web\`）：
 

@@ -35,10 +35,12 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   （文档可能滞后）。2026-08-27 实测过钉精确版本落后于宿主的代价：`dsh-llm` 0.1.x 的运行时在
   派发路径上**无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有
   这个方法，每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护
-  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.1.8-0`，运行时用宿主那一份**；
-  devDependencies 钉 0.1.7 这一代用于类型检查；两代差异收在 `src/compat/settings.ts`、
-  `rpc-contract.ts` 的 `strict()`、`openai-wire.ts` 的工具结果判定、`src/client/icons.ts`、
-  `client/index.tsx` 的双插槽注册；新增宿主代时先跑 `pnpm run test:compat` 并扩展 peer 范围
+  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.2.1-0`（0.1.5/0.1.7/0.2.0
+  三代；宿主按 `includePrerelease` 语义校验，`0.2.0-rc.x` 与 `0.2.0` 都在范围内），运行时用
+  宿主那一份**；devDependencies 钉 0.2.0 这一代用于类型检查；两代差异收在
+  `src/compat/settings.ts`、`rpc-contract.ts` 的 `strict()`、`openai-wire.ts` 的工具结果判定、
+  `src/client/icons.ts`、`client/index.tsx` 的双插槽注册（0.2.0 对插件全部是加法变更，没有新增
+  兼容点）；新增宿主代时先跑 `pnpm run test:compat`（逐代 0.1.7 / 0.1.5 矩阵）并扩展 peer 范围
 - **模型状态刷新走 `status-watch.ts`**（2026-09-03 起吸收并替代已删除的 directory-refresh）：
   host 侧常驻 SSE（面板 `/api/v1/events/stream`）事件驱动，`model.*` 事件即时探测、运行中模型
   变化才 `ctx.emit("llm/adapters-updated")`；断流看门狗按节拍用 `getEvents({limit:1})` 核对水位，
@@ -197,3 +199,17 @@ requestTimeoutMs、排空 +10s 取最大值，只放宽不缩短），start 自�
 与工具默认档继续轮询就绪，卡片/`waitReady:false` 不报错。卡片显示「仍在启动中」（已进 runningModels
 的模型不重复显示）、手动刷新按钮、过期快照序号守卫，启停在途时立即拉快照并按 2s 轮询。老面板没有
 `starting` 时归一为空数组，行为不回归。真机结果见 `docs/manual-smoke.md`「启动中状态冒烟」
+
+**dsh 0.2.0 兼容已实施**（2026-09-30，调研归档在 `docs/research/2026-09-30-dsh-020-apis.md`）：
+0.2.0 对插件对接面全部是加法变更（`dsh-llm` 的 `toolUpdate`/`toolHistory`/`ACCOUNT_QUOTA`、
+`dsh-tools` 的 `displayReason`、api-gateway 的 `hasLiveClient` 等，均为可选字段；图标导出名、
+typert 协议/注册表、设置服务、attachment、system-prompt、ui-slots 六个包逐字节未变），源码零改动。
+唯一的硬阻断是插件管理器的 peer 兼容门禁（`dsh-app-boot` 的
+`semver.satisfies(runtime, range, { includePrerelease: true })`），peer 上限从 `<0.1.8-0` 扩到
+`<0.2.1-0` 即放行 `0.2.0-rc.x`/`0.2.0`。devDependencies 升到 0.2.0-rc.2 这一代做类型检查，
+`test:compat` 从单代 0.1.5 矩阵扩成逐代 0.1.7-rc.1 + 0.1.5-rc.3。注意 0.2.0 派发路径新增
+`projectToolUpdates` 投影（adapter 未声明 `toolUpdate` 时宿主先剥掉 developer 消息、剥掉工具的
+`deferLoading`），插件无需感知；`listModels` 语义收紧为「GUI 目录驱动的入口要求模型在目录里」，
+插件本就实现它。全部测试 690 单测 + 39 假面板 E2E 全绿（0.1.7 矩阵 690+39、0.1.5 矩阵 689+1
+跳过+39）；真机冒烟（dsh 0.2.0-rc.2 CLI）全部通过，见 `docs/manual-smoke.md`「dsh 0.2.0 冒烟」。
+发布为 v0.2.2（按用户要求走 patch，不升 minor）。

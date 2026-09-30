@@ -31,12 +31,12 @@ dsh --version
 node --version
 ```
 
-Expected: the `dsh` version is between `0.1.5-rc.3` and `0.1.7.x`, prereleases included (e.g. `0.1.7-rc.1`).
+Expected: the `dsh` version is between `0.1.5-rc.3` and `0.2.0.x`, prereleases included (e.g. `0.2.0-rc.2`).
 
 If it fails:
 
 - `dsh` isn't found: tell the user they need to install DeepSeek Harness first, e.g. `npm i -g @deepseek-ai/dsh`, then start over from step 1.
-- The version is below 0.1.5-rc.3 or above 0.1.7.x: stop and tell the user this dsh version is outside the plugin's supported range. Let them decide whether to upgrade or downgrade dsh, or wait for a plugin update. Don't force the install.
+- The version is below 0.1.5-rc.3 or above 0.2.0.x: stop and tell the user this dsh version is outside the plugin's supported range. Let them decide whether to upgrade or downgrade dsh, or wait for a plugin update. Don't force the install.
 
 ## Step 2: make sure the panel is reachable
 

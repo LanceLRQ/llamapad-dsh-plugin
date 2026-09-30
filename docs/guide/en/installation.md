@@ -104,9 +104,9 @@ One gotcha: re-`add`ing a tgz with the same version and filename does not refres
 
 ## Version requirements
 
-This package supports dsh 0.1.5-rc.3 through 0.1.7.x. The `@deepseek-ai/*` framework dependencies are declared as version ranges (peerDependencies), not exact versions, and at runtime the package always uses the copy the host ships.
+This package supports dsh 0.1.5-rc.3 through 0.2.0.x. The `@deepseek-ai/*` framework dependencies are declared as version ranges (peerDependencies), not exact versions, and at runtime the package always uses the copy the host ships.
 
-dsh 0.1.7 compares this range with its own version at install and startup time, and refuses to install with a clear message when it's out of range. dsh 0.1.5 has no such check, so forcing an install on an unsupported dsh only shows problems later, at load or chat time.
+dsh 0.1.7 and newer (including the 0.2.0 desktop app and CLI) compare this range with their own version at install and startup time — prereleases participate in the match — and refuse to install with a clear message when out of range. dsh 0.1.5 has no such check, so forcing an install on an unsupported dsh only shows problems later, at load or chat time.
 
 ## Upgrade note: default chat behavior is now strict
 
