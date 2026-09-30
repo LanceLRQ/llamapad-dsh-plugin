@@ -19,6 +19,12 @@ dsh plugin --profile <名> add ./llamapad-dsh-plugin-<版本>.tgz
 
 tgz 可以从 GitHub Release 下载，也可以在仓库里自己打（见[开发与调试](development.md)）。
 
+国内访问 GitHub 慢时可用镜像下载（与 GitHub Releases 字节一致，自带 `.sha256` 可校验，由 Cloudflare CDN 分发）：
+
+- 指定版本：`https://download.hutao.wiki/llamapad-dsh-plugin/releases/download/v<版本号>/llamapad-dsh-plugin-<版本号>.tgz`
+- 最新版便利路径：`https://download.hutao.wiki/llamapad-dsh-plugin/releases/latest/download/llamapad-dsh-plugin-<版本号>.tgz`
+
+
 也可以直接从 GitHub 或本地目录装：
 
 ```bash

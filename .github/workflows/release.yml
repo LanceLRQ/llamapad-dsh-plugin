@@ -67,6 +67,12 @@ jobs:
           dsh plugin --profile <profile> add ./$ARTIFACT
           \`\`\`
 
+          国内访问 GitHub 慢时，可从镜像下载（与上方 asset 字节一致，可用 sha256 校验，Cloudflare CDN 分发）：
+
+          \`\`\`bash
+          curl -LO https://download.hutao.wiki/llamapad-dsh-plugin/releases/download/$GITHUB_REF_NAME/$ARTIFACT
+          \`\`\`
+
           首次安装后按 [安装与接入](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/guide/zh/installation.md) 填写面板地址和 token。
 
           sha256: \`$sha\`

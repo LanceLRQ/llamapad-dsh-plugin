@@ -68,7 +68,7 @@ pwd; ls
 
 出错时：
 
-- `url` 是空的：多半是 GitHub API 被限流或网络不通。可以请用户在浏览器里打开 https://github.com/LanceLRQ/llamapad-dsh-plugin/releases/latest 手动下载 tgz，把文件路径告诉你。
+- `url` 是空的：多半是 GitHub API 被限流或网络不通。改用国内镜像再试一次：把两条 `curl` 的地址换成 `https://download.hutao.wiki/llamapad-dsh-plugin/releases/latest/download/llamapad-dsh-plugin-<最新版本号>.tgz`（`.sha256` 后缀同样有；最新版本号从镜像的 [version 页](https://github.com/LanceLRQ/llamapad-dsh-plugin/releases/latest)或用户处确认）。还不行就请用户在浏览器里打开 https://github.com/LanceLRQ/llamapad-dsh-plugin/releases/latest 手动下载 tgz，把文件路径告诉你。
 - 校验不是 `OK`：删掉文件重新下载一次，还不对就停下告诉用户。
 
 ## 第 4 步：安装到 dsh

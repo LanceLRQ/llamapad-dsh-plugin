@@ -19,6 +19,12 @@ dsh plugin --profile <profile> add ./llamapad-dsh-plugin-<version>.tgz
 
 The tgz can be downloaded from a GitHub Release, or built yourself in this repo (see [Development and debugging](development.md)).
 
+A mirror served over Cloudflare CDN is available (byte-identical to the GitHub Release asset, with a `.sha256` for verification):
+
+- Pinned version: `https://download.hutao.wiki/llamapad-dsh-plugin/releases/download/v<version>/llamapad-dsh-plugin-<version>.tgz`
+- Latest convenience path: `https://download.hutao.wiki/llamapad-dsh-plugin/releases/latest/download/llamapad-dsh-plugin-<version>.tgz`
+
+
 You can also install directly from GitHub or a local directory:
 
 ```bash
