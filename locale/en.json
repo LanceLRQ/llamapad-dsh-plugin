@@ -1,0 +1,5 @@
+{
+  "meta": {
+    "description": "DeepSeek Harness LLM adapter plugin backed by llamapad-managed llama.cpp containers"
+  }
+}

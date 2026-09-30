@@ -30,7 +30,7 @@ You need: a reachable llamapad panel and its API token, and dsh already installe
 
 On the dsh desktop app it's even simpler: open "Plugins" → "Add plugin" and paste the repository address `https://github.com/LanceLRQ/llamapad-dsh-plugin` (see [Installation and setup](docs/guide/en/installation.md#desktop-install-by-pasting-the-address)). The CLI steps below work on every edition:
 
-1. Install the plugin:
+1. Install the plugin: download `llamapad-dsh-plugin-<version>.tgz` from the [latest release](https://github.com/LanceLRQ/llamapad-dsh-plugin/releases/latest), or via the mirror `https://download.hutao.wiki/llamapad-dsh-plugin/releases/latest/download/llamapad-dsh-plugin-<version>.tgz` if GitHub is slow, then:
 
    ```bash
    dsh plugin --profile <profile> add ./llamapad-dsh-plugin-<version>.tgz

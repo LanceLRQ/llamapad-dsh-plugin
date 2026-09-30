@@ -30,7 +30,7 @@
 
 用 dsh 桌面版的话更简单：在「插件」页点「添加插件」，粘贴仓库地址 `https://github.com/LanceLRQ/llamapad-dsh-plugin` 安装即可，详见[安装与接入](docs/guide/zh/installation.md#桌面版粘贴地址安装)。下面的命令行方式适用于所有版本：
 
-1. 安装插件：
+1. 安装插件：到 [Releases 最新版](https://github.com/LanceLRQ/llamapad-dsh-plugin/releases/latest) 下载 `llamapad-dsh-plugin-<版本>.tgz`（国内下载慢可用镜像直链 `https://download.hutao.wiki/llamapad-dsh-plugin/releases/latest/download/llamapad-dsh-plugin-<版本>.tgz`），然后：
 
    ```bash
    dsh plugin --profile <名> add ./llamapad-dsh-plugin-<版本>.tgz

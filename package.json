@@ -4,15 +4,19 @@
   "license": "MIT",
   "type": "module",
   "description": "DeepSeek Harness LLM adapter plugin backed by llamapad-managed llama.cpp containers",
+  "icon": "assets/icon.png",
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
     "./tools": "./dist/tools.js",
     "./client": "./dist/client.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "assets",
+    "locale",
     "cordis.patch.yml",
     "examples",
     "!examples/dev.yml"

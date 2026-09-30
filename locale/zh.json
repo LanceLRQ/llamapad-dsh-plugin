@@ -1,0 +1,5 @@
+{
+  "meta": {
+    "description": "把 llamapad 面板管理的本地 llama.cpp 模型接入 dsh：直接对话、启停本地模型、GPU 监控。"
+  }
+}
