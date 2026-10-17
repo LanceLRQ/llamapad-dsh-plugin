@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 多版本测试矩阵：仓库默认对着最新一代（0.2.0）做类型检查和测试；本脚本把仓库复制到
+// 多版本测试矩阵：仓库默认对着最新一代（0.2.1）做类型检查和测试；本脚本把仓库复制到
 // 临时目录，devDependencies 里的框架包依次换成更早的世代，装好后跑单测和假面板 E2E。
 // 不跑 typecheck：类型以最新一代为准，老世代只验证运行时行为。
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -9,6 +9,11 @@ import { spawnSync } from 'node:child_process'
 
 // 按新到旧排列；dsh 是 @deepseek-ai/dsh-* 全系的版本，cordis/schemastery 是当代宿主的版本。
 const GENERATIONS = [
+  {
+    dsh: '0.2.0-rc.2',
+    '@deepseek-ai/cordis': '4.0.4',
+    '@deepseek-ai/schemastery': '3.18.4',
+  },
   {
     dsh: '0.1.7-rc.1',
     '@deepseek-ai/cordis': '4.0.4',
