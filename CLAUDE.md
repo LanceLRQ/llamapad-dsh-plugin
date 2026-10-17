@@ -35,12 +35,13 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   （文档可能滞后）。2026-08-27 实测过钉精确版本落后于宿主的代价：`dsh-llm` 0.1.x 的运行时在
   派发路径上**无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有
   这个方法，每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护
-  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.2.1-0`（0.1.5/0.1.7/0.2.0
-  三代；宿主按 `includePrerelease` 语义校验，`0.2.0-rc.x` 与 `0.2.0` 都在范围内），运行时用
-  宿主那一份**；devDependencies 钉 0.2.0 这一代用于类型检查；两代差异收在
+  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.2.2-0`（0.1.5/0.1.7/0.2.0/0.2.1
+  四代；宿主按 `includePrerelease` 语义校验，`0.2.x-rc.*` 与正式版都在范围内），运行时用
+  宿主那一份**；devDependencies 钉 0.2.1 这一代用于类型检查；两代差异收在
   `src/compat/settings.ts`、`rpc-contract.ts` 的 `strict()`、`openai-wire.ts` 的工具结果判定、
-  `src/client/icons.ts`、`client/index.tsx` 的双插槽注册（0.2.0 对插件全部是加法变更，没有新增
-  兼容点）；新增宿主代时先跑 `pnpm run test:compat`（逐代 0.1.7 / 0.1.5 矩阵）并扩展 peer 范围
+  `src/client/icons.ts`、`client/index.tsx` 的双插槽注册（0.2.0 与 0.2.1 对插件全部是加法变更，
+  没有新增兼容点）；新增宿主代时先跑 `pnpm run test:compat`（逐代 0.2.0 / 0.1.7 / 0.1.5 矩阵）
+  并扩展 peer 范围
 - **模型状态刷新走 `status-watch.ts`**（2026-09-03 起吸收并替代已删除的 directory-refresh）：
   host 侧常驻 SSE（面板 `/api/v1/events/stream`）事件驱动，`model.*` 事件即时探测、运行中模型
   变化才 `ctx.emit("llm/adapters-updated")`；断流看门狗按节拍用 `getEvents({limit:1})` 核对水位，
@@ -213,3 +214,15 @@ typert 协议/注册表、设置服务、attachment、system-prompt、ui-slots �
 插件本就实现它。全部测试 690 单测 + 39 假面板 E2E 全绿（0.1.7 矩阵 690+39、0.1.5 矩阵 689+1
 跳过+39）；真机冒烟（dsh 0.2.0-rc.2 CLI）全部通过，见 `docs/manual-smoke.md`「dsh 0.2.0 冒烟」。
 发布为 v0.2.2（按用户要求走 patch，不升 minor）。
+
+**dsh 0.2.1 兼容已实施**（2026-10-17，调研归档在 `docs/research/2026-10-17-dsh-021-apis.md`）：
+0.2.1 对插件对接面全部是加法变更或等价重构（`LlmAdapter` 逐字节未变；api-gateway 的 strict codec
+消费入口逐字节一致、参数校验放宽为静默丢弃未声明字段；typert-protocol/registry 的注册契约未变；
+图标/插槽/设置/attachment/system-prompt 均为加法），源码零改动。唯一硬阻断仍是插件管理器的
+peer 门禁，peer 上限从 `<0.2.1-0` 扩到 `<0.2.2-0` 即放行整条 0.2.1 线（rc.1 与 rc.2 的 lib 零差异，
+已核对）。门禁新增语义：插件可声明 `engines.dsh`（声明后 peers 被忽略）——本插件不声明。宿主代
+cordis/schemastery 钉 4.0.5/3.18.5（两包 lib 零功能差异）。devDependencies 升到 0.2.1-rc.1 这一代
+做类型检查，`test:compat` 扩成 0.2.0-rc.2 + 0.1.7-rc.1 + 0.1.5-rc.3 三代矩阵。全部测试 690 单测
++ 39 假面板 E2E 全绿（0.2.0/0.1.7 矩阵 690+39、0.1.5 矩阵 689+1 跳过+39）；真机冒烟（dsh
+0.2.1-rc.1 CLI）门禁双道放行、web 服务正常起，模型相关项因面板无显存未验（假面板 E2E 覆盖），
+见 `docs/manual-smoke.md`「dsh 0.2.1 冒烟」。发布为 v0.2.4（沿用 v0.2.2 的 patch 先例）。

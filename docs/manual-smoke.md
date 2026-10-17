@@ -421,6 +421,40 @@ App 升级自动刷新），插件 0.2.1 在其上仍可运行；待其框架升
 只有一行摘要）。把依赖行改成新 tgz 路径（或先 `pnpm remove` 旧条目）再 add 即可。
 
 
+## dsh 0.2.1 冒烟（2026-10-17，dsh 0.2.1-rc.1 CLI / 插件适配后构建）
+
+验证 0.2.1 兼容改造（调研见 `docs/research/2026-10-17-dsh-021-apis.md`）：0.2.1 对插件全部是
+加法变更/等价重构，源码零改动；本轮验证新 peer 范围能否通过 0.2.1 宿主的插件管理器兼容
+门禁（安装时 + 运行时两道），以及挂载链路在真实 0.2.1 宿主下不回归。
+
+环境：本机 Mac（面板经 `127.0.0.1:28960` 隧道可达但无显存余量）。做法：CLI
+`npm i -g @deepseek-ai/dsh@0.2.1-rc.1`，适配后工作区 `pnpm pack` 出 tgz（版本号仍 0.2.3，
+内容为新范围构建），独立 profile `smoke021` 走 `dsh plugin --profile smoke021 add` 真实
+peer 解析与兼容检查路径。
+
+| # | 检查项 | 结果 |
+|---|---|---|
+| 1 | tgz 安装通过 0.2.1 插件管理器的 peer 兼容检查（旧范围 `<0.2.1-0` 会在此被拒） | ✅ 正常装上（`missing peer` 警告与 0.1.7/0.2.0 时代相同，良性） |
+| 2 | 插件加载成功，无 `skipping profile bundle` / `Failed to load plugins`，日志无本插件报错 | ✅ 对照组：旧 v0.2.3（`<0.2.1-0`）在同一宿主上启动时被运行时门禁跳过并警告——证明门禁在真实工作，新范围放行不是形同虚设 |
+| 3 | `--dump-config` 组合树含 `# == llamapad-dsh-plugin` 层（patch 配置正确合入） | ✅ |
+| 4 | `dsh --profile smoke021` 起 web 服务，正常监听并响应 | ✅ 5 秒内监听，首页 401（token 鉴权，正常），启动日志干净 |
+| 5 | 模型选择器列出面板模型与标记 | ⏸ 未验证（面板无显存余量，未拉起模型；逻辑面由假面板 E2E 覆盖） |
+| 6 | 对话走通 | ⏸ 未验证（同上） |
+| 7 | strict 档拒绝语义 | ⏸ 未验证（同上，39 条假面板 E2E 已覆盖语义） |
+
+冒烟过程中摸清的两个事实，后续冒烟/调试会用到：
+
+- **`dsh plugin add` 初始化的新 profile 只带 `@deepseek-ai/dsh-base` bundle**，起 web 服务需
+  手动把 `@deepseek-ai/dsh-web-app` 加进 profile `package.json` 的 `dsh.profile.bundles`
+  （共享 `~/.dsh/profiles/node_modules` 里已有，无需另装），否则 `web` 启动静默挂起（无日志
+  无监听，主线程空等）。
+- **自定义 profile 起 web 的正确语法是 `dsh --profile <名> --no-open --port <端口>`**——
+  `web` 是 profile 名不是子命令，`dsh --profile X web` 会报 too many arguments；
+  `dsh web --profile X` 则与子命令内含的 profile 冲突。
+- 用户主 DSH_HOME 的 web profile 装的还是旧 v0.2.3，在 0.2.1-rc.1 宿主上会被跳过（见第 2
+  行对照组）；v0.2.4 发布后需对该 profile 重新 add 一次。
+
+
 ## 常见故障
 
 | 现象 | 可能原因（错误码） |
