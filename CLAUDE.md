@@ -35,12 +35,12 @@ llamapad-dsh-plugin：DeepSeek Harness（dsh）的 llamapad LLM 适配器插件�
   （文档可能滞后）。2026-08-27 实测过钉精确版本落后于宿主的代价：`dsh-llm` 0.1.x 的运行时在
   派发路径上**无条件** `await adapter.prepareCall(...)`，而 0.0.1-rc.1 的 `LlmAdapter` 基类没有
   这个方法，每次对话都在进入 `stream()` 前抛 `TypeError`。`test/unit/adapter.test.ts` 有守护
-  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.2.2-0`（0.1.5/0.1.7/0.2.0/0.2.1
-  四代；宿主按 `includePrerelease` 语义校验，`0.2.x-rc.*` 与正式版都在范围内），运行时用
-  宿主那一份**；devDependencies 钉 0.2.1 这一代用于类型检查；两代差异收在
+  测试；升级 dsh 后先跑它。**框架依赖是 peer 范围 `>=0.1.5-rc.3 <0.2.3-0`（0.1.5/0.1.7/0.2.0/0.2.1/0.2.2
+  五代；宿主按 `includePrerelease` 语义校验，各代 rc.* 与正式版都在范围内），运行时用
+  宿主那一份**；devDependencies 钉 0.2.2 这一代用于类型检查；两代差异收在
   `src/compat/settings.ts`、`rpc-contract.ts` 的 `strict()`、`openai-wire.ts` 的工具结果判定、
-  `src/client/icons.ts`、`client/index.tsx` 的双插槽注册（0.2.0 与 0.2.1 对插件全部是加法变更，
-  没有新增兼容点）；新增宿主代时先跑 `pnpm run test:compat`（逐代 0.2.0 / 0.1.7 / 0.1.5 矩阵）
+  `src/client/icons.ts`、`client/index.tsx` 的双插槽注册（0.2.0 至 0.2.2 对插件全部是加法变更，
+  没有新增兼容点）；新增宿主代时先跑 `pnpm run test:compat`（逐代 0.2.1 / 0.2.0 / 0.1.7 / 0.1.5 矩阵）
   并扩展 peer 范围
 - **模型状态刷新走 `status-watch.ts`**（2026-09-03 起吸收并替代已删除的 directory-refresh）：
   host 侧常驻 SSE（面板 `/api/v1/events/stream`）事件驱动，`model.*` 事件即时探测、运行中模型
